@@ -1,15 +1,17 @@
-import React, { useState } from 'react';
+﻿import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, StyleSheet, Pressable, ScrollView, Alert, Dimensions,
+  View, Text, StyleSheet, Pressable, ScrollView, Alert,
+  Dimensions, TextInput, ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import {
   PenTool, Image as ImageIcon, Camera, Palette, Eraser,
-  Save, Type, Reply, Heart, Clock, ImagePlus, Plus, Send
+  Save, Type, Heart, Clock, ImagePlus, Send,
 } from 'lucide-react-native';
+import { supabase } from '../../lib/supabase';
 
 const { width: SW } = Dimensions.get('window');
-
 const BG = '#0C0C0C';
 const CARD_BG = '#F7F7F5';
 const INK = '#111111';
@@ -19,28 +21,183 @@ const RED = '#EF233C';
 const BDR = '#2E2E2E';
 const GRAY = '#6B6B6B';
 
-const MOCK_SAVED = [
-  { id: '1', type: 'Dibujo', title: 'Corazón para Sofia', preview: 'heart', time: 'Hoy', icon: <PenTool size={12} color={W} /> },
-  { id: '2', type: 'Texto', title: 'Cosas que le gustan', preview: 'text', time: 'Ayer', icon: <Type size={12} color={W} /> },
-  { id: '3', type: 'Foto', title: 'Viaje a la playa', preview: 'photo', time: '12 de marzo', icon: <ImageIcon size={12} color={W} /> },
-  { id: '4', type: 'Foto + texto', title: 'Nuestro momento', preview: 'mixed', time: '5 de mayo', icon: <ImagePlus size={12} color={W} /> },
-];
+type DbNote = {
+  id: string;
+  couple_id: string;
+  created_by: string;
+  title: string;
+  content: string | null;
+  note_type: string;
+  image_url: string | null;
+  drawing_data: string | null;
+  is_shared: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+function fmtDate(iso: string): string {
+  try {
+    const d = new Date(iso);
+    const now = new Date();
+    const diffMs = now.getTime() - d.getTime();
+    const diffMin = Math.floor(diffMs / 60000);
+    if (diffMin < 1) return 'Ahora';
+    if (diffMin < 60) return `Hace ${diffMin} min`;
+    const diffH = Math.floor(diffMin / 60);
+    if (diffH < 24) return `Hace ${diffH}h`;
+    return d.toLocaleDateString('es', { day: 'numeric', month: 'short' });
+  } catch { return ''; }
+}
+
+function noteTypeLabel(type: string): string {
+  if (type === 'drawing') return 'Dibujo';
+  if (type === 'photo') return 'Foto';
+  if (type === 'mixed') return 'Foto + texto';
+  return 'Texto';
+}
 
 export default function NotesScreen() {
   const insets = useSafeAreaInsets();
-  const [activeTool, setActiveTool] = useState('Dibujar');
+  const router = useRouter();
+  const [activeTool, setActiveTool] = useState('Texto');
   const [activeFilter, setActiveFilter] = useState('Todos');
+  const [noteText, setNoteText] = useState('');
+
+  // Supabase state
+  const [userId, setUserId] = useState<string | null>(null);
+  const [coupleId, setCoupleId] = useState<string | null>(null);
+  const [notes, setNotes] = useState<DbNote[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
+
+  // ── Init: user + couple ──────────────────────────────────────
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const { data: { user }, error: userErr } = await supabase.auth.getUser();
+        if (userErr || !user) { router.replace('/(auth)/login'); return; }
+        if (!mounted) return;
+        setUserId(user.id);
+
+        const { data: coupleData, error: coupleErr } = await supabase.rpc('get_my_couple');
+        console.log('[Notas] get_my_couple:', JSON.stringify(coupleData), coupleErr?.message);
+        if (coupleErr) { setInitError('No se encontró la pareja'); setLoading(false); return; }
+        const row = Array.isArray(coupleData) ? coupleData[0] : coupleData;
+        const cid: string | undefined = row?.couple_id;
+        if (!cid) { router.replace('/partner-setup'); return; }
+        if (!mounted) return;
+        setCoupleId(cid);
+      } catch (e: any) {
+        console.log('[Notas] init error:', e);
+        if (mounted) setInitError('No se pudieron cargar las notas');
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  // ── Fetch notes ───────────────────────────────────────────────
+  const fetchNotes = useCallback(async (cid: string) => {
+    const { data, error } = await supabase
+      .from('notes')
+      .select('*')
+      .eq('couple_id', cid)
+      .order('created_at', { ascending: false });
+    console.log('[Notas] fetched', data?.length ?? 0, 'notes, error:', error?.message);
+    if (error) { setInitError('No se pudieron cargar las notas'); return; }
+    setNotes(data ?? []);
+  }, []);
+
+  useEffect(() => {
+    if (!coupleId) return;
+    fetchNotes(coupleId);
+  }, [coupleId, fetchNotes]);
+
+  // ── Realtime ─────────────────────────────────────────────────
+  useEffect(() => {
+    if (!coupleId) return;
+    const channel = supabase
+      .channel(`notes:${coupleId}`)
+      .on('postgres_changes', {
+        event: '*', schema: 'public', table: 'notes',
+        filter: `couple_id=eq.${coupleId}`,
+      }, (payload) => {
+        console.log('[Notas] realtime event:', payload.eventType);
+        if (payload.eventType === 'INSERT') {
+          const n = payload.new as DbNote;
+          setNotes(prev => prev.some(x => x.id === n.id) ? prev : [n, ...prev]);
+        } else if (payload.eventType === 'UPDATE') {
+          const n = payload.new as DbNote;
+          setNotes(prev => prev.map(x => x.id === n.id ? n : x));
+        }
+      })
+      .subscribe(s => console.log('[Notas] realtime:', s));
+    return () => { supabase.removeChannel(channel); };
+  }, [coupleId]);
+
+  // ── Save note ─────────────────────────────────────────────────
+  const handleSave = async () => {
+    const content = noteText.trim();
+    if (!content) { Alert.alert('Escribe algo primero'); return; }
+    if (!coupleId || !userId) return;
+    setSaving(true);
+    try {
+      const { error } = await supabase.from('notes').insert({
+        couple_id: coupleId,
+        created_by: userId,
+        title: 'Nota para Sofia',
+        content,
+        note_type: activeTool === 'Dibujar' ? 'drawing' : 'text',
+        is_shared: true,
+        drawing_data: null,
+        image_url: null,
+      });
+      console.log('[Notas] save error:', error?.message);
+      if (error) { Alert.alert('Error', 'No se pudo guardar la nota'); return; }
+      setNoteText('');
+      Alert.alert('Nota guardada');
+      await fetchNotes(coupleId);
+    } catch (e: any) {
+      console.log('[Notas] save exception:', e);
+      Alert.alert('Error', 'No se pudo guardar la nota');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const go = (msg: string) => Alert.alert(msg);
 
   const tools = [
-    { id: 'Texto', icon: <Type size={18} color={activeTool === 'Texto' ? W : INK} />, action: 'Modo texto' },
-    { id: 'Dibujar', icon: <PenTool size={18} color={activeTool === 'Dibujar' ? W : INK} />, action: 'Modo dibujo' },
-    { id: 'Foto', icon: <ImageIcon size={18} color={activeTool === 'Foto' ? W : INK} />, action: 'Subir foto disponible pronto' },
-    { id: 'Cámara', icon: <Camera size={18} color={activeTool === 'Cámara' ? W : INK} />, action: 'Cámara disponible pronto' },
-    { id: 'Color', icon: <Palette size={18} color={activeTool === 'Color' ? W : INK} />, action: 'Selector de color disponible pronto' },
-    { id: 'Borrador', icon: <Eraser size={18} color={activeTool === 'Borrador' ? W : INK} />, action: 'Borrador activado' },
+    { id: 'Texto',    icon: <Type size={18} color={activeTool === 'Texto' ? W : INK} />,    action: () => setActiveTool('Texto') },
+    { id: 'Dibujar', icon: <PenTool size={18} color={activeTool === 'Dibujar' ? W : INK} />, action: () => setActiveTool('Dibujar') },
+    { id: 'Foto',    icon: <ImageIcon size={18} color={INK} />,  action: () => go('Subir foto disponible pronto') },
+    { id: 'Cámara',  icon: <Camera size={18} color={INK} />,    action: () => go('Cámara disponible pronto') },
+    { id: 'Color',   icon: <Palette size={18} color={INK} />,   action: () => go('Selector de color disponible pronto') },
+    { id: 'Borrador',icon: <Eraser size={18} color={INK} />,    action: () => go('Borrador activado') },
   ];
+
+  // Derived data
+  const partnerNote = userId ? notes.find(n => n.created_by !== userId) ?? null : null;
+
+  const filteredNotes = notes.filter(n => {
+    if (activeFilter === 'Todos') return true;
+    if (activeFilter === 'Dibujos') return n.note_type === 'drawing';
+    if (activeFilter === 'Texto') return n.note_type === 'text';
+    if (activeFilter === 'Fotos') return n.note_type === 'photo';
+    if (activeFilter === 'Foto + texto') return n.note_type === 'mixed';
+    return true;
+  });
+
+  if (loading) {
+    return (
+      <View style={[s.root, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator size="large" color={RED} />
+      </View>
+    );
+  }
 
   return (
     <View style={[s.root, { paddingTop: insets.top }]}>
@@ -50,79 +207,86 @@ export default function NotesScreen() {
       >
         {/* ══════ HEADER ══════ */}
         <View style={s.header}>
-          <View>
-            <Text style={s.headerTitle}>Notas privadas</Text>
-            <Text style={s.headerSub}>Dibuja, escribe o comparte un recuerdo</Text>
-          </View>
+          <Text style={s.headerTitle}>Notas privadas</Text>
+          <Text style={s.headerSub}>Dibuja, escribe o comparte un recuerdo</Text>
         </View>
 
-        {/* ══════ PARTNER PREVIEW (Smaller) ══════ */}
+        {initError && <Text style={s.errorTxt}>{initError}</Text>}
+
+        {/* ══════ PARTNER NOTE PREVIEW ══════ */}
         <View style={s.partnerCard}>
           <View style={s.partnerTop}>
-            <Text style={s.partnerTitle}>De Sofia para ti</Text>
-            <View style={s.newBadge}><Text style={s.newBadgeTxt}>Nuevo</Text></View>
+            <Text style={s.partnerTitle}>De tu pareja para ti</Text>
+            {partnerNote && (
+              <View style={s.newBadge}><Text style={s.newBadgeTxt}>Nuevo</Text></View>
+            )}
           </View>
-          <View style={s.partnerRow}>
-            <View style={s.partnerMiniCanvas}>
-              <Heart size={20} color={RED} strokeWidth={1.5} opacity={0.6} />
-              <Text style={s.partnerMiniTxt}>Para ti...</Text>
-            </View>
-            <View style={s.partnerInfo}>
-              <Text style={s.partnerDesc}>Un dibujo compartido contigo.</Text>
-              <View style={s.partnerTimeWrap}>
-                <Clock size={10} color={'#9CA3AF'} />
-                <Text style={s.partnerTime}>Hace 10 min</Text>
+          {partnerNote ? (
+            <View style={s.partnerRow}>
+              <View style={s.partnerMiniCanvas}>
+                <Heart size={20} color={RED} strokeWidth={1.5} opacity={0.6} />
+                <Text style={s.partnerMiniTxt}>{noteTypeLabel(partnerNote.note_type)}</Text>
+              </View>
+              <View style={s.partnerInfo}>
+                <Text style={s.partnerDesc} numberOfLines={2}>
+                  {partnerNote.content ?? partnerNote.title}
+                </Text>
+                <View style={s.partnerTimeWrap}>
+                  <Clock size={10} color={'#9CA3AF'} />
+                  <Text style={s.partnerTime}>{fmtDate(partnerNote.created_at)}</Text>
+                </View>
               </View>
             </View>
-          </View>
+          ) : (
+            <Text style={s.partnerEmpty}>Tu pareja todavía no dejó una nota.</Text>
+          )}
         </View>
 
-        {/* ══════ MAIN CANVAS AREA (Dominant) ══════ */}
+        {/* ══════ CANVAS / EDITOR ══════ */}
         <View style={s.canvasSection}>
           <Text style={s.sectionTitle}>Tu lienzo</Text>
-          <Text style={s.sectionSub}>Dibuja, escribe o agrega una foto para Sofia</Text>
-          
-          <Pressable style={s.largeCanvas} onPress={() => go('Editor disponible pronto')}>
-            
-            {/* Paper grid/lines */}
+          <Text style={s.sectionSub}>Dibuja, escribe o agrega una foto para tu pareja</Text>
+
+          <View style={s.largeCanvas}>
+            {/* Paper lines */}
             <View style={s.paperGrid}>
-              {[1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(i => (
-                <View key={i} style={[s.paperLine, { top: i * 40 }]} />
+              {[1,2,3,4,5,6,7].map(i => (
+                <View key={i} style={[s.paperLine, { top: i * 48 }]} />
               ))}
             </View>
-
-            {/* Corner Badges */}
             <View style={s.badgeTL}><Text style={s.badgeTxt}>Lienzo</Text></View>
-            <View style={s.badgeTR}><Text style={s.badgeTxt}>Borrador</Text></View>
+            <View style={s.badgeTR}><Text style={s.badgeTxt}>{activeTool}</Text></View>
 
-            {/* Content */}
-            <Text style={s.canvasPlaceholder}>Toca para dibujar o escribir...</Text>
-            
-            {/* Mock drawing elements */}
-            <View style={s.mockDrawingGroup}>
-              <Heart size={44} color={RED} strokeWidth={1} opacity={0.4} style={{transform: [{rotate: '-10deg'}]}} />
-              <View style={s.pencilStroke} />
-              <Text style={s.mockText}>Para ti</Text>
-            </View>
+            {/* Text input inside canvas */}
+            <TextInput
+              style={s.canvasInput}
+              placeholder="Toca para escribir..."
+              placeholderTextColor="#C9C9C9"
+              value={noteText}
+              onChangeText={setNoteText}
+              multiline
+              maxLength={800}
+              editable={!saving}
+            />
 
-            {/* Floating Mini Buttons inside canvas */}
+            {/* Mini tool icons */}
             <View style={s.miniToolsGroup}>
               <View style={s.miniTool}><PenTool size={14} color={GRAY} /></View>
               <View style={s.miniTool}><Type size={14} color={GRAY} /></View>
               <View style={s.miniTool}><Camera size={14} color={GRAY} /></View>
             </View>
-          </Pressable>
+          </View>
 
-          {/* ══════ TOOLBAR (Directly under canvas) ══════ */}
+          {/* Toolbar */}
           <View style={s.toolbar}>
             <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.toolbarScroll}>
               {tools.map(t => {
                 const isActive = activeTool === t.id;
                 return (
-                  <Pressable 
-                    key={t.id} 
+                  <Pressable
+                    key={t.id}
                     style={[s.toolPill, isActive && s.toolPillActive]}
-                    onPress={() => { setActiveTool(t.id); go(t.action); }}
+                    onPress={t.action}
                   >
                     {t.icon}
                     <Text style={[s.toolLbl, isActive && s.toolLblActive]}>{t.id}</Text>
@@ -132,37 +296,30 @@ export default function NotesScreen() {
             </ScrollView>
           </View>
 
-          {/* ══════ SAVE / SEND ACTIONS ══════ */}
+          {/* Save / Send */}
           <View style={s.actionRow}>
-            <Pressable style={s.btnPrimary} onPress={() => go('Nota guardada')}>
-              <Save size={16} color={W} />
+            <Pressable
+              style={[s.btnPrimary, saving && { opacity: 0.6 }]}
+              onPress={handleSave}
+              disabled={saving}
+            >
+              {saving
+                ? <ActivityIndicator size="small" color={W} />
+                : <Save size={16} color={W} />}
               <Text style={s.btnPrimaryTxt}>Guardar</Text>
             </Pressable>
-            <Pressable style={s.btnSecondary} onPress={() => go('Enviado a Sofia')}>
+            <Pressable style={s.btnSecondary} onPress={() => go('Enviado a tu pareja')}>
               <Send size={16} color={INK} />
-              <Text style={s.btnSecondaryTxt}>Enviar a Sofia</Text>
+              <Text style={s.btnSecondaryTxt}>Enviar</Text>
             </Pressable>
           </View>
         </View>
 
-        {/* ══════ PHOTO + TEXT PREVIEW ══════ */}
-        <View style={s.featureCard}>
-          <View style={s.featureContent}>
-            <Text style={s.featureTitle}>Foto con texto</Text>
-            <Text style={s.featureDesc}>Agrega una foto y escribe encima.</Text>
-          </View>
-          <View style={s.featurePreview}>
-            <ImageIcon size={20} color={'rgba(255,255,255,0.4)'} />
-            <Text style={s.featurePreviewTxt}>Nuestro momento</Text>
-          </View>
-        </View>
-
-        {/* ══════ SAVED NOTES LIBRARY ══════ */}
+        {/* ══════ SAVED NOTES ══════ */}
         <Text style={[s.sectionTitle, { marginTop: 28 }]}>Notas guardadas</Text>
-        
-        {/* Filter Chips */}
+
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
-          {['Todos', 'Dibujos', 'Texto', 'Fotos', 'Foto + texto'].map((chip) => {
+          {['Todos', 'Dibujos', 'Texto', 'Fotos', 'Foto + texto'].map(chip => {
             const isActive = activeFilter === chip;
             return (
               <Pressable
@@ -176,29 +333,31 @@ export default function NotesScreen() {
           })}
         </ScrollView>
 
-        {/* Saved Grid */}
         <View style={s.savedGrid}>
-          {MOCK_SAVED.map((item) => (
-            <Pressable key={item.id} style={s.savedItem} onPress={() => go('Nota abierta')}>
-              <View style={s.savedVisual}>
-                {item.preview === 'heart' && <Heart size={32} color={RED} opacity={0.5} />}
-                {item.preview === 'text' && <Text style={s.savedMockTxt}>Flores, cartas y detalles pequeños...</Text>}
-                {item.preview === 'photo' && <ImageIcon size={28} color={'#D1D5DB'} />}
-                {item.preview === 'mixed' && (
-                  <>
-                    <View style={s.savedMixedBg} />
-                    <Text style={s.savedMixedTxt}>Nuestro momento</Text>
-                  </>
-                )}
-                <View style={s.savedTypeBadge}>
-                  {item.icon}
-                  <Text style={s.savedTypeBadgeTxt}>{item.type}</Text>
-                </View>
-              </View>
-              <Text style={s.savedTitle} numberOfLines={1}>{item.title}</Text>
-              <Text style={s.savedDate}>{item.time}</Text>
-            </Pressable>
-          ))}
+          {filteredNotes.length === 0 ? (
+            <Text style={s.emptyTxt}>No hay notas todavía.</Text>
+          ) : (
+            filteredNotes.map(note => {
+              const isMine = note.created_by === userId;
+              return (
+                <Pressable key={note.id} style={s.savedItem} onPress={() => go('Nota abierta')}>
+                  <View style={s.savedVisual}>
+                    {note.note_type === 'drawing'
+                      ? <Heart size={32} color={RED} opacity={0.5} />
+                      : note.note_type === 'photo' || note.note_type === 'mixed'
+                        ? <ImageIcon size={28} color={'#D1D5DB'} />
+                        : <Text style={s.savedMockTxt} numberOfLines={4}>{note.content}</Text>
+                    }
+                    <View style={s.savedTypeBadge}>
+                      <Text style={s.savedTypeBadgeTxt}>{noteTypeLabel(note.note_type)}</Text>
+                    </View>
+                  </View>
+                  <Text style={s.savedTitle} numberOfLines={1}>{note.title}</Text>
+                  <Text style={s.savedDate}>{isMine ? 'De mí' : 'De tu pareja'} · {fmtDate(note.created_at)}</Text>
+                </Pressable>
+              );
+            })
+          )}
         </View>
 
       </ScrollView>
@@ -209,8 +368,9 @@ export default function NotesScreen() {
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: BG },
   scrollContent: { paddingHorizontal: 20, paddingTop: 16 },
+  errorTxt: { color: RED, fontSize: 13, marginBottom: 12 },
+  emptyTxt: { color: MUTED, fontSize: 14, fontStyle: 'italic', paddingVertical: 20, width: '100%' },
 
-  // Header
   header: { marginBottom: 20 },
   headerTitle: { fontSize: 28, fontWeight: '800', color: W, letterSpacing: 0 },
   headerSub: { fontSize: 13, color: MUTED, marginTop: 4, letterSpacing: 0 },
@@ -218,11 +378,10 @@ const s = StyleSheet.create({
   sectionTitle: { fontSize: 18, fontWeight: '700', color: W, letterSpacing: 0 },
   sectionSub: { fontSize: 13, color: MUTED, marginTop: 2, marginBottom: 12, letterSpacing: 0 },
 
-  // Partner Card (Smaller)
   partnerCard: { backgroundColor: '#1C1C1E', borderRadius: 16, padding: 14, marginBottom: 24, borderWidth: 1, borderColor: BDR },
   partnerTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
-  partnerTitle: { fontSize: 14, fontWeight: '700', color: W, letterSpacing: 0 },
-  newBadge: { backgroundColor: 'rgba(239, 35, 60, 0.15)', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
+  partnerTitle: { fontSize: 14, fontWeight: '700', color: W },
+  newBadge: { backgroundColor: 'rgba(239,35,60,0.15)', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
   newBadgeTxt: { color: RED, fontSize: 10, fontWeight: '800' },
   partnerRow: { flexDirection: 'row', alignItems: 'center', gap: 12 },
   partnerMiniCanvas: { width: 80, height: 60, backgroundColor: CARD_BG, borderRadius: 10, justifyContent: 'center', alignItems: 'center' },
@@ -231,27 +390,19 @@ const s = StyleSheet.create({
   partnerDesc: { fontSize: 12, color: MUTED, marginBottom: 6 },
   partnerTimeWrap: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   partnerTime: { fontSize: 10, color: '#9CA3AF' },
+  partnerEmpty: { fontSize: 13, color: MUTED, fontStyle: 'italic' },
 
-  // Main Canvas Section
   canvasSection: { marginBottom: 28 },
-  largeCanvas: { height: 500, backgroundColor: CARD_BG, borderRadius: 20, position: 'relative', overflow: 'hidden', borderWidth: 1, borderColor: '#E5E7EB' },
+  largeCanvas: { height: 420, backgroundColor: CARD_BG, borderRadius: 20, position: 'relative', overflow: 'hidden', borderWidth: 1, borderColor: '#E5E7EB' },
   paperGrid: { ...StyleSheet.absoluteFillObject },
-  paperLine: { position: 'absolute', left: 20, right: 20, height: 1, backgroundColor: 'rgba(0,0,0,0.03)' },
-  
+  paperLine: { position: 'absolute', left: 20, right: 20, height: 1, backgroundColor: 'rgba(0,0,0,0.035)' },
   badgeTL: { position: 'absolute', top: 12, left: 12, backgroundColor: '#E5E7EB', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
   badgeTR: { position: 'absolute', top: 12, right: 12, backgroundColor: '#E5E7EB', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
   badgeTxt: { fontSize: 10, fontWeight: '700', color: GRAY, textTransform: 'uppercase' },
-
-  canvasPlaceholder: { position: 'absolute', top: 44, left: 20, fontSize: 16, color: '#D1D5DB', fontWeight: '500' },
-  
-  mockDrawingGroup: { position: 'absolute', top: 120, left: 60, alignItems: 'center' },
-  pencilStroke: { width: 60, height: 2, backgroundColor: INK, opacity: 0.2, marginTop: 8, borderRadius: 1, transform: [{rotate: '5deg'}] },
-  mockText: { fontSize: 24, color: INK, fontStyle: 'italic', fontWeight: '600', marginTop: 12, transform: [{rotate: '-2deg'}] },
-
+  canvasInput: { position: 'absolute', top: 44, left: 16, right: 16, bottom: 60, fontSize: 16, color: INK, lineHeight: 26, textAlignVertical: 'top' },
   miniToolsGroup: { position: 'absolute', bottom: 16, right: 16, flexDirection: 'row', gap: 8 },
   miniTool: { width: 36, height: 36, backgroundColor: W, borderRadius: 18, justifyContent: 'center', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 3, elevation: 2 },
 
-  // Toolbar
   toolbar: { marginTop: 16 },
   toolbarScroll: { gap: 8 },
   toolPill: { flexDirection: 'row', alignItems: 'center', backgroundColor: CARD_BG, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 20, gap: 8 },
@@ -259,22 +410,12 @@ const s = StyleSheet.create({
   toolLbl: { fontSize: 13, fontWeight: '600', color: INK },
   toolLblActive: { color: W },
 
-  // Actions
   actionRow: { flexDirection: 'row', gap: 12, marginTop: 16 },
   btnPrimary: { flex: 1, flexDirection: 'row', backgroundColor: RED, paddingVertical: 14, borderRadius: 14, justifyContent: 'center', alignItems: 'center', gap: 8 },
   btnPrimaryTxt: { color: W, fontSize: 14, fontWeight: '700' },
   btnSecondary: { flex: 1, flexDirection: 'row', backgroundColor: CARD_BG, paddingVertical: 14, borderRadius: 14, justifyContent: 'center', alignItems: 'center', gap: 8 },
   btnSecondaryTxt: { color: INK, fontSize: 14, fontWeight: '700' },
 
-  // Feature Card
-  featureCard: { backgroundColor: '#1C1C1E', borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 16, borderWidth: 1, borderColor: BDR },
-  featureContent: { flex: 1 },
-  featureTitle: { fontSize: 14, fontWeight: '700', color: W, marginBottom: 4 },
-  featureDesc: { fontSize: 12, color: MUTED, lineHeight: 16 },
-  featurePreview: { width: 70, height: 70, borderRadius: 10, backgroundColor: '#27272A', justifyContent: 'center', alignItems: 'center', position: 'relative', overflow: 'hidden' },
-  featurePreviewTxt: { position: 'absolute', bottom: 8, color: W, fontSize: 8, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.8)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 },
-
-  // Chips
   chipRow: { gap: 10, marginBottom: 16, marginTop: 12 },
   chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1 },
   chipActive: { backgroundColor: RED, borderColor: RED },
@@ -283,15 +424,12 @@ const s = StyleSheet.create({
   chipTxtActive: { color: W },
   chipTxtInactive: { color: MUTED },
 
-  // Saved Grid
   savedGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
   savedItem: { width: (SW - 52) / 2, marginBottom: 8 },
   savedVisual: { height: 120, backgroundColor: CARD_BG, borderRadius: 16, marginBottom: 8, position: 'relative', justifyContent: 'center', alignItems: 'center', overflow: 'hidden' },
-  savedTypeBadge: { position: 'absolute', top: 8, left: 8, flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 6, paddingVertical: 4, borderRadius: 8, gap: 4 },
+  savedTypeBadge: { position: 'absolute', top: 8, left: 8, backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 6, paddingVertical: 4, borderRadius: 8 },
   savedTypeBadgeTxt: { fontSize: 9, color: W, fontWeight: '700' },
-  savedMockTxt: { fontSize: 10, color: GRAY, padding: 16, textAlign: 'center', fontStyle: 'italic' },
-  savedMixedBg: { ...StyleSheet.absoluteFillObject, backgroundColor: '#D1D5DB' },
-  savedMixedTxt: { color: W, fontSize: 12, fontWeight: '800', textShadowColor: 'rgba(0,0,0,0.6)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
-  savedTitle: { fontSize: 13, fontWeight: '700', color: W, letterSpacing: 0, marginBottom: 2 },
+  savedMockTxt: { fontSize: 11, color: GRAY, padding: 12, textAlign: 'center' },
+  savedTitle: { fontSize: 13, fontWeight: '700', color: W, marginBottom: 2 },
   savedDate: { fontSize: 11, color: MUTED },
 });
