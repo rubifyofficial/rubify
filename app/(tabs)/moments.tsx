@@ -1,7 +1,12 @@
-import React from 'react';
-import { ScrollView, StyleSheet, Text, View, TouchableOpacity, Dimensions, ImageBackground, Alert, Image } from 'react-native';
+﻿import React, { useState, useEffect, useCallback } from 'react';
+import { 
+  ScrollView, StyleSheet, Text, View, TouchableOpacity, 
+  Dimensions, ImageBackground, Alert, Image, ActivityIndicator 
+} from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 import { Heart, MessageCircle, Bookmark, Plus, Video, Image as ImageIcon } from 'lucide-react-native';
+import { supabase } from '../../lib/supabase';
 
 const { width, height } = Dimensions.get('window');
 
@@ -11,12 +16,154 @@ const TEXT_CREAM = '#FFFFFF'; // pure white
 const TEXT_MUTED = '#A1A1AA'; // zinc 400 neutral gray
 const ACCENT_RED = '#EF233C'; // romantic red
 
+type DbMoment = {
+  id: string;
+  couple_id: string;
+  created_by: string;
+  title: string;
+  description: string | null;
+  media_url: string | null;
+  media_type: string;
+  memory_date: string;
+  created_at: string;
+};
+
+function fmtMomentDate(iso: string): string {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString('es', { day: 'numeric', month: 'long' });
+  } catch {
+    return '';
+  }
+}
+
 export default function MomentsScreen() {
   const insets = useSafeAreaInsets();
+  const router = useRouter();
+
+  // State
+  const [userId, setUserId] = useState<string | null>(null);
+  const [coupleId, setCoupleId] = useState<string | null>(null);
+  const [moments, setMoments] = useState<DbMoment[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // 1. Load user + couple_id
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const { data: { user }, error: userErr } = await supabase.auth.getUser();
+        if (userErr || !user) {
+          router.replace('/(auth)/login');
+          return;
+        }
+        if (!mounted) return;
+        setUserId(user.id);
+
+        const { data: coupleData, error: coupleErr } = await supabase.rpc('get_my_couple');
+        if (coupleErr) {
+          console.log('[Momentos] couple error:', coupleErr.message);
+          setError('No se encontró la pareja');
+          setLoading(false);
+          return;
+        }
+        const row = Array.isArray(coupleData) ? coupleData[0] : coupleData;
+        const cid = row?.couple_id;
+        if (!cid) {
+          router.replace('/partner-setup');
+          return;
+        }
+        if (!mounted) return;
+        setCoupleId(cid);
+      } catch (e: any) {
+        console.log('[Momentos] init error:', e);
+        if (mounted) setError('No se pudieron cargar los recuerdos');
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, []);
+
+  // 2. Fetch moments
+  const fetchMoments = useCallback(async (cid: string) => {
+    const { data, error: fetchErr } = await supabase
+      .from('moments')
+      .select('*')
+      .eq('couple_id', cid)
+      .order('created_at', { ascending: false });
+    
+    if (fetchErr) {
+      console.log('[Momentos] fetch error:', fetchErr.message);
+      setError('No se pudieron cargar los recuerdos');
+      return;
+    }
+    setMoments(data ?? []);
+  }, []);
+
+  useEffect(() => {
+    if (coupleId) fetchMoments(coupleId);
+  }, [coupleId, fetchMoments]);
+
+  // 3. Realtime subscription
+  useEffect(() => {
+    if (!coupleId) return;
+    const channel = supabase
+      .channel(`moments:${coupleId}`)
+      .on('postgres_changes', {
+        event: 'INSERT', schema: 'public', table: 'moments',
+        filter: `couple_id=eq.${coupleId}`,
+      }, (payload) => {
+        const n = payload.new as DbMoment;
+        setMoments(prev => prev.some(m => m.id === n.id) ? prev : [n, ...prev]);
+      })
+      .subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [coupleId]);
+
+  // 4. Create moment (mock insert)
+  const handleCreateMoment = async () => {
+    if (!coupleId || !userId || saving) return;
+    setSaving(true);
+    try {
+      const { error: insertErr } = await supabase.from('moments').insert({
+        couple_id: coupleId,
+        created_by: userId,
+        title: "Nuevo recuerdo",
+        description: "Un momento especial para guardar.",
+        media_type: "photo",
+        media_url: null,
+        memory_date: new Date().toISOString().slice(0, 10)
+      });
+
+      if (insertErr) {
+        console.log('[Momentos] insert error:', insertErr.message);
+        Alert.alert('Error', 'No se pudo guardar el recuerdo');
+      } else {
+        Alert.alert('Listo', 'Recuerdo guardado');
+        await fetchMoments(coupleId);
+      }
+    } catch (e: any) {
+      console.log('[Momentos] insert exception:', e);
+      Alert.alert('Error', 'Ocurrió un error inesperado');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const handleAlert = (title: string, message: string) => {
     Alert.alert(title, message);
   };
+
+  if (loading) {
+    return (
+      <View style={[styles.container, styles.centered]}>
+        <ActivityIndicator size="large" color={ACCENT_RED} />
+      </View>
+    );
+  }
 
   return (
     <View style={[styles.container, { backgroundColor: BG_COLOR }]}>
@@ -31,76 +178,50 @@ export default function MomentsScreen() {
           <Text style={styles.headerSubtitle}>Recuerdos en movimiento</Text>
           
           <TouchableOpacity 
-            style={styles.addButton}
-            onPress={() => handleAlert("Función disponible pronto", "Podrás subir tus propios recuerdos pronto.")}
+            style={[styles.addButton, saving && { opacity: 0.6 }]}
+            onPress={handleCreateMoment}
+            disabled={saving}
           >
-            <Plus size={16} color="#FFFFFF" />
+            {saving ? <ActivityIndicator size="small" color="#FFF" /> : <Plus size={16} color="#FFFFFF" />}
             <Text style={styles.addButtonText}>Agregar recuerdo</Text>
           </TouchableOpacity>
         </View>
 
+        {error && (
+          <View style={styles.errorBox}>
+            <Text style={styles.errorText}>{error}</Text>
+          </View>
+        )}
+
+        {/* Empty State */}
+        {!error && moments.length === 0 && (
+          <View style={styles.emptyContainer}>
+            <Text style={styles.emptyText}>No hay recuerdos todavía.</Text>
+          </View>
+        )}
+
         {/* Reels Feed */}
-        <ReelCard 
-          title="Nuestro primer viaje"
-          date="12 de marzo"
-          description="Un día que nunca vamos a olvidar."
-          type="Video"
-          imageUrl="https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=800"
-          onHeart={() => handleAlert("Recuerdo guardado", "Has guardado este recuerdo en tus favoritos.")}
-          onComment={() => handleAlert("Comentarios disponibles pronto", "La función de comentarios se habilitará próximamente.")}
-          onSave={() => handleAlert("Guardado", "Recuerdo guardado en tu colección privada.")}
-        />
-
-        <ReelCard 
-          title="Cena especial"
-          date="20 de abril"
-          description="Una noche tranquila, solo nosotros dos."
-          type="Foto"
-          imageUrl="https://images.unsplash.com/photo-1544025162-811114cd354c?w=800"
-          onHeart={() => handleAlert("Recuerdo guardado", "Has guardado este recuerdo en tus favoritos.")}
-          onComment={() => handleAlert("Comentarios disponibles pronto", "La función de comentarios se habilitará próximamente.")}
-          onSave={() => handleAlert("Guardado", "Recuerdo guardado en tu colección privada.")}
-        />
-
-        <ReelCard 
-          title="Una tarde juntos"
-          date="5 de mayo"
-          description="Café, risas y una caminata sin prisa."
-          type="Video"
-          imageUrl="https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?w=800"
-          onHeart={() => handleAlert("Recuerdo guardado", "Has guardado este recuerdo en tus favoritos.")}
-          onComment={() => handleAlert("Comentarios disponibles pronto", "La función de comentarios se habilitará próximamente.")}
-          onSave={() => handleAlert("Guardado", "Recuerdo guardado en tu colección privada.")}
-        />
-
-        <ReelCard 
-          title="La primera foto"
-          date="10 de enero"
-          description="El inicio de nuestra historia."
-          type="Foto"
-          imageUrl="https://images.unsplash.com/photo-1518599904199-0ca897819ddb?w=800"
-          onHeart={() => handleAlert("Recuerdo guardado", "Has guardado este recuerdo en tus favoritos.")}
-          onComment={() => handleAlert("Comentarios disponibles pronto", "La función de comentarios se habilitará próximamente.")}
-          onSave={() => handleAlert("Guardado", "Recuerdo guardado en tu colección privada.")}
-        />
-
-        <ReelCard 
-          title="Un día inolvidable"
-          date="1 de junio"
-          description="Pequeños detalles, grandes recuerdos."
-          type="Video"
-          imageUrl="https://images.unsplash.com/photo-1472396961693-142e6e269027?w=800"
-          onHeart={() => handleAlert("Recuerdo guardado", "Has guardado este recuerdo en tus favoritos.")}
-          onComment={() => handleAlert("Comentarios disponibles pronto", "La función de comentarios se habilitará próximamente.")}
-          onSave={() => handleAlert("Guardado", "Recuerdo guardado en tu colección privada.")}
-        />
+        {moments.map(moment => (
+          <ReelCard 
+            key={moment.id}
+            title={moment.title}
+            date={fmtMomentDate(moment.memory_date)}
+            description={moment.description}
+            type={moment.media_type === 'video' ? 'Video' : 'Foto'}
+            imageUrl={moment.media_url || 'https://images.unsplash.com/photo-1518599904199-0ca897819ddb?w=800'}
+            createdByMe={moment.created_by === userId}
+            onHeart={() => handleAlert("Favorito", "Has guardado este recuerdo en tus favoritos.")}
+            onComment={() => handleAlert("Comentarios", "La función de comentarios se habilitará próximamente.")}
+            onSave={() => handleAlert("Guardado", "Recuerdo guardado en tu colección privada.")}
+          />
+        ))}
 
       </ScrollView>
     </View>
   );
 }
 
-function ReelCard({ title, date, description, type, imageUrl, onHeart, onComment, onSave }: any) {
+function ReelCard({ title, date, description, type, imageUrl, createdByMe, onHeart, onComment, onSave }: any) {
   return (
     <View style={styles.reelCard}>
       <ImageBackground 
@@ -113,7 +234,7 @@ function ReelCard({ title, date, description, type, imageUrl, onHeart, onComment
           {/* Top Badges */}
           <View style={styles.topBadgesRow}>
             <View style={styles.privateBadge}>
-              <Text style={styles.privateBadgeText}>Recuerdo privado</Text>
+              <Text style={styles.privateBadgeText}>{createdByMe ? 'De mí' : 'De Sofia'}</Text>
             </View>
             <View style={styles.typeBadge}>
               {type === 'Video' ? <Video size={12} color="#FFFFFF" /> : <ImageIcon size={12} color="#FFFFFF" />}
@@ -158,6 +279,11 @@ function ReelCard({ title, date, description, type, imageUrl, onHeart, onComment
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: BG_COLOR,
+  },
+  centered: {
+    justifyContent: 'center',
+    alignItems: 'center',
   },
   content: {
     paddingHorizontal: 16,
@@ -196,6 +322,28 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     marginLeft: 6,
     letterSpacing: 0,
+  },
+  errorBox: {
+    padding: 16,
+    backgroundColor: '#1A050A',
+    borderRadius: 12,
+    marginBottom: 20,
+    borderWidth: 1,
+    borderColor: ACCENT_RED,
+  },
+  errorText: {
+    color: ACCENT_RED,
+    fontSize: 14,
+    textAlign: 'center',
+  },
+  emptyContainer: {
+    paddingTop: 80,
+    alignItems: 'center',
+  },
+  emptyText: {
+    color: TEXT_MUTED,
+    fontSize: 16,
+    fontStyle: 'italic',
   },
   reelCard: {
     width: '100%',
