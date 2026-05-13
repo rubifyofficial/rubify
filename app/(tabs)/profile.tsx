@@ -3,6 +3,7 @@ import { ScrollView, StyleSheet, Text, View, Image, TouchableOpacity, Dimensions
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Heart, Image as ImageIcon, BookHeart, MessageCircle, Calendar, ChevronRight, User, HeartHandshake, Palette, Shield, LogOut } from 'lucide-react-native';
 import { Link } from 'expo-router';
+import { supabase } from '../../lib/supabase';
 
 const { width } = Dimensions.get('window');
 
@@ -36,7 +37,11 @@ export default function ProfileScreen() {
           <View style={styles.avatarWithLabel}>
             <Image source={{ uri: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=200' }} style={styles.avatarImage} />
             <Text style={styles.avatarName}>Alejandro</Text>
-          </View>
+          
+          <TouchableOpacity style={[styles.navButton, { marginTop: 16 }]} onPress={() => supabase.auth.signOut()}>
+            <Text style={[styles.navButtonText, { color: '#EF233C' }]}>Cerrar sesión</Text>
+          </TouchableOpacity>
+    </View>
           <View style={styles.heartCircleContainer}>
             <View style={styles.heartCircle}>
               <Heart size={20} color={ACCENT_RED} fill={ACCENT_RED} />

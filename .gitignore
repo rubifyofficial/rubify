@@ -41,3 +41,7 @@ yarn-error.*
 /android
 
 logs/
+
+.env
+
+logs/
