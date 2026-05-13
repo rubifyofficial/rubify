@@ -71,52 +71,81 @@ export default function NotesScreen() {
   const [saving, setSaving] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
 
-  // ── Init: user + couple ──────────────────────────────────────
-  useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        const { data: { user }, error: userErr } = await supabase.auth.getUser();
-        if (userErr || !user) { router.replace('/(auth)/login'); return; }
-        if (!mounted) return;
-        setUserId(user.id);
-
-        const { data: coupleData, error: coupleErr } = await supabase.rpc('get_my_couple');
-        console.log('[Notas] get_my_couple:', JSON.stringify(coupleData), coupleErr?.message);
-        if (coupleErr) { setInitError('No se encontró la pareja'); setLoading(false); return; }
-        const row = Array.isArray(coupleData) ? coupleData[0] : coupleData;
-        const cid: string | undefined = row?.couple_id;
-        if (!cid) { router.replace('/partner-setup'); return; }
-        if (!mounted) return;
-        setCoupleId(cid);
-      } catch (e: any) {
-        console.log('[Notas] init error:', e);
-        if (mounted) setInitError('No se pudieron cargar las notas');
-      } finally {
-        if (mounted) setLoading(false);
+  // ── 1. Load current user and couple_id ──────────────────────
+  const initialize = useCallback(async () => {
+    setLoading(true);
+    setInitError(null);
+    try {
+      // Load current user
+      const { data: userData, error: userError } = await supabase.auth.getUser();
+      if (userError || !userData.user) {
+        console.log('userError', userError);
+        Alert.alert('Error', 'Usuario no encontrado');
+        router.replace('/(auth)/login');
+        return;
       }
-    })();
-    return () => { mounted = false; };
-  }, []);
+      setUserId(userData.user.id);
 
-  // ── Fetch notes ───────────────────────────────────────────────
-  const fetchNotes = useCallback(async (cid: string) => {
-    const { data, error } = await supabase
-      .from('notes')
-      .select('*')
-      .eq('couple_id', cid)
-      .order('created_at', { ascending: false });
-    console.log('[Notas] fetched', data?.length ?? 0, 'notes, error:', error?.message);
-    if (error) { setInitError('No se pudieron cargar las notas'); return; }
-    setNotes(data ?? []);
-  }, []);
+      // Load couple_id correctly
+      const { data: coupleData, error: coupleError } = await supabase.rpc('get_my_couple');
+      console.log('get_my_couple data', coupleData);
+      console.log('get_my_couple error', coupleError);
+
+      if (coupleError) {
+        setInitError('No se pudo cargar la pareja');
+        Alert.alert('Error', coupleError.message || 'No se pudo cargar la pareja');
+        setLoading(false);
+        return;
+      }
+
+      const coupleResult = Array.isArray(coupleData) ? coupleData[0] : coupleData;
+      const cid = coupleResult?.couple_id;
+
+      if (!cid) {
+        setInitError('No se encontró la pareja');
+        Alert.alert('Aviso', 'No se encontró la pareja');
+        router.replace('/partner-setup');
+        return;
+      }
+      setCoupleId(cid);
+      
+      // Fetch notes after getting coupleId
+      await fetchNotes(cid);
+    } catch (e: any) {
+      console.log('initialize exception', e);
+      setInitError('Error de inicialización');
+    } finally {
+      setLoading(false);
+    }
+  }, [router, fetchNotes]);
 
   useEffect(() => {
-    if (!coupleId) return;
-    fetchNotes(coupleId);
-  }, [coupleId, fetchNotes]);
+    initialize();
+  }, []);
 
-  // ── Realtime ─────────────────────────────────────────────────
+  // ── 2. Fetch notes correctly ───────────────────────────────
+  const fetchNotes = useCallback(async (cid: string) => {
+    try {
+      const { data, error } = await supabase
+        .from('notes')
+        .select('*')
+        .eq('couple_id', cid)
+        .order('created_at', { ascending: false });
+
+      console.log('fetched notes', data);
+      console.log('fetch notes error', error);
+
+      if (error) {
+        Alert.alert('Error', 'No se pudieron cargar las notas');
+        return;
+      }
+      setNotes(data ?? []);
+    } catch (e: any) {
+      console.log('fetchNotes exception', e);
+    }
+  }, []);
+
+  // ── 3. Realtime subscription ─────────────────────────────────
   useEffect(() => {
     if (!coupleId) return;
     const channel = supabase
@@ -125,44 +154,73 @@ export default function NotesScreen() {
         event: '*', schema: 'public', table: 'notes',
         filter: `couple_id=eq.${coupleId}`,
       }, (payload) => {
-        console.log('[Notas] realtime event:', payload.eventType);
+        console.log('realtime notes event:', payload.eventType);
         if (payload.eventType === 'INSERT') {
           const n = payload.new as DbNote;
           setNotes(prev => prev.some(x => x.id === n.id) ? prev : [n, ...prev]);
         } else if (payload.eventType === 'UPDATE') {
           const n = payload.new as DbNote;
           setNotes(prev => prev.map(x => x.id === n.id ? n : x));
+        } else if (payload.eventType === 'DELETE') {
+          const old = payload.old as { id: string };
+          setNotes(prev => prev.filter(x => x.id !== old.id));
         }
       })
-      .subscribe(s => console.log('[Notas] realtime:', s));
+      .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [coupleId]);
 
-  // ── Save note ─────────────────────────────────────────────────
-  const handleSave = async () => {
-    const content = noteText.trim();
-    if (!content) { Alert.alert('Escribe algo primero'); return; }
-    if (!coupleId || !userId) return;
+  // ── 4. Insert note exactly as requested ─────────────────────
+  const saveNote = async () => {
+    if (!noteText.trim()) {
+      Alert.alert('Aviso', 'Escribe una nota primero');
+      return;
+    }
+    if (!coupleId) {
+      Alert.alert('Error', 'No se encontró la pareja');
+      return;
+    }
+    if (!userId) {
+      Alert.alert('Error', 'Usuario no encontrado');
+      return;
+    }
+
+    const payload = {
+      couple_id: coupleId,
+      created_by: userId,
+      title: 'Nota para Sofia',
+      content: noteText.trim(),
+      note_type: activeTool === 'Dibujar' ? 'drawing' : 'text',
+      is_shared: true,
+      drawing_data: null,
+      image_url: null,
+    };
+
+    console.log('saving note payload', payload);
     setSaving(true);
+
     try {
-      const { error } = await supabase.from('notes').insert({
-        couple_id: coupleId,
-        created_by: userId,
-        title: 'Nota para Sofia',
-        content,
-        note_type: activeTool === 'Dibujar' ? 'drawing' : 'text',
-        is_shared: true,
-        drawing_data: null,
-        image_url: null,
-      });
-      console.log('[Notas] save error:', error?.message);
-      if (error) { Alert.alert('Error', 'No se pudo guardar la nota'); return; }
+      const { data, error } = await supabase
+        .from('notes')
+        .insert(payload)
+        .select()
+        .single();
+
+      console.log('save note data', data);
+      console.log('save note error', error);
+
+      if (error) {
+        Alert.alert('Error', error.message || 'No se pudo guardar la nota');
+        return;
+      }
+
+      Alert.alert('Listo', 'Nota guardada');
       setNoteText('');
-      Alert.alert('Nota guardada');
+      // Refetch notes immediately
       await fetchNotes(coupleId);
     } catch (e: any) {
-      console.log('[Notas] save exception:', e);
-      Alert.alert('Error', 'No se pudo guardar la nota');
+      console.log('saveNote exception', e);
+      Alert.alert('Error', 'Ocurrió un error inesperado');
     } finally {
       setSaving(false);
     }
@@ -179,7 +237,7 @@ export default function NotesScreen() {
     { id: 'Borrador',icon: <Eraser size={18} color={INK} />,    action: () => go('Borrador activado') },
   ];
 
-  // Derived data
+  // ── 5. Partner preview logic ────────────────────────────────
   const partnerNote = userId ? notes.find(n => n.created_by !== userId) ?? null : null;
 
   const filteredNotes = notes.filter(n => {
@@ -229,7 +287,7 @@ export default function NotesScreen() {
               </View>
               <View style={s.partnerInfo}>
                 <Text style={s.partnerDesc} numberOfLines={2}>
-                  {partnerNote.content ?? partnerNote.title}
+                  {partnerNote.content || partnerNote.title}
                 </Text>
                 <View style={s.partnerTimeWrap}>
                   <Clock size={10} color={'#9CA3AF'} />
@@ -238,7 +296,7 @@ export default function NotesScreen() {
               </View>
             </View>
           ) : (
-            <Text style={s.partnerEmpty}>Tu pareja todavía no dejó una nota.</Text>
+            <Text style={s.partnerEmpty}>Sofia todavía no dejó una nota.</Text>
           )}
         </View>
 
@@ -257,7 +315,7 @@ export default function NotesScreen() {
             <View style={s.badgeTL}><Text style={s.badgeTxt}>Lienzo</Text></View>
             <View style={s.badgeTR}><Text style={s.badgeTxt}>{activeTool}</Text></View>
 
-            {/* Text input inside canvas */}
+            {/* Real TextInput connected to noteText */}
             <TextInput
               style={s.canvasInput}
               placeholder="Toca para escribir..."
@@ -267,6 +325,7 @@ export default function NotesScreen() {
               multiline
               maxLength={800}
               editable={!saving}
+              textAlignVertical="top"
             />
 
             {/* Mini tool icons */}
@@ -296,11 +355,11 @@ export default function NotesScreen() {
             </ScrollView>
           </View>
 
-          {/* Save / Send */}
+          {/* Save / Send actions */}
           <View style={s.actionRow}>
             <Pressable
               style={[s.btnPrimary, saving && { opacity: 0.6 }]}
-              onPress={handleSave}
+              onPress={saveNote}
               disabled={saving}
             >
               {saving
@@ -315,7 +374,19 @@ export default function NotesScreen() {
           </View>
         </View>
 
-        {/* ══════ SAVED NOTES ══════ */}
+        {/* ══════ PHOTO + TEXT PREVIEW (Feature Card) ══════ */}
+        <View style={s.featureCard}>
+          <View style={s.featureContent}>
+            <Text style={s.featureTitle}>Foto con texto</Text>
+            <Text style={s.featureDesc}>Agrega una foto y escribe encima.</Text>
+          </View>
+          <View style={s.featurePreview}>
+            <ImageIcon size={20} color={'rgba(255,255,255,0.4)'} />
+            <Text style={s.featurePreviewTxt}>Nuestro momento</Text>
+          </View>
+        </View>
+
+        {/* ══════ SAVED NOTES LIBRARY ══════ */}
         <Text style={[s.sectionTitle, { marginTop: 28 }]}>Notas guardadas</Text>
 
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipRow}>
@@ -346,7 +417,7 @@ export default function NotesScreen() {
                       ? <Heart size={32} color={RED} opacity={0.5} />
                       : note.note_type === 'photo' || note.note_type === 'mixed'
                         ? <ImageIcon size={28} color={'#D1D5DB'} />
-                        : <Text style={s.savedMockTxt} numberOfLines={4}>{note.content}</Text>
+                        : <Text style={s.savedMockTxt} numberOfLines={4}>{note.content || note.title}</Text>
                     }
                     <View style={s.savedTypeBadge}>
                       <Text style={s.savedTypeBadgeTxt}>{noteTypeLabel(note.note_type)}</Text>
@@ -369,7 +440,7 @@ const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: BG },
   scrollContent: { paddingHorizontal: 20, paddingTop: 16 },
   errorTxt: { color: RED, fontSize: 13, marginBottom: 12 },
-  emptyTxt: { color: MUTED, fontSize: 14, fontStyle: 'italic', paddingVertical: 20, width: '100%' },
+  emptyTxt: { color: MUTED, fontSize: 14, fontStyle: 'italic', paddingVertical: 20, width: '100%', textAlign: 'center' },
 
   header: { marginBottom: 20 },
   headerTitle: { fontSize: 28, fontWeight: '800', color: W, letterSpacing: 0 },
@@ -393,13 +464,13 @@ const s = StyleSheet.create({
   partnerEmpty: { fontSize: 13, color: MUTED, fontStyle: 'italic' },
 
   canvasSection: { marginBottom: 28 },
-  largeCanvas: { height: 420, backgroundColor: CARD_BG, borderRadius: 20, position: 'relative', overflow: 'hidden', borderWidth: 1, borderColor: '#E5E7EB' },
+  largeCanvas: { height: SW, backgroundColor: CARD_BG, borderRadius: 20, position: 'relative', overflow: 'hidden', borderWidth: 1, borderColor: '#E5E7EB' },
   paperGrid: { ...StyleSheet.absoluteFillObject },
   paperLine: { position: 'absolute', left: 20, right: 20, height: 1, backgroundColor: 'rgba(0,0,0,0.035)' },
   badgeTL: { position: 'absolute', top: 12, left: 12, backgroundColor: '#E5E7EB', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
   badgeTR: { position: 'absolute', top: 12, right: 12, backgroundColor: '#E5E7EB', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 6 },
   badgeTxt: { fontSize: 10, fontWeight: '700', color: GRAY, textTransform: 'uppercase' },
-  canvasInput: { position: 'absolute', top: 44, left: 16, right: 16, bottom: 60, fontSize: 16, color: INK, lineHeight: 26, textAlignVertical: 'top' },
+  canvasInput: { position: 'absolute', top: 44, left: 16, right: 16, bottom: 60, fontSize: 16, color: INK, lineHeight: 26 },
   miniToolsGroup: { position: 'absolute', bottom: 16, right: 16, flexDirection: 'row', gap: 8 },
   miniTool: { width: 36, height: 36, backgroundColor: W, borderRadius: 18, justifyContent: 'center', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 3, elevation: 2 },
 
@@ -415,6 +486,14 @@ const s = StyleSheet.create({
   btnPrimaryTxt: { color: W, fontSize: 14, fontWeight: '700' },
   btnSecondary: { flex: 1, flexDirection: 'row', backgroundColor: CARD_BG, paddingVertical: 14, borderRadius: 14, justifyContent: 'center', alignItems: 'center', gap: 8 },
   btnSecondaryTxt: { color: INK, fontSize: 14, fontWeight: '700' },
+
+  // Feature Card
+  featureCard: { backgroundColor: '#1C1C1E', borderRadius: 16, padding: 16, flexDirection: 'row', alignItems: 'center', gap: 16, borderWidth: 1, borderColor: BDR },
+  featureContent: { flex: 1 },
+  featureTitle: { fontSize: 14, fontWeight: '700', color: W, marginBottom: 4 },
+  featureDesc: { fontSize: 12, color: MUTED, lineHeight: 16 },
+  featurePreview: { width: 70, height: 70, borderRadius: 10, backgroundColor: '#27272A', justifyContent: 'center', alignItems: 'center', position: 'relative', overflow: 'hidden' },
+  featurePreviewTxt: { position: 'absolute', bottom: 8, color: W, fontSize: 8, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.8)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 },
 
   chipRow: { gap: 10, marginBottom: 16, marginTop: 12 },
   chip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20, borderWidth: 1 },
