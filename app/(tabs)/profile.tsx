@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import { ScrollView, StyleSheet, Text, View, Image, TouchableOpacity, Dimensions, Alert } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Heart, Image as ImageIcon, BookHeart, MessageCircle, Calendar, ChevronRight, User, HeartHandshake, Palette, Shield, LogOut } from 'lucide-react-native';
@@ -21,6 +21,31 @@ export default function ProfileScreen() {
     Alert.alert(title, message);
   };
 
+  const handleSignOut = () => {
+    Alert.alert(
+      'Cerrar sesión',
+      '¿Seguro que quieres salir de tu cuenta?',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        {
+          text: 'Salir',
+          style: 'destructive',
+          onPress: async () => {
+            console.log('[Profile] signing out');
+            const { error } = await supabase.auth.signOut();
+            if (error) {
+              console.log('[Profile] signOut error:', error);
+              Alert.alert('Error', 'No se pudo cerrar sesión');
+            } else {
+              console.log('[Profile] signed out successfully');
+              // AuthProvider navigation guard handles redirect to login
+            }
+          },
+        },
+      ]
+    );
+  };
+
   return (
     <ScrollView 
       style={[styles.container, { backgroundColor: BG_COLOR }]} 
@@ -37,11 +62,7 @@ export default function ProfileScreen() {
           <View style={styles.avatarWithLabel}>
             <Image source={{ uri: 'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=200' }} style={styles.avatarImage} />
             <Text style={styles.avatarName}>Alejandro</Text>
-          
-          <TouchableOpacity style={[styles.navButton, { marginTop: 16 }]} onPress={() => supabase.auth.signOut()}>
-            <Text style={[styles.navButtonText, { color: '#EF233C' }]}>Cerrar sesión</Text>
-          </TouchableOpacity>
-    </View>
+          </View>
           <View style={styles.heartCircleContainer}>
             <View style={styles.heartCircle}>
               <Heart size={20} color={ACCENT_RED} fill={ACCENT_RED} />
@@ -125,7 +146,7 @@ export default function ProfileScreen() {
           title="Cerrar sesión" 
           subtitle="Salir de tu cuenta" 
           isDestructive
-          onPress={() => handleAlert("Sesión cerrada", "Has cerrado sesión exitosamente.")}
+          onPress={handleSignOut}
         />
       </View>
 
