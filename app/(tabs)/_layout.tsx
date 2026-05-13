@@ -1,0 +1,87 @@
+import { Tabs } from 'expo-router';
+import { Home, Image as ImageIcon, BookHeart, MessageCircle, MapPin } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+const TAB_BG   = '#18181B';
+const BORDER   = '#27272A';
+const ACTIVE   = '#EF233C';
+const INACTIVE = '#71717A';
+
+// Tab bar height above the safe area
+const TAB_ICON_AREA = 56; // icon + label
+
+export default function TabLayout() {
+  const insets = useSafeAreaInsets();
+  const tabBarHeight = TAB_ICON_AREA + insets.bottom;
+
+  return (
+    <Tabs
+      screenOptions={{
+        headerShown: false,
+        tabBarActiveTintColor: ACTIVE,
+        tabBarInactiveTintColor: INACTIVE,
+        tabBarStyle: {
+          backgroundColor: TAB_BG,
+          borderTopWidth: 1,
+          borderTopColor: BORDER,
+          height: tabBarHeight,
+          paddingBottom: insets.bottom + 4,
+          paddingTop: 8,
+          elevation: 0,
+          shadowOpacity: 0,
+        },
+        tabBarLabelStyle: {
+          fontSize: 11,
+          fontWeight: '600',
+          letterSpacing: 0,
+          marginTop: 2,
+        },
+      }}>
+
+      <Tabs.Screen
+        name="index"
+        options={{
+          title: 'Inicio',
+          tabBarIcon: ({ color, size }) => <Home size={size} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="moments"
+        options={{
+          title: 'Momentos',
+          tabBarIcon: ({ color, size }) => <ImageIcon size={size} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="notes"
+        options={{
+          title: 'Notas',
+          tabBarIcon: ({ color, size }) => <BookHeart size={size} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="messages"
+        options={{
+          title: 'Mensajes',
+          tabBarIcon: ({ color, size }) => <MessageCircle size={size} color={color} />,
+        }}
+      />
+      <Tabs.Screen
+        name="ubicacion"
+        options={{
+          title: 'Ubicacion',
+          tabBarIcon: ({ color, size }) => <MapPin size={size} color={color} />,
+        }}
+      />
+
+      {/* Perfil stays routable at /profile but hidden from tab bar */}
+      <Tabs.Screen
+        name="profile"
+        options={{
+          href: null,
+          title: 'Perfil',
+        }}
+      />
+    </Tabs>
+  );
+}
