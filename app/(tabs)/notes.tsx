@@ -170,10 +170,11 @@ export default function NotesScreen() {
     return () => { supabase.removeChannel(channel); };
   }, [coupleId]);
 
-  // ── 4. Insert note exactly as requested ─────────────────────
-  const saveNote = async () => {
-    if (!noteText.trim()) {
-      Alert.alert('Aviso', 'Escribe una nota primero');
+  // ── 4. Send note to partner ─────────────────────────────────
+  const handleSendNote = async () => {
+    const text = noteText.trim();
+    if (!text) {
+      Alert.alert('Aviso', 'Escribe algo primero');
       return;
     }
     if (!coupleId) {
@@ -189,14 +190,14 @@ export default function NotesScreen() {
       couple_id: coupleId,
       created_by: userId,
       title: 'Nota para Sofia',
-      content: noteText.trim(),
+      content: text,
       note_type: activeTool === 'Dibujar' ? 'drawing' : 'text',
       is_shared: true,
       drawing_data: null,
       image_url: null,
     };
 
-    console.log('saving note payload', payload);
+    console.log('[Notas] sending note payload:', payload);
     setSaving(true);
 
     try {
@@ -206,21 +207,21 @@ export default function NotesScreen() {
         .select()
         .single();
 
-      console.log('save note data', data);
-      console.log('save note error', error);
+      console.log('[Notas] send response data:', data);
+      console.log('[Notas] send response error:', error);
 
       if (error) {
-        Alert.alert('Error', error.message || 'No se pudo guardar la nota');
+        Alert.alert('Error', error.message || 'No se pudo enviar la nota');
         return;
       }
 
-      Alert.alert('Listo', 'Nota guardada');
+      Alert.alert('Listo', 'Enviado a Sofia');
       setNoteText('');
       // Refetch notes immediately
       await fetchNotes(coupleId);
     } catch (e: any) {
-      console.log('saveNote exception', e);
-      Alert.alert('Error', 'Ocurrió un error inesperado');
+      console.log('[Notas] handleSendNote exception:', e);
+      Alert.alert('Error', 'No se pudo enviar la nota');
     } finally {
       setSaving(false);
     }
@@ -355,21 +356,17 @@ export default function NotesScreen() {
             </ScrollView>
           </View>
 
-          {/* Save / Send actions */}
+          {/* Send action */}
           <View style={s.actionRow}>
             <Pressable
               style={[s.btnPrimary, saving && { opacity: 0.6 }]}
-              onPress={saveNote}
+              onPress={handleSendNote}
               disabled={saving}
             >
               {saving
                 ? <ActivityIndicator size="small" color={W} />
-                : <Save size={16} color={W} />}
-              <Text style={s.btnPrimaryTxt}>Guardar</Text>
-            </Pressable>
-            <Pressable style={s.btnSecondary} onPress={() => go('Enviado a tu pareja')}>
-              <Send size={16} color={INK} />
-              <Text style={s.btnSecondaryTxt}>Enviar</Text>
+                : <Send size={16} color={W} />}
+              <Text style={s.btnPrimaryTxt}>Enviar a Sofia</Text>
             </Pressable>
           </View>
         </View>
