@@ -1,332 +1,279 @@
-import React, { useRef, useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, Pressable, Alert,
-  ScrollView, Dimensions, Switch,
-  Animated, PanResponder,
+  View, Text, StyleSheet, ScrollView, Pressable, 
+  Dimensions, Image, ActivityIndicator
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { MapPin, Home, Navigation, Bell, Pause, Shield, Share2, Settings } from 'lucide-react-native';
+import { 
+  MapPin, Navigation, Home, Bell, 
+  Settings, ChevronRight, Heart, Info 
+} from 'lucide-react-native';
+import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
+import * as Location from 'expo-location';
 
-const { height: SH } = Dimensions.get('window');
+const { width } = Dimensions.get('window');
 
-// ── palette ──────────────────────────────────────────────────
-const BG    = '#0C0C0C';
-const SHEET = '#1A1A1A';
-const CARD  = '#242424';
-const W     = '#FFFFFF';
-const MUTED = '#A1A1AA';
-const BDR   = '#2E2E2E';
-const RED   = '#EF233C';
-const GREEN = '#16A34A';
-const MAPBG = '#E8EAED';
-
-// ── sheet snap positions ──────────────────────────────────────
-const TAB_BAR_H   = 68;                          // approx tab bar + safe area
-const PEEK        = 145;                          // how much sheet shows collapsed
-const EXPANDED_H  = Math.round(SH * 0.70);       // full expanded sheet height
-const SNAP_CLOSED = EXPANDED_H - PEEK;           // translateY when collapsed
-const SNAP_OPEN   = 0;                           // translateY when expanded
-const DRAG_THRESHOLD = 50;                        // px needed to snap
+// --- Light / Pastel Theme ---
+const BG = '#FFFFFF';
+const SOFT_PINK = '#FFF1F2';
+const ACCENT_RED = '#F4A6A6';
+const TEXT_DARK = '#222222';
+const TEXT_MUTED = '#9CA3AF';
+const BORDER = '#F1DCDC';
+const GREEN = '#10B981';
 
 export default function UbicacionScreen() {
   const insets = useSafeAreaInsets();
-  const [isOpen, setIsOpen]   = useState(false);
-  const [arrivalOn, setArrivalOn] = useState(true);
+  const { profile, couple, loading } = useProfileAndCouple();
+  const mapboxToken = process.env.EXPO_PUBLIC_MAPBOX_TOKEN;
+  const mapboxStaticUri = mapboxToken
+    ? `https://api.mapbox.com/styles/v1/mapbox/light-v10/static/-74.006,40.7128,12/800x800?access_token=${mapboxToken}`
+    : null;
 
-  // Animated value for vertical position of the sheet
-  const translateY = useRef(new Animated.Value(SNAP_CLOSED)).current;
-  // Track whether currently expanded
-  const openRef = useRef(false);
+  // Location tracking states
+  const [userLocation, setUserLocation] = useState<Location.LocationObject | null>(null);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [locLoading, setLocLoading] = useState(true);
 
-  const snapTo = (open: boolean) => {
-    openRef.current = open;
-    setIsOpen(open);
-    Animated.spring(translateY, {
-      toValue: open ? SNAP_OPEN : SNAP_CLOSED,
-      useNativeDriver: true,
-      bounciness: 4,
-      speed: 14,
-    }).start();
-  };
-
-  // PanResponder for drag gesture
-  const pan = useRef(
-    PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dy) > 5,
-      onPanResponderMove: (_, g) => {
-        const base  = openRef.current ? SNAP_OPEN : SNAP_CLOSED;
-        const next  = Math.max(SNAP_OPEN, Math.min(SNAP_CLOSED, base + g.dy));
-        translateY.setValue(next);
-      },
-      onPanResponderRelease: (_, g) => {
-        // If dragged up enough → open; down enough → close; else snap back
-        if (g.dy < -DRAG_THRESHOLD) {
-          snapTo(true);
-        } else if (g.dy > DRAG_THRESHOLD) {
-          snapTo(false);
-        } else {
-          // snap back to current state
-          snapTo(openRef.current);
+  useEffect(() => {
+    (async () => {
+      try {
+        let { status } = await Location.requestForegroundPermissionsAsync();
+        if (status !== 'granted') {
+          setErrorMsg('Permiso de ubicación denegado');
+          setLocLoading(false);
+          return;
         }
-      },
-    })
-  ).current;
 
-  const go = (msg: string) => Alert.alert(msg, 'Función disponible pronto.');
+        let loc = await Location.getCurrentPositionAsync({});
+        setUserLocation(loc);
+        setLocLoading(false);
+      } catch (e) {
+        console.error('Error fetching location:', e);
+        setErrorMsg('Error al obtener la ubicación');
+        setLocLoading(false);
+      }
+    })();
+  }, []);
+
+  const partnerName = couple?.partner_name || 'Pareja';
+  const partnerAvatar = couple?.partner_avatar_url;
+  const myAvatar = profile?.avatar_url;
+
+  if (loading) {
+    return (
+      <View style={[s.container, { justifyContent: 'center', alignItems: 'center' }]}>
+        <ActivityIndicator color={ACCENT_RED} />
+      </View>
+    );
+  }
 
   return (
-    <View style={[s.root, { paddingTop: insets.top }]}>
+    <View style={s.container}>
+      {/* --- Map Placeholder --- */}
+      <View style={s.mapContainer}>
+        {/* Mock Map Background */}
+        {mapboxStaticUri ? (
+          <Image
+            source={{ uri: mapboxStaticUri }}
+            style={s.mapMock}
+          />
+        ) : (
+          <View style={[s.mapMock, { backgroundColor: SOFT_PINK, justifyContent: 'center', alignItems: 'center', padding: 16 }]}>
+            <Text style={{ color: TEXT_MUTED, fontWeight: '700', textAlign: 'center' }}>
+              Configura tu token de Mapbox para ver el mapa.
+            </Text>
+          </View>
+        )}
+        
+        {/* User markers overlay */}
+        <View style={s.markersLayer}>
+          {/* Me marker */}
+          <View style={[s.marker, { top: '40%', left: '30%' }]}>
+            <View style={s.markerCircle}>
+              <AvatarSource uri={myAvatar} initial={profile?.name?.charAt(0) || 'Y'} size={40} />
+            </View>
+            <Text style={s.mkLbl}>Yo</Text>
+          </View>
 
-      {/* ══════ MAP — fills entire screen behind sheet ══════ */}
-      <View style={s.map}>
-
-        {/* header overlay */}
-        <View style={s.hdr}>
-          <Text style={s.hdrT}>Ubicación</Text>
-          <Text style={s.hdrS}>Saber si tu pareja llegó bien</Text>
+          {/* Partner marker */}
+          <View style={[s.marker, { top: '55%', left: '60%' }]}>
+            <View style={[s.markerCircle, { borderColor: ACCENT_RED }]}>
+              <AvatarSource uri={partnerAvatar} initial={partnerName.charAt(0)} size={40} />
+            </View>
+            <Text style={[s.mkLbl, { color: ACCENT_RED, fontWeight: '800' }]}>{partnerName}</Text>
+          </View>
         </View>
 
-        {/* grid */}
-        <View style={[s.gH,{top:'14%'}]}/><View style={[s.gH,{top:'28%'}]}/>
-        <View style={[s.gH,{top:'42%'}]}/><View style={[s.gH,{top:'56%'}]}/>
-        <View style={[s.gH,{top:'70%'}]}/><View style={[s.gH,{top:'84%'}]}/>
-        <View style={[s.gV,{left:'13%'}]}/><View style={[s.gV,{left:'26%'}]}/>
-        <View style={[s.gV,{left:'39%'}]}/><View style={[s.gV,{left:'52%'}]}/>
-        <View style={[s.gV,{left:'65%'}]}/><View style={[s.gV,{left:'78%'}]}/>
-
-        {/* safe zone */}
-        <View style={s.safeZone}/>
-        {/* route */}
-        <View style={s.route}/>
-
-        {/* Tu marker */}
-        <View style={[s.mk, {left:'18%', bottom:'28%'}]}>
-          <View style={s.mkTu}/><Text style={s.mkLbl}>Tú</Text>
-        </View>
-
-        {/* Sofia marker */}
-        <View style={[s.mk, {left:'43%', top:'32%'}]}>
-          <View style={s.pulse}/>
-          <MapPin size={26} color={RED}/>
-          <Text style={[s.mkLbl,{color:RED,fontWeight:'800'}]}>Sofia</Text>
-        </View>
-
-        {/* Casa marker */}
-        <View style={[s.mk, {right:'14%', bottom:'32%'}]}>
-          <View style={s.mkHome}><Home size={14} color={W}/></View>
-          <Text style={s.mkLbl}>Casa</Text>
-        </View>
-
-        {/* floating pills */}
-        <View style={[s.pill, {top: 74, left: 16}]}>
-          <View style={s.pillDot}/>
-          <Text style={s.pillTxt}>Compartiendo ubicación</Text>
-        </View>
-        <View style={[s.pill, {top: 74, right: 16}]}>
-          <Navigation size={11} color={RED}/>
-          <Text style={[s.pillTxt,{color:RED,marginLeft:5}]}>12 min a casa</Text>
+        {/* Back button */}
+        <View style={[s.hdrOverlay, { paddingTop: Math.max(insets.top, 10) }]}>
+          <View style={s.hdrBox}>
+            <MapPin size={20} color={ACCENT_RED} />
+            <Text style={s.hdrTxt}>Compartiendo ubicación en tiempo real</Text>
+          </View>
         </View>
       </View>
 
-      {/* ══════ DRAGGABLE BOTTOM SHEET ══════ */}
-      <Animated.View
-        {...pan.panHandlers}
-        style={[
-          s.sheet,
-          {
-            height: EXPANDED_H,
-            paddingBottom: insets.bottom + TAB_BAR_H,
-            transform: [{ translateY }],
-          },
-        ]}
-      >
-        {/* ── drag handle area — main gesture target ── */}
-        <View style={s.handleArea}>
-          <View style={s.handle}/>
-          <Text style={s.handleHint}>
-            {isOpen ? 'Desliza hacia abajo para cerrar' : 'Desliza hacia arriba para ver detalles'}
-          </Text>
-        </View>
-
-        {/* ── partner summary — always visible ── */}
-        <View style={s.partnerRow}>
-          <View style={s.avatar}><Text style={s.avatarLetter}>S</Text></View>
-          <View style={{flex:1, marginLeft:14}}>
-            <View style={{flexDirection:'row', alignItems:'center', gap:8}}>
-              <Text style={s.pName}>Sofia</Text>
-              <View style={s.activeDot}/>
-            </View>
-            <Text style={s.pStatus}>En camino a casa</Text>
-            <Text style={s.pEta}>A 12 min de casa  •  Hace 5 min</Text>
-          </View>
-        </View>
-
-        {/* ── expanded sections inside ScrollView ── */}
-        <ScrollView
-          showsVerticalScrollIndicator={false}
-          scrollEnabled={isOpen}
-          contentContainerStyle={{paddingBottom: 20}}
-        >
-          <View style={s.divider}/>
-
-          {/* A. Llegada segura */}
-          <Text style={s.secTitle}>Llegada segura</Text>
-          <View style={s.safeCard}>
-            <View style={{flex:1}}>
-              <Text style={s.safeLabel}>Casa — Recibir aviso cuando llegue</Text>
-              <Text style={[s.safeSub, {color: arrivalOn ? GREEN : MUTED}]}>
-                {arrivalOn ? 'Notificación activada' : 'Notificación desactivada'}
-              </Text>
-            </View>
-            <Switch
-              value={arrivalOn}
-              onValueChange={v => {
-                setArrivalOn(v);
-                Alert.alert('Aviso de llegada actualizado', v ? 'Activado' : 'Desactivado');
-              }}
-              trackColor={{false:'#3A3A3A', true: RED}}
-              thumbColor={W}
-            />
-          </View>
-
-          <View style={s.divider}/>
-
-          {/* B. Avisos recientes */}
-          <Text style={s.secTitle}>Avisos recientes</Text>
-          {[
-            {icon:<Bell size={14} color={RED}/>,              txt:'Sofia salió de la universidad', time:'Hoy, 7:10 PM'},
-            {icon:<Navigation size={14} color={MUTED}/>,      txt:'Sofia está en camino',          time:'Hoy, 7:35 PM'},
-            {icon:<Home size={14} color={GREEN}/>,            txt:'Sofia llegó a casa',             time:'Ayer, 8:42 PM'},
-          ].map((a,i) => (
-            <View key={i} style={s.alertRow}>
-              <View style={s.alertIcon}>{a.icon}</View>
-              <View style={{flex:1}}>
-                <Text style={s.alertTxt}>{a.txt}</Text>
-                <Text style={s.alertTime}>{a.time}</Text>
+      {/* --- Location Details Sheet --- */}
+      <View style={s.detailsSheet}>
+        <View style={s.sheetHandle} />
+        <ScrollView contentContainerStyle={{ paddingBottom: 40 }} showsVerticalScrollIndicator={false}>
+          
+          <View style={s.partnerStatusCard}>
+            <AvatarSource uri={partnerAvatar} initial={partnerName.charAt(0)} size={60} />
+            <View style={s.pInfo}>
+              <Text style={s.pName}>{partnerName}</Text>
+              <Text style={s.pLoc}>Cerca de la Universidad de las Artes</Text>
+              <View style={s.pStatRow}>
+                <Navigation size={14} color={GREEN} />
+                <Text style={s.pStat}>Moviéndose • 15 km/h</Text>
               </View>
             </View>
-          ))}
-
-          <View style={s.divider}/>
-
-          {/* C. Controles */}
-          <Text style={s.secTitle}>Controles</Text>
-          <View style={s.ctrlGrid}>
-            {[
-              {icon:<Pause size={18} color={W}/>,    lbl:'Pausar ubicación'},
-              {icon:<Shield size={18} color={W}/>,   lbl:'Editar lugares'},
-              {icon:<Settings size={18} color={W}/>, lbl:'Permisos'},
-              {icon:<Share2 size={18} color={RED}/>,  lbl:'Compartir'},
-            ].map((c,i) => (
-              <Pressable
-                key={i}
-                style={({pressed}) => [s.ctrlBtn, pressed && {opacity:0.7}]}
-                onPress={() => go(c.lbl)}
-              >
-                <View style={s.ctrlIc}>{c.icon}</View>
-                <Text style={s.ctrlLbl}>{c.lbl}</Text>
-              </Pressable>
-            ))}
+            <View style={s.pBat}>
+              <Text style={s.pBatTxt}>84%</Text>
+            </View>
           </View>
 
-          <View style={s.divider}/>
+          {/* Real GPS coordinates card */}
+          <Text style={s.sectionTitle}>Mi ubicación actual</Text>
+          <View style={s.myLocCard}>
+            <MapPin size={24} color={ACCENT_RED} />
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={s.myLocTitle}>Tus coordenadas GPS</Text>
+              {locLoading ? (
+                <ActivityIndicator size="small" color={ACCENT_RED} style={{ alignSelf: 'flex-start', marginTop: 6 }} />
+              ) : errorMsg ? (
+                <Text style={s.myLocCoordsError}>{errorMsg}</Text>
+              ) : userLocation ? (
+                <Text style={s.myLocCoords}>
+                  Lat: {userLocation.coords.latitude.toFixed(6)} • Lon: {userLocation.coords.longitude.toFixed(6)}
+                </Text>
+              ) : (
+                <Text style={s.myLocCoordsError}>Coordenadas no disponibles</Text>
+              )}
+            </View>
+          </View>
 
-          {/* D. Privacy */}
-          <View style={s.privacyBox}>
-            <Shield size={13} color={MUTED}/>
-            <Text style={s.privacyTxt}>
-              La ubicación solo se comparte si ambos aceptan. Puedes pausarla cuando quieras.
-            </Text>
+          <View style={s.actionsRow}>
+            <LocAction icon={<Navigation size={22} color={ACCENT_RED} />} label="Ruta" />
+            <LocAction icon={<Bell size={22} color={ACCENT_RED} />} label="Avisar" />
+            <LocAction icon={<Settings size={22} color={TEXT_MUTED} />} label="Ajustes" />
+          </View>
+
+          <Text style={s.sectionTitle}>Actividad reciente</Text>
+          <View style={s.historyBox}>
+            <HistoryItem icon={<Bell size={14} color={ACCENT_RED} />} txt={`${partnerName} salió de la universidad`} time="Hoy, 7:10 PM" />
+            <HistoryItem icon={<Navigation size={14} color={TEXT_MUTED} />} txt={`${partnerName} está en camino`} time="Hoy, 7:35 PM" />
+            <HistoryItem icon={<Home size={14} color={GREEN} />} txt={`${partnerName} llegó a casa`} time="Ayer, 8:42 PM" />
+          </View>
+
+          <View style={s.safetyInfo}>
+            <Info size={16} color={TEXT_MUTED} />
+            <Text style={s.safetyTxt}>Tu ubicación solo es visible para tu pareja.</Text>
           </View>
         </ScrollView>
-      </Animated.View>
+      </View>
+    </View>
+  );
+}
+
+function AvatarSource({ uri, initial, size }: any) {
+  if (uri) {
+    return <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />;
+  }
+  return (
+    <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: SOFT_PINK, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: BORDER }}>
+      <Text style={{ fontSize: size * 0.4, fontWeight: '800', color: ACCENT_RED }}>{initial}</Text>
+    </View>
+  );
+}
+
+function LocAction({ icon, label }: any) {
+  return (
+    <View style={s.locAction}>
+      <View style={s.locActionIcon}>{icon}</View>
+      <Text style={s.locActionLabel}>{label}</Text>
+    </View>
+  );
+}
+
+function HistoryItem({ icon, txt, time }: any) {
+  return (
+    <View style={s.histItem}>
+      <View style={s.histIcon}>{icon}</View>
+      <View style={{ flex: 1 }}>
+        <Text style={s.histTxt}>{txt}</Text>
+        <Text style={s.histTime}>{time}</Text>
+      </View>
     </View>
   );
 }
 
 const s = StyleSheet.create({
-  root: { flex:1, backgroundColor:BG },
+  container: { flex: 1, backgroundColor: BG },
+  mapContainer: { height: '55%', width: '100%', position: 'relative' },
+  mapMock: { width: '100%', height: '100%', opacity: 0.8 },
+  markersLayer: { ...StyleSheet.absoluteFillObject },
+  marker: { position: 'absolute', alignItems: 'center' },
+  markerCircle: { padding: 4, backgroundColor: '#FFF', borderRadius: 30, borderWidth: 2, borderColor: '#FFF', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 5 },
+  mkLbl: { marginTop: 4, backgroundColor: 'rgba(255,255,255,0.9)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, fontSize: 12, fontWeight: '700', color: TEXT_DARK },
 
-  // MAP — fills entire screen (sheet floats over it)
-  map: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: MAPBG,
-    overflow: 'hidden',
+  hdrOverlay: { position: 'absolute', top: 0, left: 0, right: 0, alignItems: 'center' },
+  hdrBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.95)', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 24, gap: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4 },
+  hdrTxt: { fontSize: 13, fontWeight: '700', color: TEXT_DARK },
+
+  detailsSheet: { flex: 1, backgroundColor: '#FFF', borderTopLeftRadius: 32, borderTopRightRadius: 32, marginTop: -32, padding: 20, shadowColor: '#000', shadowOffset: { width: 0, height: -4 }, shadowOpacity: 0.1, shadowRadius: 10, elevation: 10 },
+  sheetHandle: { width: 40, height: 4, backgroundColor: BORDER, borderRadius: 2, alignSelf: 'center', marginBottom: 20 },
+  
+  partnerStatusCard: { flexDirection: 'row', alignItems: 'center', padding: 20, backgroundColor: SOFT_PINK, borderRadius: 24, marginBottom: 20, borderWidth: 1, borderColor: BORDER },
+  pInfo: { flex: 1, marginLeft: 16 },
+  pName: { fontSize: 18, fontWeight: '800', color: TEXT_DARK },
+  pLoc: { fontSize: 13, color: TEXT_MUTED, marginTop: 2 },
+  pStatRow: { flexDirection: 'row', alignItems: 'center', marginTop: 6, gap: 4 },
+  pStat: { fontSize: 12, color: GREEN, fontWeight: '700' },
+  pBat: { backgroundColor: '#FFF', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: BORDER },
+  pBatTxt: { fontSize: 12, fontWeight: '800', color: TEXT_DARK },
+
+  myLocCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+    backgroundColor: '#FAFAFA',
+    borderRadius: 24,
+    borderWidth: 1,
+    borderColor: BORDER,
+    marginBottom: 20,
   },
-  gH:   {position:'absolute', left:0, right:0, height:1, backgroundColor:'rgba(0,0,0,0.06)'},
-  gV:   {position:'absolute', top:0, bottom:0, width:1, backgroundColor:'rgba(0,0,0,0.06)'},
-  safeZone: {
-    position:'absolute', right:'10%', bottom:'26%',
-    width:90, height:90, borderRadius:45,
-    borderWidth:2, borderColor:GREEN, borderStyle:'dashed',
-    backgroundColor:'rgba(22,163,74,0.07)',
+  myLocTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: TEXT_DARK,
   },
-  route: {
-    position:'absolute', width:2, height:140,
-    backgroundColor:RED, opacity:0.22,
-    left:'52%', top:'26%', transform:[{rotate:'28deg'}],
+  myLocCoords: {
+    fontSize: 13,
+    color: TEXT_MUTED,
+    marginTop: 2,
+    fontWeight: '700',
   },
-  mk:     {position:'absolute', alignItems:'center'},
-  mkTu:   {width:14, height:14, borderRadius:7, backgroundColor:'#111', borderWidth:2.5, borderColor:W},
-  mkHome: {width:28, height:28, borderRadius:14, backgroundColor:'#555', justifyContent:'center', alignItems:'center'},
-  mkLbl:  {fontSize:9, fontWeight:'700', color:'#333', marginTop:3, letterSpacing:0},
-  pulse:  {position:'absolute', top:-10, width:46, height:46, borderRadius:23, backgroundColor:RED, opacity:0.12},
-  pill:   {position:'absolute', flexDirection:'row', alignItems:'center', backgroundColor:'rgba(0,0,0,0.72)', paddingHorizontal:12, paddingVertical:6, borderRadius:20},
-  pillDot:{width:6, height:6, borderRadius:3, backgroundColor:GREEN, marginRight:6},
-  pillTxt:{fontSize:11, fontWeight:'600', color:W, letterSpacing:0},
-
-  // header overlay (on map)
-  hdr:  {position:'absolute', top:0, left:0, right:0, paddingHorizontal:20, paddingTop:12, paddingBottom:10, backgroundColor:'rgba(0,0,0,0.35)'},
-  hdrT: {fontSize:22, fontWeight:'800', color:W, letterSpacing:0},
-  hdrS: {fontSize:12, color:'rgba(255,255,255,0.68)', marginTop:1, letterSpacing:0},
-
-  // SHEET — absolutely positioned at bottom, slides up/down
-  sheet: {
-    position: 'absolute',
-    left: 0, right: 0, bottom: 0,
-    backgroundColor: SHEET,
-    borderTopLeftRadius: 26,
-    borderTopRightRadius: 26,
-    paddingHorizontal: 20,
-    shadowColor: '#000',
-    shadowOffset: {width:0, height:-4},
-    shadowOpacity: 0.35,
-    shadowRadius: 14,
-    elevation: 16,
+  myLocCoordsError: {
+    fontSize: 13,
+    color: ACCENT_RED,
+    marginTop: 2,
+    fontWeight: '600',
   },
 
-  // drag handle
-  handleArea: {alignItems:'center', paddingTop:10, paddingBottom:6},
-  handle:     {width:44, height:4, borderRadius:2, backgroundColor:'#3E3E3E', marginBottom:5},
-  handleHint: {fontSize:11, color:MUTED, letterSpacing:0},
+  actionsRow: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 30 },
+  locAction: { alignItems: 'center' },
+  locActionIcon: { width: 50, height: 50, borderRadius: 25, backgroundColor: '#FFF', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: BORDER, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 4, elevation: 2 },
+  locActionLabel: { fontSize: 12, fontWeight: '700', color: TEXT_DARK, marginTop: 8 },
 
-  // partner row
-  partnerRow:   {flexDirection:'row', alignItems:'center', marginBottom:4},
-  avatar:       {width:44, height:44, borderRadius:22, backgroundColor:RED, justifyContent:'center', alignItems:'center'},
-  avatarLetter: {fontSize:19, fontWeight:'800', color:W},
-  pName:        {fontSize:17, fontWeight:'800', color:W, letterSpacing:0},
-  activeDot:    {width:8, height:8, borderRadius:4, backgroundColor:GREEN},
-  pStatus:      {fontSize:13, color:MUTED, marginTop:2, letterSpacing:0},
-  pEta:         {fontSize:12, color:MUTED, marginTop:1, letterSpacing:0},
+  sectionTitle: { fontSize: 18, fontWeight: '800', color: TEXT_DARK, marginBottom: 16 },
+  historyBox: { backgroundColor: '#FAFAFA', borderRadius: 24, padding: 16, marginBottom: 20 },
+  histItem: { flexDirection: 'row', alignItems: 'center', marginBottom: 16, gap: 12 },
+  histIcon: { width: 32, height: 32, borderRadius: 16, backgroundColor: '#FFF', justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: BORDER },
+  histTxt: { fontSize: 14, color: TEXT_DARK, fontWeight: '600' },
+  histTime: { fontSize: 12, color: TEXT_MUTED, marginTop: 2 },
 
-  divider:  {height:1, backgroundColor:BDR, marginVertical:14},
-  secTitle: {fontSize:14, fontWeight:'700', color:W, marginBottom:10, letterSpacing:0},
-
-  safeCard:  {flexDirection:'row', alignItems:'center', backgroundColor:CARD, borderRadius:14, padding:14},
-  safeLabel: {fontSize:13, fontWeight:'600', color:W, letterSpacing:0},
-  safeSub:   {fontSize:11, marginTop:3, letterSpacing:0, fontWeight:'600'},
-
-  alertRow:  {flexDirection:'row', alignItems:'flex-start', marginBottom:12},
-  alertIcon: {width:30, height:30, borderRadius:15, backgroundColor:CARD, justifyContent:'center', alignItems:'center', marginRight:12},
-  alertTxt:  {fontSize:13, fontWeight:'600', color:W, letterSpacing:0},
-  alertTime: {fontSize:11, color:MUTED, marginTop:2, letterSpacing:0},
-
-  ctrlGrid: {flexDirection:'row', flexWrap:'wrap', gap:10},
-  ctrlBtn:  {flex:1, minWidth:'44%', backgroundColor:CARD, borderRadius:14, padding:14, alignItems:'center', gap:7},
-  ctrlIc:   {width:38, height:38, borderRadius:19, backgroundColor:'#333', justifyContent:'center', alignItems:'center'},
-  ctrlLbl:  {fontSize:11, fontWeight:'600', color:W, letterSpacing:0, textAlign:'center'},
-
-  privacyBox: {flexDirection:'row', alignItems:'flex-start', backgroundColor:CARD, borderRadius:12, padding:12, gap:10},
-  privacyTxt: {flex:1, fontSize:11, color:MUTED, lineHeight:16, letterSpacing:0},
+  safetyInfo: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8 },
+  safetyTxt: { fontSize: 12, color: TEXT_MUTED, fontStyle: 'italic' }
 });

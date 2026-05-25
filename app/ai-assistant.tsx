@@ -5,11 +5,11 @@ import { Sparkles, Heart, MessageCircleHeart, Wand2, Coffee, ShieldAlert, CheckC
 import { Stack } from 'expo-router';
 
 // Colors matching the spec
-const BG_COLOR = '#0F0F0F'; // premium near black
+const BG_COLOR = '#FFFFFF'; // premium near black
 const CARD_BG = '#1C1C1E'; // dark charcoal
 const TEXT_CREAM = '#FFFFFF'; // pure white
-const TEXT_MUTED = '#A1A1AA'; // zinc 400 neutral gray
-const ACCENT_RED = '#EF233C'; // romantic red
+const TEXT_MUTED = '#9CA3AF'; // zinc 400 neutral gray
+const ACCENT_RED = '#F4A6A6'; // romantic red
 
 export default function AIAssistantScreen() {
   const insets = useSafeAreaInsets();
@@ -42,7 +42,7 @@ export default function AIAssistantScreen() {
             <View style={styles.topLabelBadge}>
               <Text style={styles.topLabelText}>Asistente romántico</Text>
             </View>
-            <View style={[styles.iconCircle, { backgroundColor: '#EF233C20' }]}>
+            <View style={[styles.iconCircle, { backgroundColor: '#F4A6A620' }]}>
               <MessageCircleHeart size={24} color={ACCENT_RED} />
             </View>
           </View>
@@ -106,7 +106,7 @@ export default function AIAssistantScreen() {
           title="Crear mensaje romántico"
           subtitle="Para un detalle inesperado"
           icon={<Heart size={20} color={ACCENT_RED} />}
-          iconBg="#EF233C20"
+          iconBg="#F4A6A620"
         />
         <ActionCard 
           title="Mejorar un texto"
@@ -216,7 +216,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   topLabelBadge: {
-    backgroundColor: '#27272A',
+    backgroundColor: '#F1DCDC',
     paddingHorizontal: 12,
     paddingVertical: 6,
     borderRadius: 16,
@@ -253,7 +253,7 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: 1,
     borderColor: '#3F3F46',
-    backgroundColor: '#27272A',
+    backgroundColor: '#F1DCDC',
     marginRight: 10,
   },
   chipText: {
@@ -286,7 +286,7 @@ const styles = StyleSheet.create({
     marginBottom: 20,
   },
   assistantBubble: {
-    backgroundColor: '#27272A',
+    backgroundColor: '#F1DCDC',
     paddingHorizontal: 16,
     paddingVertical: 14,
     borderRadius: 20,
@@ -307,7 +307,7 @@ const styles = StyleSheet.create({
     marginBottom: 30,
     borderWidth: 1,
     borderColor: '#3F3F46',
-    shadowColor: '#000',
+    shadowColor: '#FFFFFF',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.2,
     shadowRadius: 8,

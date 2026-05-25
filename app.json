@@ -1,12 +1,12 @@
 {
   "expo": {
-    "name": "app_temp",
+    "name": "Usfully",
     "slug": "app_temp",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "apptemp",
-    "userInterfaceStyle": "automatic",
+    "userInterfaceStyle": "light",
     "newArchEnabled": true,
     "splash": {
       "image": "./assets/images/splash-icon.png",
@@ -22,7 +22,9 @@
         "backgroundColor": "#ffffff"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [],
+      "package": "com.usfully.app_temp"
     },
     "web": {
       "bundler": "metro",
@@ -34,6 +36,12 @@
     ],
     "experiments": {
       "typedRoutes": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "b545c888-8e55-41ae-b5db-fc0873872517"
+      }
     }
   }
 }

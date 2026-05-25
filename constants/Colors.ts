@@ -1,29 +1,33 @@
-const tintColor = '#EF233C';
+const tintColor = '#F4A6A6';
 
 export const Colors = {
   light: {
-    text: '#FFFFFF',
-    textMuted: '#A1A1AA',
-    background: '#0F0F0F',
+    text: '#222222',
+    textMuted: '#9CA3AF',
+    background: '#FFFFFF',
+    backgroundSoft: '#FFF7F7',
     tint: tintColor,
-    icon: '#FFFFFF',
-    tabIconDefault: '#71717A',
+    icon: '#6B7280',
+    tabIconDefault: '#9CA3AF',
     tabIconSelected: tintColor,
-    cardBackground: '#1C1C1E',
-    border: '#27272A',
-    surface: '#27272A',
+    cardBackground: '#FFFFFF',
+    border: '#F1DCDC',
+    surface: '#FFFFFF',
+    surfaceSoft: '#FFF1F2',
   },
   dark: {
-    text: '#FFFFFF',
-    textMuted: '#A1A1AA',
-    background: '#0F0F0F',
+    text: '#222222',
+    textMuted: '#9CA3AF',
+    background: '#FFFFFF',
+    backgroundSoft: '#FFF7F7',
     tint: tintColor,
-    icon: '#FFFFFF',
-    tabIconDefault: '#71717A',
+    icon: '#6B7280',
+    tabIconDefault: '#9CA3AF',
     tabIconSelected: tintColor,
-    cardBackground: '#1C1C1E',
-    border: '#27272A',
-    surface: '#27272A',
+    cardBackground: '#FFFFFF',
+    border: '#F1DCDC',
+    surface: '#FFFFFF',
+    surfaceSoft: '#FFF1F2',
   },
 };
 
@@ -33,17 +37,17 @@ export const ThemeConstants = {
   shadows: {
     soft: {
       shadowColor: '#000000',
-      shadowOffset: { width: 0, height: 6 },
-      shadowOpacity: 0.18,
-      shadowRadius: 16,
-      elevation: 5,
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.05,
+      shadowRadius: 10,
+      elevation: 2,
     },
     float: {
       shadowColor: '#000000',
-      shadowOffset: { width: 0, height: 10 },
-      shadowOpacity: 0.25,
-      shadowRadius: 24,
-      elevation: 8,
+      shadowOffset: { width: 0, height: 8 },
+      shadowOpacity: 0.08,
+      shadowRadius: 16,
+      elevation: 4,
     }
   },
 };

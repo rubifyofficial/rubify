@@ -1,11 +1,11 @@
 import { Tabs } from 'expo-router';
-import { Home, Image as ImageIcon, BookHeart, MessageCircle, MapPin } from 'lucide-react-native';
+import { Home, Image as ImageIcon, BookHeart, MessageCircle, MapPin, Calendar } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-const TAB_BG   = '#18181B';
-const BORDER   = '#27272A';
-const ACTIVE   = '#EF233C';
-const INACTIVE = '#71717A';
+const TAB_BG = '#FFFFFF';
+const BORDER = '#F1DCDC';
+const ACTIVE = '#F4A6A6';
+const INACTIVE = '#9CA3AF';
 
 // Tab bar height above the safe area
 const TAB_ICON_AREA = 56; // icon + label
@@ -53,10 +53,10 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="notes"
+        name="ubicacion"
         options={{
-          title: 'Notas',
-          tabBarIcon: ({ color, size }) => <BookHeart size={size} color={color} />,
+          title: 'Ubicacion',
+          tabBarIcon: ({ color, size }) => <MapPin size={size} color={color} />,
         }}
       />
       <Tabs.Screen
@@ -67,14 +67,21 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="ubicacion"
+        name="calendario"
         options={{
-          title: 'Ubicacion',
-          tabBarIcon: ({ color, size }) => <MapPin size={size} color={color} />,
+          title: 'Calendario',
+          tabBarIcon: ({ color, size }) => <Calendar size={size} color={color} />,
         }}
       />
 
-      {/* Perfil stays routable at /profile but hidden from tab bar */}
+      {/* Hidden but routable routes */}
+      <Tabs.Screen
+        name="notes"
+        options={{
+          href: null,
+          title: 'Notas',
+        }}
+      />
       <Tabs.Screen
         name="profile"
         options={{

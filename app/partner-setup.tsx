@@ -19,14 +19,14 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/AuthProvider';
 
 // ─── Palette (same as the rest of the app) ───────────────────
-const PAGE_BG  = '#080808';
-const CARD_BG  = '#111113';
-const BORDER   = '#27272A';
-const WHITE    = '#FFFFFF';
-const MUTED    = '#A1A1AA';
-const RED      = '#EF233C';
+const PAGE_BG = '#FFFFFF';
+const CARD_BG = '#FFFFFF';
+const BORDER = '#F1DCDC';
+const WHITE = '#222222';
+const MUTED = '#9CA3AF';
+const RED = '#F4A6A6';
 const RED_SOFT = '#EF233C18';
-const GRAY     = '#6B6B6B';
+const GRAY = '#6B7280';
 
 // ─── Spanish error map (shows real message when no translation found) ───
 function translateJoinError(msg: string): string {

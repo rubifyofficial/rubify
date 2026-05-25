@@ -1,487 +1,398 @@
-﻿import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, Pressable, TextInput,
   ScrollView, KeyboardAvoidingView, Platform, Alert,
-  ActivityIndicator,
+  ActivityIndicator, Image, Modal
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import {
   Phone, Video, MoreVertical, Plus, Send,
   Image as ImageIcon, MapPin, Sparkles, BookHeart, CheckCheck,
+  ChevronLeft, Search
 } from 'lucide-react-native';
 import { supabase } from '../../lib/supabase';
+import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
 
-// ─── Palette (unchanged) ─────────────────────────────────────
-const BG          = '#0C0C0C';
-const HDR_BG      = '#1A1A1A';
-const INP_BG      = '#1C1C1E';
-const USER_BUBBLE = '#242424';
-const SOFIA_BUBBLE = '#F5F5F3';
-const W           = '#FFFFFF';
-const MUTED       = '#A1A1AA';
-const RED         = '#EF233C';
-const BDR         = '#2E2E2E';
+// --- Light / Pastel Theme Constants ---
+const BG = '#FFFFFF';
+const HDR_BG = '#FFFFFF';
+const INP_BG = '#FFF7F7';
+const USER_BUBBLE = '#F4A6A6';
+const PARTNER_BUBBLE = '#FFF7F7';
+const TEXT_DARK = '#222222';
+const TEXT_MUTED = '#9CA3AF';
+const BORDER = '#F1DCDC';
 
-// ─── Types ────────────────────────────────────────────────────
-type DbMessage = {
-  id: string;
-  couple_id: string;
-  sender_id: string;
-  content: string;
-  message_type: string;
-  read_at: string | null;
-  created_at: string;
-};
-
-// ─── Helpers ──────────────────────────────────────────────────
-function fmtTime(iso: string): string {
-  try {
-    return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  } catch {
-    return '';
-  }
-}
-
-// ─── Screen ──────────────────────────────────────────────────
 export default function MensajesScreen() {
-  const insets    = useSafeAreaInsets();
-  const router    = useRouter();
-  const scrollRef = useRef<ScrollView>(null);
-
-  // Auth & couple state
-  const [userId, setUserId]   = useState<string | null>(null);
-  const [coupleId, setCoupleId] = useState<string | null>(null);
-
-  // Messages state
-  const [messages, setMessages]   = useState<DbMessage[]>([]);
+  const insets = useSafeAreaInsets();
+  const router = useRouter();
+  const { profile, couple } = useProfileAndCouple();
+  
+  const [messages, setMessages] = useState<any[]>([]);
   const [inputText, setInputText] = useState('');
-  const [sending, setSending]     = useState(false);
-  const [loading, setLoading]     = useState(true);
-  const [error, setError]         = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [callModalType, setCallModalType] = useState<'voice' | 'video' | null>(null);
+  const [loading, setLoading] = useState(true);
+  const scrollViewRef = useRef<ScrollView>(null);
 
-  // ── 1. Load user + couple on mount ──────────────────────────
+  const partnerName = couple?.partner_name || 'Pareja';
+  const partnerAvatar = couple?.partner_avatar_url;
+
+  const filteredMessages = messages.filter(m => 
+    m.content.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
   useEffect(() => {
-    let mounted = true;
-    (async () => {
-      try {
-        // Get current user
-        const { data: { user }, error: userErr } = await supabase.auth.getUser();
-        if (userErr || !user) {
-          console.log('[Mensajes] no user:', userErr);
-          router.replace('/(auth)/login');
-          return;
-        }
-        if (!mounted) return;
-        setUserId(user.id);
-
-        // Get couple
-        const { data: coupleData, error: coupleErr } = await supabase.rpc('get_my_couple');
-        console.log('[Mensajes] get_my_couple data:', JSON.stringify(coupleData), 'error:', coupleErr);
-        if (coupleErr) {
-          console.log('[Mensajes] couple error:', coupleErr.message);
-          setError('No se encontró la pareja');
-          setLoading(false);
-          return;
-        }
-        const coupleRow = Array.isArray(coupleData) ? coupleData[0] : coupleData;
-        const cid: string | undefined = coupleRow?.couple_id;
-        if (!cid) {
-          console.log('[Mensajes] no couple_id — redirecting to partner-setup');
-          router.replace('/partner-setup');
-          return;
-        }
-        if (!mounted) return;
-        setCoupleId(cid);
-      } catch (e: any) {
-        console.log('[Mensajes] init exception:', e);
-        if (mounted) setError('No se pudieron cargar los mensajes');
-      } finally {
-        if (mounted) setLoading(false);
-      }
-    })();
-    return () => { mounted = false; };
-  }, []);
-
-  // ── 2. Fetch messages when coupleId is known ─────────────────
-  const fetchMessages = useCallback(async (cid: string) => {
-    const { data, error: fetchErr } = await supabase
-      .from('messages')
-      .select('*')
-      .eq('couple_id', cid)
-      .order('created_at', { ascending: true });
-    console.log('[Mensajes] fetched', data?.length ?? 0, 'messages, error:', fetchErr?.message);
-    if (fetchErr) {
-      setError('No se pudieron cargar los mensajes');
-      return;
+    if (couple?.couple_id) {
+      fetchMessages();
+      const subscription = subscribeToMessages();
+      return () => {
+        subscription.unsubscribe();
+      };
     }
-    setMessages(data ?? []);
-    setTimeout(() => scrollRef.current?.scrollToEnd({ animated: false }), 100);
-  }, []);
+  }, [couple]);
 
-  useEffect(() => {
-    if (!coupleId) return;
-    fetchMessages(coupleId);
-  }, [coupleId, fetchMessages]);
-
-  // ── 3. Realtime subscription ─────────────────────────────────
-  useEffect(() => {
-    if (!coupleId) return;
-
-    const channel = supabase
-      .channel(`messages:${coupleId}`)
-      .on(
-        'postgres_changes',
-        {
-          event: 'INSERT',
-          schema: 'public',
-          table: 'messages',
-          filter: `couple_id=eq.${coupleId}`,
-        },
-        (payload) => {
-          console.log('[Mensajes] realtime INSERT:', JSON.stringify(payload.new));
-          const incoming = payload.new as DbMessage;
-          setMessages(prev => {
-            // Avoid duplicates
-            if (prev.some(m => m.id === incoming.id)) return prev;
-            return [...prev, incoming];
-          });
-          setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 80);
-        }
-      )
-      .subscribe((status) => {
-        console.log('[Mensajes] realtime status:', status);
-      });
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [coupleId]);
-
-  // ── 4. Send message ──────────────────────────────────────────
-  const handleSend = async () => {
-    const text = inputText.trim();
-    if (!text || !coupleId || !userId || sending) return;
-
-    setSending(true);
-    setInputText('');
+  const fetchMessages = async () => {
     try {
-      const { error: insertErr } = await supabase.from('messages').insert({
-        couple_id: coupleId,
-        sender_id: userId,
-        content: text,
-        message_type: 'text',
-      });
-      if (insertErr) {
-        console.log('[Mensajes] send error:', insertErr.message, '| details:', insertErr.details);
-        Alert.alert('Error', 'No se pudo enviar el mensaje');
-        setInputText(text); // restore on failure
-      } else {
-        console.log('[Mensajes] message sent');
-        // Realtime will append; also force scroll
-        setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 100);
+      const { data, error } = await supabase
+        .from('messages')
+        .select('*')
+        .eq('couple_id', couple?.couple_id)
+        .order('created_at', { ascending: true });
+      if (error) throw error;
+      setMessages(data || []);
+    } catch (e: any) {
+      console.error('[Messages] fetch error:', JSON.stringify(e, null, 2));
+      Alert.alert('Error', 'No se pudieron cargar los mensajes. ' + (e.message || ''));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const subscribeToMessages = () => {
+    return supabase
+      .channel('public:messages')
+      .on('postgres_changes', { 
+        event: 'INSERT', 
+        schema: 'public', 
+        table: 'messages',
+        filter: `couple_id=eq.${couple?.couple_id}`
+      }, (payload) => {
+        setMessages(prev => {
+          if (prev.find(m => m.id === payload.new.id)) return prev;
+          return [...prev, payload.new];
+        });
+      })
+      .subscribe();
+  };
+
+  const sendMessage = async () => {
+    if (!inputText.trim() || !couple?.couple_id || !profile?.id) return;
+    const text = inputText.trim();
+    setInputText('');
+    
+    try {
+      const { data, error } = await supabase.from('messages').insert({
+        couple_id: couple.couple_id,
+        sender_id: profile.id,
+        content: text
+      }).select().single();
+      
+      if (error) throw error;
+      
+      if (data) {
+        setMessages(prev => {
+          if (prev.find(m => m.id === data.id)) return prev;
+          return [...prev, data];
+        });
       }
     } catch (e: any) {
-      console.log('[Mensajes] send exception:', e);
-      Alert.alert('Error', 'No se pudo enviar el mensaje');
+      console.error('[Messages] send error:', JSON.stringify(e, null, 2));
+      Alert.alert('Error', 'No se pudo enviar el mensaje. ' + (e.message || ''));
       setInputText(text);
-    } finally {
-      setSending(false);
     }
   };
 
-  // ── 5. Quick actions ─────────────────────────────────────────
-  const handleAction = (action: string) => {
-    if (action === 'Foto')      Alert.alert('Función disponible pronto');
-    else if (action === 'Nota') router.push('/notes');
-    else if (action === 'Ubicacion') router.push('/ubicacion');
-    else if (action === 'AI')   router.push('/ai-assistant');
-  };
-
-  const go = (msg: string) => Alert.alert(msg, 'Función disponible pronto.');
-
-  // ─── Render ────────────────────────────────────────────────
   return (
-    <View style={[s.root, { paddingTop: insets.top }]}>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-      >
-        {/* ══════ HEADER ══════ */}
-        <View style={s.header}>
-          <View style={s.headerLeft}>
-            <View style={s.avatar}>
-              <Text style={s.avatarTxt}>P</Text>
+    <KeyboardAvoidingView
+      style={s.container}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+    >
+      <View style={[s.header, { paddingTop: Math.max(insets.top, 10) }]}>
+        <Pressable onPress={() => router.back()} style={s.hdrBtn}>
+          <ChevronLeft size={24} color={TEXT_DARK} />
+        </Pressable>
+        
+        <View style={s.hdrUser}>
+          <AvatarSource uri={partnerAvatar} initial={partnerName.charAt(0)} size={40} />
+          <View style={s.hdrTxtBox}>
+            <Text style={s.hdrName}>{partnerName}</Text>
+            <View style={s.hdrStatusRow}>
+              <View style={s.hdrDot} />
+              <Text style={s.hdrStatus}>en línea ahora</Text>
             </View>
-            <View>
-              <Text style={s.headerName}>Pareja</Text>
-              <Text style={s.headerStatus}>
-                {loading ? 'Cargando...' : coupleId ? 'En línea' : 'Sin conexión'}
-              </Text>
-            </View>
-          </View>
-          <View style={s.headerRight}>
-            <Pressable onPress={() => go('Llamada')} style={s.iconBtn}>
-              <Phone size={20} color={W} />
-            </Pressable>
-            <Pressable onPress={() => go('Video')} style={s.iconBtn}>
-              <Video size={20} color={W} />
-            </Pressable>
-            <Pressable onPress={() => go('Opciones')} style={s.iconBtn}>
-              <MoreVertical size={20} color={W} />
-            </Pressable>
           </View>
         </View>
 
-        {/* ══════ BODY ══════ */}
-        {loading ? (
-          <View style={s.centered}>
-            <ActivityIndicator size="large" color={RED} />
-          </View>
-        ) : error ? (
-          <View style={s.centered}>
-            <Text style={s.errorTxt}>{error}</Text>
-            <Pressable
-              style={s.retryBtn}
-              onPress={() => coupleId && fetchMessages(coupleId)}
-            >
-              <Text style={s.retryTxt}>Reintentar</Text>
-            </Pressable>
-          </View>
-        ) : (
-          <>
-            {/* ══════ MESSAGES ══════ */}
-            <ScrollView
-              ref={scrollRef}
-              style={s.chatArea}
-              contentContainerStyle={[
-                s.chatContent,
-                { paddingBottom: 20 },
-              ]}
-              onContentSizeChange={() =>
-                scrollRef.current?.scrollToEnd({ animated: true })
-              }
-            >
-              <View style={s.dateDivider}>
-                <Text style={s.dateTxt}>Hoy</Text>
-              </View>
+        <View style={s.hdrActions}>
+          <Pressable style={s.hdrBtn} onPress={() => setCallModalType('voice')}>
+            <Phone size={20} color={TEXT_DARK} />
+          </Pressable>
+          <Pressable style={s.hdrBtn} onPress={() => setCallModalType('video')}>
+            <Video size={20} color={TEXT_DARK} />
+          </Pressable>
+        </View>
+      </View>
 
-              {messages.length === 0 ? (
-                <View style={s.emptyWrap}>
-                  <Text style={s.emptyTxt}>
-                    Empieza la conversación con tu pareja
+      <View style={s.searchContainer}>
+        <Search size={18} color={TEXT_MUTED} style={s.searchIcon} />
+        <TextInput
+          style={s.searchInput}
+          placeholder="Buscar mensajes..."
+          placeholderTextColor={TEXT_MUTED}
+          value={searchQuery}
+          onChangeText={setSearchQuery}
+        />
+      </View>
+
+      <ScrollView
+        ref={scrollViewRef}
+        style={s.chatArea}
+        contentContainerStyle={s.chatContent}
+        onContentSizeChange={() => scrollViewRef.current?.scrollToEnd({ animated: true })}
+      >
+        {loading ? (
+          <ActivityIndicator color={USER_BUBBLE} style={{ marginTop: 20 }} />
+        ) : filteredMessages.length === 0 && searchQuery ? (
+          <Text style={s.noResultsText}>No se encontraron mensajes.</Text>
+        ) : (
+          filteredMessages.map((m, idx) => {
+            const isMe = m.sender_id === profile?.id;
+            return (
+              <View key={m.id || idx} style={[s.msgRow, isMe ? s.rowMe : s.rowPartner]}>
+                <View style={[s.bubble, isMe ? s.bubbleMe : s.bubblePartner]}>
+                  <Text style={[s.msgTxt, isMe ? s.txtMe : s.txtPartner]}>{m.content}</Text>
+                  <Text style={[s.timeTxt, isMe ? s.timeMe : s.timePartner]}>
+                    {new Date(m.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                   </Text>
                 </View>
-              ) : (
-                messages.map((msg) => {
-                  const isMe = msg.sender_id === userId;
-                  return (
-                    <View
-                      key={msg.id}
-                      style={[s.bubbleRow, isMe ? s.rowUser : s.rowSofia]}
-                    >
-                      <View
-                        style={[
-                          s.bubble,
-                          isMe ? s.bubbleUser : s.bubbleSofia,
-                        ]}
-                      >
-                        <Text
-                          style={[
-                            s.msgTxt,
-                            isMe ? s.msgTxtUser : s.msgTxtSofia,
-                          ]}
-                        >
-                          {msg.content}
-                        </Text>
-                        <View style={s.msgFooter}>
-                          <Text
-                            style={[
-                              s.timeTxt,
-                              isMe ? s.timeTxtUser : s.timeTxtSofia,
-                            ]}
-                          >
-                            {fmtTime(msg.created_at)}
-                          </Text>
-                          {isMe && (
-                            <CheckCheck
-                              size={12}
-                              color={msg.read_at ? '#3B82F6' : MUTED}
-                              style={s.readIcon}
-                            />
-                          )}
-                        </View>
-                      </View>
-                    </View>
-                  );
-                })
-              )}
-            </ScrollView>
-
-            {/* ══════ QUICK ACTIONS ══════ */}
-            <View style={s.quickActions}>
-              {[
-                { icon: <ImageIcon size={14} color={W} />, lbl: 'Foto' },
-                { icon: <BookHeart size={14} color={W} />, lbl: 'Nota' },
-                { icon: <MapPin size={14} color={W} />, lbl: 'Ubicacion' },
-                { icon: <Sparkles size={14} color={RED} />, lbl: 'AI' },
-              ].map((act, i) => (
-                <Pressable
-                  key={i}
-                  style={s.actionChip}
-                  onPress={() => handleAction(act.lbl)}
-                >
-                  {act.icon}
-                  <Text style={s.actionTxt}>{act.lbl}</Text>
-                </Pressable>
-              ))}
-            </View>
-
-            {/* ══════ INPUT ══════ */}
-            <View style={[s.inputArea, { paddingBottom: 10 }]}>
-              <Pressable style={s.attachBtn} onPress={() => go('Adjuntar')}>
-                <Plus size={24} color={MUTED} />
-              </Pressable>
-              <View style={s.inputWrapper}>
-                <TextInput
-                  style={s.input}
-                  placeholder="Escribe un mensaje..."
-                  placeholderTextColor={MUTED}
-                  value={inputText}
-                  onChangeText={setInputText}
-                  multiline
-                  maxLength={500}
-                  editable={!sending}
-                />
               </View>
-              <Pressable
-                style={[
-                  s.sendBtn,
-                  (!inputText.trim() || sending) && s.sendBtnDisabled,
-                ]}
-                onPress={handleSend}
-                disabled={!inputText.trim() || sending}
+            );
+          })
+        )}
+      </ScrollView>
+
+      <View style={[s.inputArea, { paddingBottom: Math.max(insets.bottom, 15) }]}>
+        <Pressable style={s.inpAdd}><Plus size={24} color={TEXT_MUTED} /></Pressable>
+        <TextInput
+          style={s.input}
+          placeholder="Escribe un mensaje tierno..."
+          placeholderTextColor={TEXT_MUTED}
+          value={inputText}
+          onChangeText={setInputText}
+          multiline
+        />
+        <Pressable style={[s.sendBtn, !inputText.trim() && { opacity: 0.5 }]} onPress={sendMessage}>
+          <Send size={20} color="#FFF" />
+        </Pressable>
+      </View>
+      <Modal
+        visible={!!callModalType}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={() => setCallModalType(null)}
+      >
+        <View style={s.modalOverlay}>
+          <View style={s.modalContent}>
+            <Text style={s.modalTitle}>
+              {callModalType === 'voice' ? 'Llamada de voz' : 'Videollamada'}
+            </Text>
+            <Text style={s.modalText}>
+              {callModalType === 'voice' 
+                ? 'Las llamadas de voz estarán listas muy pronto para ustedes.' 
+                : 'Las videollamadas estarán listas muy pronto para ustedes.'}
+            </Text>
+            <View style={s.modalActions}>
+              <Pressable 
+                style={[s.modalBtn, s.modalBtnCancel]} 
+                onPress={() => setCallModalType(null)}
               >
-                {sending ? (
-                  <ActivityIndicator size="small" color={W} />
-                ) : (
-                  <Send size={18} color={W} style={{ marginLeft: 2 }} />
-                )}
+                <Text style={s.modalBtnTextCancel}>Cancelar</Text>
+              </Pressable>
+              <Pressable 
+                style={[s.modalBtn, s.modalBtnConfirm]} 
+                onPress={() => setCallModalType(null)}
+              >
+                <Text style={s.modalBtnText}>Entendido</Text>
               </Pressable>
             </View>
-          </>
-        )}
-      </KeyboardAvoidingView>
+          </View>
+        </View>
+      </Modal>
+    </KeyboardAvoidingView>
+  );
+}
+
+function AvatarSource({ uri, initial, size }: any) {
+  if (uri) {
+    return <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />;
+  }
+  return (
+    <View style={{ width: size, height: size, borderRadius: size / 2, backgroundColor: PARTNER_BUBBLE, justifyContent: 'center', alignItems: 'center', borderWidth: 1, borderColor: BORDER }}>
+      <Text style={{ fontSize: size * 0.4, fontWeight: '800', color: USER_BUBBLE }}>{initial}</Text>
     </View>
   );
 }
 
-// ─── Styles (identical to original) ──────────────────────────
 const s = StyleSheet.create({
-  root: { flex: 1, backgroundColor: BG },
-
-  // Header
+  container: { flex: 1, backgroundColor: BG },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingBottom: 12,
     backgroundColor: HDR_BG,
+    borderBottomWidth: 1,
+    borderColor: BORDER,
+  },
+  hdrBtn: { padding: 8 },
+  hdrUser: { flex: 1, flexDirection: 'row', alignItems: 'center', marginLeft: 4 },
+  hdrTxtBox: { marginLeft: 12 },
+  hdrName: { fontSize: 17, fontWeight: '800', color: TEXT_DARK },
+  hdrStatusRow: { flexDirection: 'row', alignItems: 'center', marginTop: 2 },
+  hdrDot: { width: 6, height: 6, borderRadius: 3, backgroundColor: '#10B981', marginRight: 6 },
+  hdrStatus: { fontSize: 12, color: '#10B981', fontWeight: '600' },
+  hdrActions: { flexDirection: 'row' },
+
+  searchContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FAFAFA',
+    marginHorizontal: 16,
+    marginTop: 8,
+    marginBottom: 4,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderColor: BORDER,
+  },
+  searchIcon: { marginRight: 8 },
+  searchInput: {
+    flex: 1,
+    paddingVertical: 10,
+    fontSize: 15,
+    color: TEXT_DARK,
+  },
+  noResultsText: {
+    textAlign: 'center',
+    color: TEXT_MUTED,
+    marginTop: 20,
+    fontSize: 15,
+  },
+
+  chatArea: { flex: 1 },
+  chatContent: { padding: 16, paddingBottom: 30 },
+  msgRow: { marginBottom: 12, flexDirection: 'row' },
+  rowMe: { justifyContent: 'flex-end' },
+  rowPartner: { justifyContent: 'flex-start' },
+  bubble: { maxWidth: '80%', padding: 12, borderRadius: 20 },
+  bubbleMe: { backgroundColor: USER_BUBBLE, borderBottomRightRadius: 4 },
+  bubblePartner: { backgroundColor: PARTNER_BUBBLE, borderBottomLeftRadius: 4, borderWidth: 1, borderColor: BORDER },
+  msgTxt: { fontSize: 16, lineHeight: 22 },
+  txtMe: { color: '#FFF', fontWeight: '500' },
+  txtPartner: { color: TEXT_DARK },
+  timeTxt: { fontSize: 10, marginTop: 4, alignSelf: 'flex-end' },
+  timeMe: { color: 'rgba(255,255,255,0.7)' },
+  timePartner: { color: TEXT_MUTED },
+
+  inputArea: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    backgroundColor: HDR_BG,
+    borderTopWidth: 1,
+    borderColor: BORDER,
+  },
+  inpAdd: { padding: 8 },
+  input: {
+    flex: 1,
+    backgroundColor: INP_BG,
+    borderRadius: 24,
     paddingHorizontal: 16,
     paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: BDR,
+    fontSize: 15,
+    color: TEXT_DARK,
+    marginHorizontal: 8,
+    maxHeight: 100,
+    borderWidth: 1,
+    borderColor: BORDER,
   },
-  headerLeft: { flexDirection: 'row', alignItems: 'center' },
-  avatar: {
-    width: 38, height: 38, borderRadius: 20,
-    backgroundColor: RED,
-    justifyContent: 'center', alignItems: 'center', marginRight: 12,
+  sendBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: USER_BUBBLE,
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  avatarTxt:    { color: W, fontSize: 16, fontWeight: '800' },
-  headerName:   { color: W, fontSize: 16, fontWeight: '700', letterSpacing: 0 },
-  headerStatus: { color: MUTED, fontSize: 12, marginTop: 2, letterSpacing: 0 },
-  headerRight:  { flexDirection: 'row', alignItems: 'center', gap: 16 },
-  iconBtn:      { padding: 4 },
-
-  // Loading / error
-  centered: { flex: 1, justifyContent: 'center', alignItems: 'center', padding: 24 },
-  errorTxt: { color: RED, fontSize: 14, fontWeight: '600', textAlign: 'center', marginBottom: 16 },
-  retryBtn: {
-    backgroundColor: '#1C1C1E', paddingHorizontal: 20, paddingVertical: 10,
-    borderRadius: 12, borderWidth: 1, borderColor: BDR,
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
-  retryTxt: { color: W, fontSize: 14, fontWeight: '600' },
-
-  // Chat
-  chatArea:    { flex: 1 },
-  chatContent: { paddingHorizontal: 16, paddingTop: 16 },
-  dateDivider: {
-    alignSelf: 'center', backgroundColor: '#1C1C1E',
-    paddingHorizontal: 12, paddingVertical: 4,
-    borderRadius: 12, marginBottom: 16,
+  modalContent: {
+    width: '80%',
+    backgroundColor: '#FFFFFF',
+    borderRadius: 16,
+    padding: 24,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.1,
+    shadowRadius: 12,
+    elevation: 5,
   },
-  dateTxt: { color: MUTED, fontSize: 11, fontWeight: '600' },
-
-  emptyWrap: { flex: 1, alignItems: 'center', paddingTop: 60 },
-  emptyTxt:  { color: MUTED, fontSize: 14, fontStyle: 'italic' },
-
-  bubbleRow:   { marginBottom: 12, flexDirection: 'row' },
-  rowUser:     { justifyContent: 'flex-end' },
-  rowSofia:    { justifyContent: 'flex-start' },
-
-  bubble: {
-    maxWidth: '80%',
-    paddingHorizontal: 14, paddingVertical: 10,
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: TEXT_DARK,
+    marginBottom: 8,
+  },
+  modalText: {
+    fontSize: 15,
+    color: TEXT_MUTED,
+    textAlign: 'center',
+    marginBottom: 24,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+  },
+  modalBtn: {
+    flex: 1,
+    paddingVertical: 12,
     borderRadius: 20,
+    alignItems: 'center',
   },
-  bubbleUser:  { backgroundColor: USER_BUBBLE, borderBottomRightRadius: 4 },
-  bubbleSofia: { backgroundColor: SOFIA_BUBBLE, borderBottomLeftRadius: 4 },
-
-  msgTxt:      { fontSize: 15, lineHeight: 20, letterSpacing: 0 },
-  msgTxtUser:  { color: W },
-  msgTxtSofia: { color: '#111111' },
-
-  msgFooter: {
-    flexDirection: 'row', alignItems: 'center',
-    justifyContent: 'flex-end', marginTop: 4, gap: 4,
+  modalBtnCancel: {
+    backgroundColor: '#F3F4F6',
   },
-  timeTxt:      { fontSize: 10 },
-  timeTxtUser:  { color: 'rgba(255,255,255,0.5)' },
-  timeTxtSofia: { color: 'rgba(0,0,0,0.4)' },
-  readIcon:     { marginLeft: 2 },
-
-  // Quick Actions
-  quickActions: {
-    flexDirection: 'row', paddingHorizontal: 12,
-    paddingVertical: 8, gap: 8, backgroundColor: BG,
+  modalBtnConfirm: {
+    backgroundColor: USER_BUBBLE,
   },
-  actionChip: {
-    flexDirection: 'row', alignItems: 'center',
-    backgroundColor: INP_BG,
-    paddingHorizontal: 12, paddingVertical: 6,
-    borderRadius: 16, borderWidth: 1, borderColor: BDR, gap: 6,
+  modalBtnText: {
+    color: '#FFF',
+    fontSize: 16,
+    fontWeight: '600',
   },
-  actionTxt: { color: W, fontSize: 12, fontWeight: '600' },
-
-  // Input
-  inputArea: {
-    flexDirection: 'row', alignItems: 'flex-end',
-    paddingHorizontal: 12, paddingTop: 10,
-    backgroundColor: BG, borderTopWidth: 1, borderTopColor: BDR,
+  modalBtnTextCancel: {
+    color: TEXT_DARK,
+    fontSize: 16,
+    fontWeight: '600',
   },
-  attachBtn:    { width: 40, height: 40, justifyContent: 'center', alignItems: 'center', marginBottom: 2 },
-  inputWrapper: {
-    flex: 1, backgroundColor: INP_BG, borderRadius: 20,
-    minHeight: 40, maxHeight: 100, justifyContent: 'center',
-    paddingHorizontal: 16, paddingVertical: 10,
-    marginHorizontal: 8, marginBottom: 4,
-  },
-  input:         { color: W, fontSize: 15, maxHeight: 80 },
-  sendBtn:       {
-    width: 40, height: 40, borderRadius: 20,
-    backgroundColor: RED,
-    justifyContent: 'center', alignItems: 'center', marginBottom: 4,
-  },
-  sendBtnDisabled: { opacity: 0.5 },
 });

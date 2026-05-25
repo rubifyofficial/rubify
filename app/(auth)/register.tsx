@@ -4,12 +4,12 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Link } from 'expo-router';
 import { supabase } from '../../lib/supabase';
 
-const BG = '#0C0C0C';
-const W = '#FFFFFF';
-const MUTED = '#A1A1AA';
-const RED = '#EF233C';
-const INP_BG = '#1C1C1E';
-const BDR = '#2E2E2E';
+const BG = '#FFFFFF';
+const W = '#222222';
+const MUTED = '#9CA3AF';
+const RED = '#F4A6A6';
+const INP_BG = '#FFF7F7';
+const BDR = '#F1DCDC';
 
 export default function RegisterScreen() {
   const insets = useSafeAreaInsets();
@@ -63,7 +63,7 @@ export default function RegisterScreen() {
             <TextInput
               style={s.input}
               placeholder="Tu nombre"
-              placeholderTextColor={MUTED}
+              placeholderTextColor={'#A1A1AA'}
               value={name}
               onChangeText={setName}
             />
@@ -72,7 +72,7 @@ export default function RegisterScreen() {
             <TextInput
               style={s.input}
               placeholder="tu@email.com"
-              placeholderTextColor={MUTED}
+              placeholderTextColor={'#A1A1AA'}
               value={email}
               onChangeText={setEmail}
               autoCapitalize="none"
@@ -83,7 +83,7 @@ export default function RegisterScreen() {
             <TextInput
               style={s.input}
               placeholder="••••••••"
-              placeholderTextColor={MUTED}
+              placeholderTextColor={'#A1A1AA'}
               value={password}
               onChangeText={setPassword}
               secureTextEntry
@@ -93,7 +93,7 @@ export default function RegisterScreen() {
             <TextInput
               style={s.input}
               placeholder="••••••••"
-              placeholderTextColor={MUTED}
+              placeholderTextColor={'#A1A1AA'}
               value={confirmPassword}
               onChangeText={setConfirmPassword}
               secureTextEntry
