@@ -16,7 +16,7 @@ import {
   Text,
   View
 } from 'react-native';
-import MapView, { Marker } from 'react-native-maps';
+import MapView, { Marker } from "react-native-maps";
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { supabase } from '../../lib/supabase';
 import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
@@ -193,34 +193,59 @@ export default function UbicacionScreen() {
   const partnerCoordinate = partnerLocationRow
     ? { latitude: partnerLocationRow.latitude, longitude: partnerLocationRow.longitude }
     : null;
-  const fallbackCoordinate = userLocation
-    ? { latitude: userLocation.coords.latitude, longitude: userLocation.coords.longitude }
-    : { latitude: 40.7128, longitude: -74.006 };
+  const myLocation = myLocationRow;
+  const partnerLocation = partnerLocationRow;
+  const mapCenter = myLocation || partnerLocation;
+  const initialRegion = {
+    latitude: Number(mapCenter?.latitude ?? 19.4326),
+    longitude: Number(mapCenter?.longitude ?? -99.1332),
+    latitudeDelta: 0.01,
+    longitudeDelta: 0.01,
+  };
+
+  useEffect(() => {
+    console.log('Google map initialRegion:', initialRegion);
+    console.log('Google map my marker:', myLocation);
+    console.log('Google map partner marker:', partnerLocation);
+  }, [initialRegion.latitude, initialRegion.longitude, myLocation, partnerLocation]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!mapCenter || !map) return;
 
     if (myCoordinate && partnerCoordinate) {
-      map.fitToCoordinates([myCoordinate, partnerCoordinate], {
-        edgePadding: { top: 70, right: 70, bottom: 70, left: 70 },
-        animated: true,
-      });
+      map.fitToCoordinates(
+        [
+          { latitude: Number(myLocationRow?.latitude), longitude: Number(myLocationRow?.longitude) },
+          { latitude: Number(partnerLocationRow?.latitude), longitude: Number(partnerLocationRow?.longitude) },
+        ],
+        {
+          edgePadding: { top: 80, right: 80, bottom: 80, left: 80 },
+          animated: true,
+        }
+      );
       return;
     }
 
     if (myCoordinate) {
       map.animateToRegion(
         {
-          latitude: myCoordinate.latitude,
-          longitude: myCoordinate.longitude,
+          latitude: Number(myLocationRow?.latitude),
+          longitude: Number(myLocationRow?.longitude),
           latitudeDelta: 0.01,
           longitudeDelta: 0.01,
         },
         450
       );
     }
-  }, [myCoordinate?.latitude, myCoordinate?.longitude, partnerCoordinate?.latitude, partnerCoordinate?.longitude]);
+  }, [
+    mapCenter?.latitude,
+    mapCenter?.longitude,
+    myLocationRow?.latitude,
+    myLocationRow?.longitude,
+    partnerLocationRow?.latitude,
+    partnerLocationRow?.longitude,
+  ]);
 
   const handleSaveLocation = async () => {
     console.log('Actualizar ubicación pressed');
@@ -330,36 +355,55 @@ export default function UbicacionScreen() {
         </View>
       ) : null}
       {/* --- Map Placeholder --- */}
+      <View style={[s.hdrInline, { paddingTop: Math.max(insets.top, 10) }]}>
+        <View style={s.hdrBox}>
+          <MapPin size={20} color={ACCENT_RED} />
+          <Text style={s.hdrTxt}>Compartiendo ubicación en tiempo real</Text>
+        </View>
+      </View>
       <View style={s.mapContainer}>
-        <MapView
-          ref={ref => {
-            mapRef.current = ref;
-          }}
-          style={StyleSheet.absoluteFillObject}
-          initialRegion={{
-            latitude: fallbackCoordinate.latitude,
-            longitude: fallbackCoordinate.longitude,
-            latitudeDelta: 0.02,
-            longitudeDelta: 0.02,
-          }}
-        >
-          {myCoordinate ? <Marker coordinate={myCoordinate} title="Tú" /> : null}
-          {partnerCoordinate ? <Marker coordinate={partnerCoordinate} title="Tu pareja" /> : null}
-        </MapView>
+        {myLocationRow || partnerLocationRow ? (
+          <MapView
+            ref={mapRef}
+            style={s.map}
+            initialRegion={initialRegion}
+            mapType="standard"
+            showsUserLocation={false}
+            showsMyLocationButton={true}
+          >
+            {myLocation ? (
+              <Marker
+                coordinate={{
+                  latitude: Number(myLocation.latitude),
+                  longitude: Number(myLocation.longitude),
+                }}
+                title="Tú"
+                description="Tu ubicación"
+              />
+            ) : null}
 
-        {!myCoordinate && !partnerCoordinate ? (
-          <View style={s.mapEmptyOverlay}>
+            {partnerLocation ? (
+              <Marker
+                coordinate={{
+                  latitude: Number(partnerLocation.latitude),
+                  longitude: Number(partnerLocation.longitude),
+                }}
+                title="Tu pareja"
+                description="Ubicación de tu pareja"
+              />
+            ) : null}
+          </MapView>
+        ) : (
+          <View style={[s.mapEmptyOverlay, { position: 'relative', left: undefined, right: undefined, bottom: undefined, margin: 16 }]}>
             <Text style={s.mapEmptyText}>Comparte tu ubicación para verla en el mapa.</Text>
           </View>
-        ) : null}
+        )}
+      </View>
 
-        {/* Back button */}
-        <View style={[s.hdrOverlay, { paddingTop: Math.max(insets.top, 10) }]}>
-          <View style={s.hdrBox}>
-            <MapPin size={20} color={ACCENT_RED} />
-            <Text style={s.hdrTxt}>Compartiendo ubicación en tiempo real</Text>
-          </View>
-        </View>
+      <View style={s.mapStatusBox}>
+        <Text style={s.mapStatusText}>Mapa activo: {myLocationRow || partnerLocationRow ? 'sí' : 'no'}</Text>
+        <Text style={s.mapStatusText}>Mi marcador: {myLocationRow ? 'sí' : 'no'}</Text>
+        <Text style={s.mapStatusText}>Marcador pareja: {partnerLocationRow ? 'sí' : 'no'}</Text>
       </View>
 
       {/* --- Location Details Sheet --- */}
@@ -503,27 +547,27 @@ function HistoryItem({ icon, txt, time }: any) {
 
 const s = StyleSheet.create({
   container: { flex: 1, backgroundColor: BG },
-  mapContainer: { height: '55%', width: '100%', position: 'relative' },
+  mapContainer: { height: 420, width: '100%', position: 'relative', backgroundColor: '#e5e7eb' },
+  map: { width: '100%', height: 420, backgroundColor: '#e5e7eb' },
+  mapStatusBox: { backgroundColor: '#FFF', paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: BORDER },
+  mapStatusText: { fontSize: 12, color: TEXT_MUTED, fontWeight: '700' },
   mapMock: { width: '100%', height: '100%', opacity: 0.8 },
   markersLayer: { ...StyleSheet.absoluteFillObject },
   marker: { position: 'absolute', alignItems: 'center' },
   markerCircle: { padding: 4, backgroundColor: '#FFF', borderRadius: 30, borderWidth: 2, borderColor: '#FFF', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 5 },
   mkLbl: { marginTop: 4, backgroundColor: 'rgba(255,255,255,0.9)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, fontSize: 12, fontWeight: '700', color: TEXT_DARK },
   mapEmptyOverlay: {
-    position: 'absolute',
-    left: 16,
-    right: 16,
-    bottom: 16,
     backgroundColor: 'rgba(255,255,255,0.95)',
     borderRadius: 18,
     borderWidth: 1,
     borderColor: BORDER,
     paddingHorizontal: 14,
     paddingVertical: 12,
+    alignSelf: 'center',
   },
   mapEmptyText: { color: TEXT_DARK, fontWeight: '800', textAlign: 'center' },
 
-  hdrOverlay: { position: 'absolute', top: 0, left: 0, right: 0, alignItems: 'center' },
+  hdrInline: { width: '100%', alignItems: 'center', backgroundColor: BG },
   hdrBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.95)', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 24, gap: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4 },
   hdrTxt: { fontSize: 13, fontWeight: '700', color: TEXT_DARK },
 
