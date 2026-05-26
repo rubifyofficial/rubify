@@ -1,17 +1,25 @@
-import React, { useState, useEffect } from 'react';
-import {
-  View, Text, StyleSheet, ScrollView, Pressable, 
-  Dimensions, Image, ActivityIndicator
-} from 'react-native';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { 
-  MapPin, Navigation, Home, Bell, 
-  Settings, ChevronRight, Heart, Info 
-} from 'lucide-react-native';
-import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
 import * as Location from 'expo-location';
-
-const { width } = Dimensions.get('window');
+import {
+  Bell,
+  Home,
+  Info,
+  MapPin, Navigation,
+  Settings
+} from 'lucide-react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  ActivityIndicator,
+  Image,
+  Pressable,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View
+} from 'react-native';
+import MapView, { Marker } from 'react-native-maps';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { supabase } from '../../lib/supabase';
+import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
 
 // --- Light / Pastel Theme ---
 const BG = '#FFFFFF';
@@ -22,18 +30,54 @@ const TEXT_MUTED = '#9CA3AF';
 const BORDER = '#F1DCDC';
 const GREEN = '#10B981';
 
+type CoupleLocationRow = {
+  couple_id: string;
+  user_id: string;
+  latitude: number;
+  longitude: number;
+  recorded_at?: string | null;
+};
+
+function haversineKm(a: { lat: number; lon: number }, b: { lat: number; lon: number }) {
+  const R = 6371;
+  const dLat = ((b.lat - a.lat) * Math.PI) / 180;
+  const dLon = ((b.lon - a.lon) * Math.PI) / 180;
+  const lat1 = (a.lat * Math.PI) / 180;
+  const lat2 = (b.lat * Math.PI) / 180;
+  const sinDLat = Math.sin(dLat / 2);
+  const sinDLon = Math.sin(dLon / 2);
+  const x = sinDLat * sinDLat + Math.cos(lat1) * Math.cos(lat2) * sinDLon * sinDLon;
+  return 2 * R * Math.asin(Math.sqrt(x));
+}
+
+function formatRecordedAt(value?: string | null) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleString('es', {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export default function UbicacionScreen() {
   const insets = useSafeAreaInsets();
   const { profile, couple, loading } = useProfileAndCouple();
-  const mapboxToken = process.env.EXPO_PUBLIC_MAPBOX_TOKEN;
-  const mapboxStaticUri = mapboxToken
-    ? `https://api.mapbox.com/styles/v1/mapbox/light-v10/static/-74.006,40.7128,12/800x800?access_token=${mapboxToken}`
-    : null;
+  const mapRef = useRef<MapView | null>(null);
 
   // Location tracking states
   const [userLocation, setUserLocation] = useState<Location.LocationObject | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [locLoading, setLocLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
+  const [saveStatusType, setSaveStatusType] = useState<'success' | 'error' | 'pending' | null>(null);
+  const [myLocationRow, setMyLocationRow] = useState<CoupleLocationRow | null>(null);
+  const [partnerLocationRow, setPartnerLocationRow] = useState<CoupleLocationRow | null>(null);
+  const [locationsLoading, setLocationsLoading] = useState(false);
+  const [locationsError, setLocationsError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -59,51 +103,255 @@ export default function UbicacionScreen() {
   const partnerName = couple?.partner_name || 'Pareja';
   const partnerAvatar = couple?.partner_avatar_url;
   const myAvatar = profile?.avatar_url;
+  const myName = profile?.name || 'Yo';
 
-  if (loading) {
-    return (
-      <View style={[s.container, { justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator color={ACCENT_RED} />
-      </View>
-    );
-  }
+  const resolvedUserId = profile?.id ?? null;
+  const resolvedCoupleId = (couple as any)?.couple_id || (profile as any)?.couple_id || null;
+
+  const fetchCoupleLocations = async () => {
+    if (!resolvedCoupleId || !resolvedUserId) return;
+    setLocationsLoading(true);
+    setLocationsError(null);
+    try {
+      const { data, error } = await supabase
+        .from('couple_locations')
+        .select('couple_id,user_id,latitude,longitude,recorded_at')
+        .eq('couple_id', resolvedCoupleId);
+
+      if (error) {
+        setLocationsError('No se pudieron cargar las ubicaciones.');
+        return;
+      }
+
+      const rows = (data ?? []) as any[];
+      console.log('couple_locations rows:', rows);
+
+      const myLocation = rows.find(row => row.user_id === resolvedUserId) ?? null;
+      const partnerLocation = rows.find(row => row.user_id !== resolvedUserId) ?? null;
+
+      console.log('myLocation:', myLocation);
+      console.log('partnerLocation:', partnerLocation);
+
+      setMyLocationRow(myLocation);
+      setPartnerLocationRow(partnerLocation);
+    } finally {
+      setLocationsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchCoupleLocations();
+  }, [resolvedCoupleId, resolvedUserId]);
+
+  useEffect(() => {
+    if (!resolvedCoupleId) return;
+    try {
+      const channel = supabase
+        .channel(`public:couple_locations:${resolvedCoupleId}`)
+        .on(
+          'postgres_changes',
+          {
+            event: '*',
+            schema: 'public',
+            table: 'couple_locations',
+            filter: `couple_id=eq.${resolvedCoupleId}`,
+          },
+          () => {
+            fetchCoupleLocations();
+          }
+        )
+        .subscribe();
+
+      return () => {
+        channel.unsubscribe();
+      };
+    } catch {
+      return;
+    }
+  }, [resolvedCoupleId]);
+
+  const myRecordedAt = formatRecordedAt(myLocationRow?.recorded_at);
+  const partnerRecordedAt = formatRecordedAt(partnerLocationRow?.recorded_at);
+  const distanceKm =
+    myLocationRow && partnerLocationRow
+      ? haversineKm(
+          { lat: myLocationRow.latitude, lon: myLocationRow.longitude },
+          { lat: partnerLocationRow.latitude, lon: partnerLocationRow.longitude }
+        )
+      : null;
+
+  const distanceText =
+    distanceKm === null
+      ? null
+      : distanceKm >= 1
+        ? `${distanceKm.toFixed(1)} km`
+        : `${Math.max(1, Math.round(distanceKm * 1000))} m`;
+
+  const myCoordinate = myLocationRow
+    ? { latitude: myLocationRow.latitude, longitude: myLocationRow.longitude }
+    : null;
+  const partnerCoordinate = partnerLocationRow
+    ? { latitude: partnerLocationRow.latitude, longitude: partnerLocationRow.longitude }
+    : null;
+  const fallbackCoordinate = userLocation
+    ? { latitude: userLocation.coords.latitude, longitude: userLocation.coords.longitude }
+    : { latitude: 40.7128, longitude: -74.006 };
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    if (myCoordinate && partnerCoordinate) {
+      map.fitToCoordinates([myCoordinate, partnerCoordinate], {
+        edgePadding: { top: 70, right: 70, bottom: 70, left: 70 },
+        animated: true,
+      });
+      return;
+    }
+
+    if (myCoordinate) {
+      map.animateToRegion(
+        {
+          latitude: myCoordinate.latitude,
+          longitude: myCoordinate.longitude,
+          latitudeDelta: 0.01,
+          longitudeDelta: 0.01,
+        },
+        450
+      );
+    }
+  }, [myCoordinate?.latitude, myCoordinate?.longitude, partnerCoordinate?.latitude, partnerCoordinate?.longitude]);
+
+  const handleSaveLocation = async () => {
+    console.log('Actualizar ubicación pressed');
+
+    setSaveStatus(null);
+    setSaveStatusType(null);
+
+    console.log('Profile:', profile);
+    console.log('Couple:', couple);
+    console.log('Resolved couple_id:', resolvedCoupleId);
+    console.log('Resolved user_id:', resolvedUserId);
+
+    if (!resolvedUserId) {
+      setSaveStatus('No se encontró tu perfil');
+      setSaveStatusType('error');
+      return;
+    }
+    if (!resolvedCoupleId) {
+      setSaveStatus('No se encontró la pareja');
+      setSaveStatusType('error');
+      return;
+    }
+
+    setSaving(true);
+    setSaveStatus('Actualizando...');
+    setSaveStatusType('pending');
+
+    try {
+      const existingPerm = await Location.getForegroundPermissionsAsync();
+      if (existingPerm.status !== 'granted') {
+        const requested = await Location.requestForegroundPermissionsAsync();
+        if (requested.status !== 'granted') {
+          setSaveStatus('No se pudo obtener tu ubicación.');
+          setSaveStatusType('error');
+          return;
+        }
+      }
+
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      setUserLocation(loc);
+
+      const coords = loc?.coords;
+      if (!coords || typeof coords.latitude !== 'number' || typeof coords.longitude !== 'number') {
+        setSaveStatus('No se pudo obtener tu ubicación.');
+        setSaveStatusType('error');
+        return;
+      }
+
+      const payload = {
+        couple_id: resolvedCoupleId,
+        user_id: resolvedUserId,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        accuracy_m: coords.accuracy ?? null,
+        heading: coords.heading ?? null,
+        speed_mps: coords.speed ?? null,
+        recorded_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      };
+
+      console.log('Location payload:', payload);
+
+      const { data, error } = await supabase
+        .from('couple_locations')
+        .upsert(payload as any, { onConflict: 'couple_id,user_id' })
+        .select()
+        .single();
+
+      console.log('Location save data:', data);
+      console.log('Location save error:', error);
+
+      if (error) {
+        setSaveStatus('No se pudo guardar tu ubicación');
+        setSaveStatusType('error');
+        return;
+      }
+
+      setSaveStatus('Ubicación actualizada');
+      setSaveStatusType('success');
+
+      const { data: rows, error: fetchError } = await supabase
+        .from('couple_locations')
+        .select('*')
+        .eq('couple_id', resolvedCoupleId);
+
+      console.log('couple_locations fetched after save:', rows);
+      console.log('couple_locations fetch error:', fetchError);
+      await fetchCoupleLocations();
+    } catch (e) {
+      setSaveStatus('No se pudo guardar tu ubicación');
+      setSaveStatusType('error');
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <View style={s.container}>
+      {loading ? (
+        <View
+          style={[
+            StyleSheet.absoluteFillObject,
+            { justifyContent: 'center', alignItems: 'center', paddingTop: Math.max(insets.top, 16), backgroundColor: BG, zIndex: 10 },
+          ]}
+        >
+          <ActivityIndicator color={ACCENT_RED} style={{ marginTop: 14 }} />
+        </View>
+      ) : null}
       {/* --- Map Placeholder --- */}
       <View style={s.mapContainer}>
-        {/* Mock Map Background */}
-        {mapboxStaticUri ? (
-          <Image
-            source={{ uri: mapboxStaticUri }}
-            style={s.mapMock}
-          />
-        ) : (
-          <View style={[s.mapMock, { backgroundColor: SOFT_PINK, justifyContent: 'center', alignItems: 'center', padding: 16 }]}>
-            <Text style={{ color: TEXT_MUTED, fontWeight: '700', textAlign: 'center' }}>
-              Configura tu token de Mapbox para ver el mapa.
-            </Text>
-          </View>
-        )}
-        
-        {/* User markers overlay */}
-        <View style={s.markersLayer}>
-          {/* Me marker */}
-          <View style={[s.marker, { top: '40%', left: '30%' }]}>
-            <View style={s.markerCircle}>
-              <AvatarSource uri={myAvatar} initial={profile?.name?.charAt(0) || 'Y'} size={40} />
-            </View>
-            <Text style={s.mkLbl}>Yo</Text>
-          </View>
+        <MapView
+          ref={ref => {
+            mapRef.current = ref;
+          }}
+          style={StyleSheet.absoluteFillObject}
+          initialRegion={{
+            latitude: fallbackCoordinate.latitude,
+            longitude: fallbackCoordinate.longitude,
+            latitudeDelta: 0.02,
+            longitudeDelta: 0.02,
+          }}
+        >
+          {myCoordinate ? <Marker coordinate={myCoordinate} title="Tú" /> : null}
+          {partnerCoordinate ? <Marker coordinate={partnerCoordinate} title="Tu pareja" /> : null}
+        </MapView>
 
-          {/* Partner marker */}
-          <View style={[s.marker, { top: '55%', left: '60%' }]}>
-            <View style={[s.markerCircle, { borderColor: ACCENT_RED }]}>
-              <AvatarSource uri={partnerAvatar} initial={partnerName.charAt(0)} size={40} />
-            </View>
-            <Text style={[s.mkLbl, { color: ACCENT_RED, fontWeight: '800' }]}>{partnerName}</Text>
+        {!myCoordinate && !partnerCoordinate ? (
+          <View style={s.mapEmptyOverlay}>
+            <Text style={s.mapEmptyText}>Comparte tu ubicación para verla en el mapa.</Text>
           </View>
-        </View>
+        ) : null}
 
         {/* Back button */}
         <View style={[s.hdrOverlay, { paddingTop: Math.max(insets.top, 10) }]}>
@@ -123,11 +371,24 @@ export default function UbicacionScreen() {
             <AvatarSource uri={partnerAvatar} initial={partnerName.charAt(0)} size={60} />
             <View style={s.pInfo}>
               <Text style={s.pName}>{partnerName}</Text>
-              <Text style={s.pLoc}>Cerca de la Universidad de las Artes</Text>
-              <View style={s.pStatRow}>
-                <Navigation size={14} color={GREEN} />
-                <Text style={s.pStat}>Moviéndose • 15 km/h</Text>
-              </View>
+              <Text style={s.pLoc}>
+                {locationsError
+                  ? locationsError
+                  : locationsLoading
+                  ? 'Cargando ubicaciones...'
+                  : partnerLocationRow
+                    ? 'Tu pareja compartió su ubicación'
+                    : 'Tu pareja aún no compartió su ubicación.'}
+              </Text>
+              {distanceText !== null ? (
+                <View style={s.pStatRow}>
+                  <Navigation size={14} color={GREEN} />
+                  <Text style={s.pStat}>Distancia aproximada: {distanceText}</Text>
+                </View>
+              ) : null}
+              {partnerRecordedAt ? (
+                <Text style={s.pLoc}>Última actualización de tu pareja: {partnerRecordedAt}</Text>
+              ) : null}
             </View>
             <View style={s.pBat}>
               <Text style={s.pBatTxt}>84%</Text>
@@ -145,12 +406,43 @@ export default function UbicacionScreen() {
               ) : errorMsg ? (
                 <Text style={s.myLocCoordsError}>{errorMsg}</Text>
               ) : userLocation ? (
-                <Text style={s.myLocCoords}>
-                  Lat: {userLocation.coords.latitude.toFixed(6)} • Lon: {userLocation.coords.longitude.toFixed(6)}
-                </Text>
+                <View style={{ marginTop: 2 }}>
+                  <Text style={s.myLocCoords}>Latitud: {userLocation.coords.latitude.toFixed(6)}</Text>
+                  <Text style={s.myLocCoords}>Longitud: {userLocation.coords.longitude.toFixed(6)}</Text>
+                </View>
               ) : (
                 <Text style={s.myLocCoordsError}>Coordenadas no disponibles</Text>
               )}
+
+              <Pressable
+                style={[s.updateBtn, saving && { opacity: 0.7 }]}
+                onPress={handleSaveLocation}
+                disabled={saving}
+              >
+                <Text style={s.updateBtnText}>{saving ? 'Actualizando...' : 'Actualizar ubicación'}</Text>
+              </Pressable>
+
+              <Text style={s.privacyText}>Tu ubicación solo se comparte con tu pareja.</Text>
+
+              {saveStatus ? (
+                <Text
+                  style={[
+                    s.saveStatusText,
+                    saveStatusType === 'success'
+                      ? s.saveStatusSuccess
+                      : saveStatusType === 'error'
+                        ? s.saveStatusError
+                        : s.saveStatusPending,
+                  ]}
+                >
+                  {saveStatus}
+                </Text>
+              ) : null}
+
+              <Text style={s.myLocSaved}>
+                {myLocationRow ? 'Mi ubicación está compartida' : 'Aún no compartiste tu ubicación'}
+              </Text>
+              {myRecordedAt ? <Text style={s.myLocSaved}>Tu última actualización: {myRecordedAt}</Text> : null}
             </View>
           </View>
 
@@ -217,6 +509,19 @@ const s = StyleSheet.create({
   marker: { position: 'absolute', alignItems: 'center' },
   markerCircle: { padding: 4, backgroundColor: '#FFF', borderRadius: 30, borderWidth: 2, borderColor: '#FFF', shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 5 },
   mkLbl: { marginTop: 4, backgroundColor: 'rgba(255,255,255,0.9)', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, fontSize: 12, fontWeight: '700', color: TEXT_DARK },
+  mapEmptyOverlay: {
+    position: 'absolute',
+    left: 16,
+    right: 16,
+    bottom: 16,
+    backgroundColor: 'rgba(255,255,255,0.95)',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: BORDER,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+  },
+  mapEmptyText: { color: TEXT_DARK, fontWeight: '800', textAlign: 'center' },
 
   hdrOverlay: { position: 'absolute', top: 0, left: 0, right: 0, alignItems: 'center' },
   hdrBox: { flexDirection: 'row', alignItems: 'center', backgroundColor: 'rgba(255,255,255,0.95)', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 24, gap: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4 },
@@ -261,6 +566,21 @@ const s = StyleSheet.create({
     marginTop: 2,
     fontWeight: '600',
   },
+  updateBtn: {
+    marginTop: 12,
+    backgroundColor: ACCENT_RED,
+    borderRadius: 16,
+    paddingVertical: 12,
+    alignItems: 'center',
+    alignSelf: 'stretch',
+  },
+  updateBtnText: { color: '#FFF', fontWeight: '900' },
+  privacyText: { marginTop: 8, fontSize: 12, color: TEXT_MUTED, fontWeight: '700' },
+  saveStatusText: { marginTop: 8, fontSize: 12, fontWeight: '800' },
+  saveStatusSuccess: { color: '#16A34A' },
+  saveStatusError: { color: ACCENT_RED },
+  saveStatusPending: { color: TEXT_MUTED },
+  myLocSaved: { marginTop: 6, fontSize: 12, fontWeight: '800', color: TEXT_MUTED },
 
   actionsRow: { flexDirection: 'row', justifyContent: 'space-around', marginBottom: 30 },
   locAction: { alignItems: 'center' },
