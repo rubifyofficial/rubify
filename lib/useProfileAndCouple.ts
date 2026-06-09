@@ -1,5 +1,5 @@
-﻿import { useState, useEffect, useCallback } from 'react';
-import { supabase } from './supabase';
+import { useState, useEffect, useCallback } from 'react';
+import { getSafeUser, supabase } from './supabase';
 
 export type Profile = {
   id: string;
@@ -25,8 +25,14 @@ export function useProfileAndCouple() {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      const user = await getSafeUser();
+      if (!user) {
+        console.warn('[useProfileAndCouple] no valid user session');
+        setProfile(null);
+        setCouple(null);
+        setError(null);
+        return;
+      }
 
       // 1. My Profile
       const { data: pData, error: pErr } = await supabase.rpc('get_my_profile');

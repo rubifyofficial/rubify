@@ -1,6 +1,6 @@
-import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.39.3";
-import { StreamClient } from "https://esm.sh/@stream-io/node-sdk@0.4.1";
+import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { StreamClient } from 'npm:@stream-io/node-sdk';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
@@ -8,62 +8,84 @@ const corsHeaders = {
 };
 
 serve(async (req) => {
-  // 1. Handle CORS preflight requests from the mobile app
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: corsHeaders });
   }
 
   try {
-    // 2. Safely extract environment variables securely injected by Supabase Secrets
-    const STREAM_API_KEY = Deno.env.get('STREAM_API_KEY');
-    const STREAM_API_SECRET = Deno.env.get('STREAM_API_SECRET');
-    const SUPABASE_URL = Deno.env.get('SUPABASE_URL');
-    const SUPABASE_ANON_KEY = Deno.env.get('SUPABASE_ANON_KEY');
+    const supabaseUrl = Deno.env.get('SUPABASE_URL');
+    const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY');
+    const streamApiKey = Deno.env.get('STREAM_API_KEY');
+    const streamApiSecret = Deno.env.get('STREAM_API_SECRET');
 
-    if (!STREAM_API_KEY || !STREAM_API_SECRET || !SUPABASE_URL || !SUPABASE_ANON_KEY) {
-      throw new Error("Missing required environment variables.");
+    if (!supabaseUrl || !supabaseAnonKey) {
+      throw new Error('Missing Supabase env vars');
     }
 
-    // 3. Extract the Supabase JWT from the Authorization header
+    if (!streamApiKey || !streamApiSecret) {
+      throw new Error('Missing Stream env vars');
+    }
+
     const authHeader = req.headers.get('Authorization');
     if (!authHeader) {
-      throw new Error("No authorization header provided.");
-    }
-    const token = authHeader.replace('Bearer ', '');
-
-    // 4. Verify user securely via Supabase Auth
-    const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    const { data: { user }, error: authError } = await supabaseClient.auth.getUser(token);
-
-    if (authError || !user) {
-      throw new Error("Invalid or expired user token. You must be logged in.");
+      return new Response(JSON.stringify({ error: 'Missing Authorization header' }), {
+        status: 401,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      });
     }
 
-    const userId = user.id;
-
-    // 5. Generate a secure Stream Token for the verified user
-    const streamClient = new StreamClient(STREAM_API_KEY, STREAM_API_SECRET);
-    
-    // Tokens are valid for exactly 1 hour for optimal security
-    const exp = Math.round(new Date().getTime() / 1000) + 60 * 60;
-    const streamToken = streamClient.generateUserToken({ user_id: userId, exp });
-
-    // 6. Return the required payload back to the mobile app
-    const responsePayload = {
-      token: streamToken,
-      apiKey: STREAM_API_KEY,
-      userId: userId
-    };
-
-    return new Response(JSON.stringify(responsePayload), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 200,
+    const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+      global: {
+        headers: {
+          Authorization: authHeader,
+        },
+      },
     });
 
+    const {
+      data: { user },
+      error: userError,
+    } = await supabase.auth.getUser();
+
+    if (userError || !user) {
+      return new Response(
+        JSON.stringify({
+          error: userError?.message || 'Unauthorized',
+        }),
+        {
+          status: 401,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        }
+      );
+    }
+
+    const streamClient = new StreamClient(streamApiKey, streamApiSecret);
+    const token = streamClient.generateUserToken({
+      user_id: user.id,
+    });
+
+    return new Response(
+      JSON.stringify({
+        apiKey: streamApiKey,
+        token,
+        userId: user.id,
+      }),
+      {
+        status: 200,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      }
+    );
   } catch (error) {
-    return new Response(JSON.stringify({ error: error.message }), {
-      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      status: 400,
-    });
+    console.log('stream-token error:', error);
+
+    return new Response(
+      JSON.stringify({
+        error: (error as Error)?.message || 'Unknown error',
+      }),
+      {
+        status: 500,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      }
+    );
   }
 });

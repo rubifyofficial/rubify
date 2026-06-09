@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   SafeAreaView,
   ScrollView,
@@ -7,11 +7,13 @@ import {
   View,
   Image,
   Pressable,
+  TouchableOpacity,
   Dimensions,
   TextInput,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import MapView from 'react-native-maps';
 import {
   MapPin, BookHeart, Heart,
   MessageCircle, Image as ImageIcon,
@@ -19,6 +21,7 @@ import {
 } from 'lucide-react-native';
 import { StatusBar } from 'expo-status-bar';
 import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
+import { supabase } from '../../lib/supabase';
 
 const { width } = Dimensions.get('window');
 
@@ -42,8 +45,47 @@ const MOODS = [
   { emoji: '🥰', label: 'Enamorado' },
   { emoji: '💭', label: 'Extrañando' },
   { emoji: '😕', label: 'Ansioso' },
-  { emoji: '✨', label: 'Motivado' },
+  { emoji: 'Γ£¿', label: 'Motivado' },
 ];
+
+const AVATAR_SIZE = 42;
+const AVATAR_INNER = 38;
+const AVATAR_PADDING = 10;
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+const projectPointToPreview = (
+  latValue: any,
+  lngValue: any,
+  region: {
+    latitude: number;
+    longitude: number;
+    latitudeDelta: number;
+    longitudeDelta: number;
+  },
+  size: { width: number; height: number }
+) => {
+  const lat = Number(latValue);
+  const lng = Number(lngValue);
+
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (!size.width || !size.height) return null;
+
+  const minLat = region.latitude - region.latitudeDelta / 2;
+  const maxLat = region.latitude + region.latitudeDelta / 2;
+  const minLng = region.longitude - region.longitudeDelta / 2;
+  const maxLng = region.longitude + region.longitudeDelta / 2;
+
+  if (maxLat <= minLat || maxLng <= minLng) return null;
+
+  const rawCenterX = ((lng - minLng) / (maxLng - minLng)) * size.width;
+  const rawCenterY = ((maxLat - lat) / (maxLat - minLat)) * size.height;
+
+  return {
+    x: clamp(rawCenterX - AVATAR_SIZE / 2, AVATAR_PADDING, size.width - AVATAR_SIZE - AVATAR_PADDING),
+    y: clamp(rawCenterY - AVATAR_SIZE / 2, AVATAR_PADDING, size.height - AVATAR_SIZE - AVATAR_PADDING),
+  };
+};
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -56,9 +98,178 @@ export default function HomeScreen() {
   const myAvatar = profile?.avatar_url;
   const partnerAvatar = couple?.partner_avatar_url;
 
+  const coupleId = ((profile as any)?.couple_id as string | null) ?? (couple?.couple_id ?? null);
+  const userId = profile?.id ?? null;
+
+  const [myLocationRow, setMyLocationRow] = useState<any | null>(null);
+  const [partnerLocationRow, setPartnerLocationRow] = useState<any | null>(null);
+  const [partnerProfile, setPartnerProfile] = useState<any | null>(null);
+  const [homeMapSize, setHomeMapSize] = useState({ width: 0, height: 0 });
+
+  const fetchHomeMapLocations = useCallback(async () => {
+    if (!userId || !coupleId) return;
+
+    try {
+      const { data: rows, error } = await supabase
+        .from('couple_locations')
+        .select('*')
+        .eq('couple_id', coupleId)
+        .order('updated_at', { ascending: false });
+
+      if (error) {
+        console.warn('[Inicio] fetch locations error:', error);
+        return;
+      }
+
+      const myRow = rows?.find((row: any) => row.user_id === userId) ?? null;
+      const partnerRow = rows?.find((row: any) => row.user_id !== userId) ?? null;
+
+      setMyLocationRow(myRow);
+      setPartnerLocationRow(partnerRow);
+    } catch (error) {
+      console.warn('[Inicio] fetchHomeMapLocations failed:', error);
+    }
+  }, [coupleId, userId]);
+
+  const fetchPartnerProfile = useCallback(async () => {
+    if (!userId || !coupleId) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('couple_id', coupleId)
+        .neq('id', userId)
+        .maybeSingle();
+
+      if (error) {
+        console.warn('[Inicio] fetch partner profile error:', error);
+        return;
+      }
+
+      setPartnerProfile(data ?? null);
+    } catch (error) {
+      console.warn('[Inicio] fetchPartnerProfile failed:', error);
+    }
+  }, [coupleId, userId]);
+
+  useEffect(() => {
+    fetchHomeMapLocations();
+    fetchPartnerProfile();
+  }, [fetchHomeMapLocations, fetchPartnerProfile]);
+
+  useEffect(() => {
+    if (!coupleId) return;
+
+    const channel = supabase
+      .channel(`home-map-locations-${coupleId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'couple_locations',
+          filter: `couple_id=eq.${coupleId}`,
+        },
+        () => {
+          fetchHomeMapLocations();
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [coupleId, fetchHomeMapLocations]);
+
+  const homePreviewRegion = useMemo(() => {
+    const myLat = Number(myLocationRow?.latitude);
+    const myLng = Number(myLocationRow?.longitude);
+    const partnerLat = Number(partnerLocationRow?.latitude);
+    const partnerLng = Number(partnerLocationRow?.longitude);
+
+    const points = [
+      Number.isFinite(myLat) && Number.isFinite(myLng) ? { latitude: myLat, longitude: myLng } : null,
+      Number.isFinite(partnerLat) && Number.isFinite(partnerLng)
+        ? { latitude: partnerLat, longitude: partnerLng }
+        : null,
+    ].filter(Boolean) as { latitude: number; longitude: number }[];
+
+    if (points.length === 0) {
+      return { latitude: 19.2826, longitude: -99.6557, latitudeDelta: 0.02, longitudeDelta: 0.02 };
+    }
+
+    if (points.length === 1) {
+      return {
+        latitude: points[0].latitude,
+        longitude: points[0].longitude,
+        latitudeDelta: 0.01,
+        longitudeDelta: 0.01,
+      };
+    }
+
+    const lats = points.map((p) => p.latitude);
+    const lngs = points.map((p) => p.longitude);
+
+    const minLat = Math.min(...lats);
+    const maxLat = Math.max(...lats);
+    const minLng = Math.min(...lngs);
+    const maxLng = Math.max(...lngs);
+
+    const latitude = (minLat + maxLat) / 2;
+    const longitude = (minLng + maxLng) / 2;
+
+    const latitudeDelta = Math.max((maxLat - minLat) * 1.8, 0.01);
+    const longitudeDelta = Math.max((maxLng - minLng) * 1.8, 0.01);
+
+    return { latitude, longitude, latitudeDelta, longitudeDelta };
+  }, [
+    myLocationRow?.latitude,
+    myLocationRow?.longitude,
+    partnerLocationRow?.latitude,
+    partnerLocationRow?.longitude,
+  ]);
+
+  const myPreviewPoint = useMemo(() => {
+    return projectPointToPreview(myLocationRow?.latitude, myLocationRow?.longitude, homePreviewRegion, homeMapSize);
+  }, [myLocationRow?.latitude, myLocationRow?.longitude, homePreviewRegion, homeMapSize]);
+
+  const partnerPreviewPoint = useMemo(() => {
+    return projectPointToPreview(
+      partnerLocationRow?.latitude,
+      partnerLocationRow?.longitude,
+      homePreviewRegion,
+      homeMapSize
+    );
+  }, [partnerLocationRow?.latitude, partnerLocationRow?.longitude, homePreviewRegion, homeMapSize]);
+
+  const partnerPreviewPointAdjusted = useMemo(() => {
+    if (!myPreviewPoint || !partnerPreviewPoint) return partnerPreviewPoint;
+
+    const dx = partnerPreviewPoint.x - myPreviewPoint.x;
+    const dy = partnerPreviewPoint.y - myPreviewPoint.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < AVATAR_SIZE - 4) {
+      const nextX = clamp(
+        partnerPreviewPoint.x + AVATAR_SIZE * 0.55,
+        AVATAR_PADDING,
+        homeMapSize.width - AVATAR_SIZE - AVATAR_PADDING
+      );
+      const nextY = clamp(
+        partnerPreviewPoint.y - AVATAR_SIZE * 0.12,
+        AVATAR_PADDING,
+        homeMapSize.height - AVATAR_SIZE - AVATAR_PADDING
+      );
+      return { x: nextX, y: nextY };
+    }
+
+    return partnerPreviewPoint;
+  }, [myPreviewPoint, partnerPreviewPoint, homeMapSize]);
+
   // Local UI states
-  const [myMood, setMyMood] = useState<{ emoji: string; label: string } | null>({ emoji: '😊', label: 'Feliz' });
-  const [partnerMood, setPartnerMood] = useState<{ emoji: string; label: string } | null>({ emoji: '💭', label: 'Extrañando' });
+  const [myMood, setMyMood] = useState<{ emoji: string; label: string } | null>({ emoji: '≡ƒÿè', label: 'Feliz' });
+  const [partnerMood, setPartnerMood] = useState<{ emoji: string; label: string } | null>({ emoji: '≡ƒÆ¡', label: 'Extra├▒ando' });
   const [myAnswer, setMyAnswer] = useState<string>('');
   const [challengeCompleted, setChallengeCompleted] = useState<boolean>(false);
 
@@ -131,36 +342,56 @@ export default function HomeScreen() {
         </View>
 
         {/* --- 3. Wide Mini Navigation / Map Preview --- */}
-        <Pressable 
-          style={s.mapPreviewCardWide} 
-          onPress={() => router.push('/(tabs)/ubicacion')}
+        <TouchableOpacity
+          activeOpacity={0.9}
+          style={s.homeMapCard}
+          onPress={() => {
+            router.push({
+              pathname: '/(tabs)/ubicacion',
+              params: { focus: 'partner' },
+            });
+          }}
+          onLayout={(event) => {
+            const { width: w, height: h } = event.nativeEvent.layout;
+            setHomeMapSize({ width: w, height: h });
+          }}
         >
-          <View style={s.mapBg}>
-            {/* Micro Roads */}
-            <View style={[s.mapRoad, { top: '45%', left: '-10%', width: '120%', height: 6, transform: [{ rotate: '5deg' }] }]} />
-            <View style={[s.mapRoad, { top: '-10%', left: '40%', height: '120%', width: 6, transform: [{ rotate: '35deg' }] }]} />
-            <View style={[s.mapRoad, { top: '25%', left: '10%', width: '100%', height: 6, transform: [{ rotate: '-15deg' }] }]} />
-            
-            {/* Me Marker */}
-            <View style={[s.mapMarker, { top: '20%', left: '20%' }]}>
-              <View style={[s.markerAvatarBox, { borderColor: '#FFFFFF', padding: 2, borderRadius: 18 }]}>
-                <AvatarSource uri={myAvatar} initial={getInitial(myName)} size={28} />
-              </View>
-            </View>
+          <MapView
+            pointerEvents="none"
+            style={StyleSheet.absoluteFill}
+            region={homePreviewRegion}
+            scrollEnabled={false}
+            zoomEnabled={false}
+            rotateEnabled={false}
+            pitchEnabled={false}
+            toolbarEnabled={false}
+            showsCompass={false}
+            showsMyLocationButton={false}
+            mapType="standard"
+          />
 
-            {/* Partner Marker */}
-            <View style={[s.mapMarker, { bottom: '20%', right: '20%' }]}>
-              <View style={[s.markerAvatarBox, { borderColor: ACCENT_RED, padding: 2, borderRadius: 18 }]}>
-                <AvatarSource uri={partnerAvatar} initial={getInitial(partnerName)} size={28} />
-              </View>
-            </View>
+          <View pointerEvents="none" style={StyleSheet.absoluteFill}>
+            <HomePreviewAvatar
+              point={myPreviewPoint}
+              avatarUri={typeof myAvatar === 'string' ? myAvatar : null}
+              fallbackText={myName}
+              zIndex={3}
+            />
 
-            {/* Tiny Center Love Heart Pin */}
-            <View style={[s.mapMarker, { top: '45%', left: '48%', transform: [{ translateX: -7 }, { translateY: -7 }] }]}>
-              <Heart size={14} color={ACCENT_RED} fill={ACCENT_RED} style={{ opacity: 0.9 }} />
-            </View>
+            <HomePreviewAvatar
+              point={partnerPreviewPointAdjusted}
+              avatarUri={
+                typeof partnerProfile?.avatar_url === 'string'
+                  ? partnerProfile.avatar_url
+                  : typeof partnerAvatar === 'string'
+                    ? partnerAvatar
+                    : null
+              }
+              fallbackText={partnerProfile?.name || partnerName}
+              zIndex={4}
+            />
           </View>
-        </Pressable>
+        </TouchableOpacity>
 
         {/* --- 4. Suggestions section --- */}
         <Text style={s.sectionTitle}>Sugerencias para hoy</Text>
@@ -459,6 +690,43 @@ function AvatarSource({ uri, initial, size, border }: any) {
   );
 }
 
+function HomePreviewAvatar({
+  point,
+  avatarUri,
+  fallbackText,
+  zIndex,
+}: {
+  point: { x: number; y: number } | null;
+  avatarUri?: string | null;
+  fallbackText?: string;
+  zIndex?: number;
+}) {
+  if (!point) return null;
+
+  const cleanUri = typeof avatarUri === 'string' && avatarUri.trim().length > 0 ? avatarUri.trim() : null;
+
+  return (
+    <View
+      style={[
+        s.homePreviewAvatar,
+        {
+          left: point.x,
+          top: point.y,
+          zIndex: zIndex ?? 3,
+        },
+      ]}
+    >
+      {cleanUri ? (
+        <Image source={{ uri: cleanUri }} style={s.homePreviewAvatarImage} resizeMode="cover" fadeDuration={0} />
+      ) : (
+        <Text style={s.homePreviewAvatarFallback}>
+          {(fallbackText || '?').trim().slice(0, 1).toUpperCase()}
+        </Text>
+      )}
+    </View>
+  );
+}
+
 function SuggestionCard({ icon, title, onPress }: { icon: React.ReactNode; title: string; onPress: () => void }) {
   return (
     <Pressable style={s.suggestionCard} onPress={onPress}>
@@ -506,40 +774,44 @@ const s = StyleSheet.create({
   badgeText: { color: ACCENT_RED, fontWeight: '800', fontSize: 14 },
   sinceText: { color: TEXT_SECONDARY, fontSize: 13, fontWeight: '500' },
 
-  mapPreviewCardWide: {
-    backgroundColor: CARD_BG,
-    borderRadius: 32,
+  homeMapCard: {
     height: 150,
-    marginBottom: 24,
-    borderWidth: 1,
-    borderColor: BORDER,
+    borderRadius: 28,
     overflow: 'hidden',
+    backgroundColor: '#f8f4ef',
+    borderWidth: 1,
+    borderColor: '#f1dfe4',
+    marginBottom: 24,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 10 },
     shadowOpacity: 0.05,
     shadowRadius: 20,
     elevation: 4,
   },
-  mapBg: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: '#F6F4F0',
-  },
-  mapRoad: {
+  homePreviewAvatar: {
     position: 'absolute',
-    backgroundColor: '#E8E2D5',
-    borderRadius: 3,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
+    backgroundColor: '#ffffff',
+    borderWidth: 2,
+    borderColor: '#efb6c3',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+    elevation: 8,
   },
-  mapMarker: {
-    position: 'absolute',
+  homePreviewAvatarImage: {
+    width: AVATAR_INNER,
+    height: AVATAR_INNER,
+    borderRadius: AVATAR_INNER / 2,
   },
-  markerAvatarBox: {
-    backgroundColor: '#FFFFFF',
-    borderWidth: 1,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 3,
-    elevation: 2,
+  homePreviewAvatarFallback: {
+    color: '#d96f86',
+    fontWeight: '900',
+    fontSize: 15,
+    textAlign: 'center',
+    includeFontPadding: false,
   },
 
   card: {

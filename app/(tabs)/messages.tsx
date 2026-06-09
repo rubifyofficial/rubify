@@ -2,14 +2,14 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, Pressable, TextInput,
   ScrollView, KeyboardAvoidingView, Platform, Alert,
-  ActivityIndicator, Image, Modal
+  ActivityIndicator, Image, Modal, ImageBackground
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import {
   Phone, Video, MoreVertical, Plus, Send,
   Image as ImageIcon, MapPin, Sparkles, BookHeart, CheckCheck,
-  ChevronLeft, Search
+  ChevronLeft, Search, Play
 } from 'lucide-react-native';
 import { supabase } from '../../lib/supabase';
 import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
@@ -38,6 +38,22 @@ export default function MensajesScreen() {
 
   const partnerName = couple?.partner_name || 'Pareja';
   const partnerAvatar = couple?.partner_avatar_url;
+
+  const startCall = useCallback(
+    (type: 'voice' | 'video') => {
+      if (!couple?.couple_id) {
+        Alert.alert('Error', 'No se pudo iniciar la llamada.');
+        return;
+      }
+
+      setCallModalType(null);
+      router.push({
+        pathname: '/ver-juntos',
+        params: { autoCall: '1', source: 'messages', callKind: type },
+      } as any);
+    },
+    [couple?.couple_id, router]
+  );
 
   const filteredMessages = messages.filter(m => 
     m.content.toLowerCase().includes(searchQuery.toLowerCase())
@@ -69,6 +85,93 @@ export default function MensajesScreen() {
       setLoading(false);
     }
   };
+
+  const openMomentFromChat = useCallback(
+    (message: any) => {
+      if (!message?.moment_id) {
+        router.push('/(tabs)/moments');
+        return;
+      }
+
+      router.push({
+        pathname: '/(tabs)/moments',
+        params: { momentId: String(message.moment_id) },
+      } as any);
+    },
+    [router]
+  );
+
+  const renderMomentMessage = useCallback(
+    (message: any, key: string) => {
+      const isMe = message.sender_id === profile?.id;
+      const mediaType = message.media_type === 'video' ? 'video' : 'image';
+      const badge = message.moment_badge || (mediaType === 'video' ? 'VIDEO' : 'FOTO');
+      const title = message.moment_title || (mediaType === 'video' ? 'Nuevo video' : 'Nueva foto');
+      const subtitle = message.moment_subtitle || 'Una pequeña parte de su historia';
+
+      const previewUrl = message.thumbnail_url || (mediaType === 'image' ? message.media_url : null);
+
+      return (
+        <View key={key} style={[s.msgRow, isMe ? s.rowMe : s.rowPartner]}>
+          <Pressable
+            onPress={() => openMomentFromChat(message)}
+            style={[s.bubble, isMe ? s.bubbleMe : s.bubblePartner, s.momentMessageBubble]}
+          >
+            {previewUrl ? (
+              <ImageBackground source={{ uri: previewUrl }} style={s.chatMomentPreview} imageStyle={s.chatMomentPreviewImage}>
+                <View style={s.chatMomentOverlay}>
+                  <View style={s.chatMomentBadge}>
+                    <Text style={s.chatMomentBadgeText}>{badge}</Text>
+                  </View>
+
+                  {mediaType === 'video' ? (
+                    <View style={s.chatMomentPlayButton}>
+                      <Play size={22} color="#fff" fill="#fff" />
+                    </View>
+                  ) : null}
+
+                  <View style={s.chatMomentBottom}>
+                    <Text style={s.chatMomentTitle} numberOfLines={1}>
+                      {title}
+                    </Text>
+                    <Text style={s.chatMomentSubtitle} numberOfLines={2}>
+                      {subtitle}
+                    </Text>
+                    <Text style={s.chatMomentOpenText}>Toca para abrir en Momentos</Text>
+                  </View>
+                </View>
+              </ImageBackground>
+            ) : (
+              <View style={[s.chatMomentPreview, s.chatMomentPreviewFallback]}>
+                <View style={s.chatMomentOverlay}>
+                  <View style={s.chatMomentBadge}>
+                    <Text style={s.chatMomentBadgeText}>{badge}</Text>
+                  </View>
+                  <View style={s.chatMomentPlayButton}>
+                    <Play size={22} color="#fff" fill="#fff" />
+                  </View>
+                  <View style={s.chatMomentBottom}>
+                    <Text style={s.chatMomentTitle} numberOfLines={1}>
+                      {title}
+                    </Text>
+                    <Text style={s.chatMomentSubtitle} numberOfLines={2}>
+                      {subtitle}
+                    </Text>
+                    <Text style={s.chatMomentOpenText}>Toca para abrir en Momentos</Text>
+                  </View>
+                </View>
+              </View>
+            )}
+
+            <Text style={[s.timeTxt, isMe ? s.timeMe : s.timePartner]}>
+              {new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </Text>
+          </Pressable>
+        </View>
+      );
+    },
+    [openMomentFromChat, profile?.id]
+  );
 
   const subscribeToMessages = () => {
     return supabase
@@ -170,6 +273,9 @@ export default function MensajesScreen() {
         ) : (
           filteredMessages.map((m, idx) => {
             const isMe = m.sender_id === profile?.id;
+            if (m.message_type === 'moment') {
+              return renderMomentMessage(m, String(m.id || idx));
+            }
             return (
               <View key={m.id || idx} style={[s.msgRow, isMe ? s.rowMe : s.rowPartner]}>
                 <View style={[s.bubble, isMe ? s.bubbleMe : s.bubblePartner]}>
@@ -210,9 +316,9 @@ export default function MensajesScreen() {
               {callModalType === 'voice' ? 'Llamada de voz' : 'Videollamada'}
             </Text>
             <Text style={s.modalText}>
-              {callModalType === 'voice' 
-                ? 'Las llamadas de voz estarán listas muy pronto para ustedes.' 
-                : 'Las videollamadas estarán listas muy pronto para ustedes.'}
+              {callModalType === 'voice'
+                ? '¿Quieres iniciar una llamada de voz con tu pareja?'
+                : '¿Quieres iniciar una videollamada con tu pareja?'}
             </Text>
             <View style={s.modalActions}>
               <Pressable 
@@ -223,9 +329,9 @@ export default function MensajesScreen() {
               </Pressable>
               <Pressable 
                 style={[s.modalBtn, s.modalBtnConfirm]} 
-                onPress={() => setCallModalType(null)}
+                onPress={() => startCall(callModalType === 'voice' ? 'voice' : 'video')}
               >
-                <Text style={s.modalBtnText}>Entendido</Text>
+                <Text style={s.modalBtnText}>Llamar</Text>
               </Pressable>
             </View>
           </View>
@@ -306,6 +412,87 @@ const s = StyleSheet.create({
   timeTxt: { fontSize: 10, marginTop: 4, alignSelf: 'flex-end' },
   timeMe: { color: 'rgba(255,255,255,0.7)' },
   timePartner: { color: TEXT_MUTED },
+
+  momentMessageBubble: {
+    padding: 0,
+    overflow: 'hidden',
+    backgroundColor: 'transparent',
+    maxWidth: '78%',
+    borderRadius: 26,
+    borderTopLeftRadius: 26,
+    borderTopRightRadius: 26,
+    borderBottomLeftRadius: 26,
+    borderBottomRightRadius: 26,
+    borderWidth: 0,
+    borderColor: 'transparent',
+  },
+  chatMomentPreview: {
+    width: 230,
+    height: 310,
+    overflow: 'hidden',
+    backgroundColor: '#111',
+    borderRadius: 26,
+  },
+  chatMomentPreviewFallback: {
+    borderRadius: 26,
+  },
+  chatMomentPreviewImage: {
+    borderRadius: 26,
+  },
+  chatMomentOverlay: {
+    flex: 1,
+    padding: 14,
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(0,0,0,0.20)',
+    borderRadius: 26,
+  },
+  chatMomentBadge: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+  },
+  chatMomentBadgeText: {
+    fontSize: 12,
+    fontWeight: '900',
+    color: '#7b2d3b',
+    letterSpacing: 0.8,
+  },
+  chatMomentPlayButton: {
+    position: 'absolute',
+    top: '45%',
+    left: '50%',
+    marginLeft: -26,
+    marginTop: -26,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.5)',
+  },
+  chatMomentBottom: {
+    gap: 4,
+  },
+  chatMomentTitle: {
+    color: '#fff',
+    fontSize: 22,
+    fontWeight: '900',
+  },
+  chatMomentSubtitle: {
+    color: 'rgba(255,255,255,0.9)',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  chatMomentOpenText: {
+    marginTop: 6,
+    color: 'rgba(255,255,255,0.75)',
+    fontSize: 12,
+    fontWeight: '700',
+  },
 
   inputArea: {
     flexDirection: 'row',

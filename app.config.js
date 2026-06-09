@@ -23,7 +23,17 @@ module.exports = () => ({
       },
       edgeToEdgeEnabled: true,
       predictiveBackGestureEnabled: false,
-      permissions: [],
+      permissions: [
+        'CAMERA',
+        'RECORD_AUDIO',
+        'MODIFY_AUDIO_SETTINGS',
+        'ACCESS_NETWORK_STATE',
+        'BLUETOOTH_CONNECT',
+        'READ_MEDIA_IMAGES',
+        'READ_MEDIA_VIDEO',
+        'READ_EXTERNAL_STORAGE',
+        'WRITE_EXTERNAL_STORAGE',
+      ],
       package: 'com.usfully.app_temp',
       config: {
         googleMaps: {
@@ -36,7 +46,39 @@ module.exports = () => ({
       output: 'static',
       favicon: './assets/images/favicon.png',
     },
-    plugins: ['expo-router'],
+    plugins: [
+      [
+        'expo-camera',
+        {
+          cameraPermission: 'Usfully necesita acceso a la cámara para crear momentos.',
+          microphonePermission: 'Usfully necesita acceso al micrófono para grabar videos.',
+          recordAudioAndroid: true,
+        },
+      ],
+      [
+        'expo-media-library',
+        {
+          photosPermission: 'Usfully necesita acceso a tus fotos para guardar momentos.',
+          savePhotosPermission: 'Usfully necesita permiso para guardar momentos en tu galería.',
+          isAccessMediaLocationEnabled: true,
+        },
+      ],
+      'expo-video',
+      'expo-router',
+      [
+        '@stream-io/video-react-native-sdk',
+        {
+          androidPictureInPicture: false,
+        },
+      ],
+      [
+        '@config-plugins/react-native-webrtc',
+        {
+          cameraPermission: 'Usfully necesita acceso a la cámara para ver juntos.',
+          microphonePermission: 'Usfully necesita acceso al micrófono para hablar mientras ven juntos.',
+        },
+      ],
+    ],
     experiments: {
       typedRoutes: true,
     },

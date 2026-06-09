@@ -1,13 +1,8 @@
 import React, { createContext, useContext, useEffect, useRef, useState, useCallback } from 'react';
 import { View, ActivityIndicator } from 'react-native';
 import { Session } from '@supabase/supabase-js';
-import { supabase } from './supabase';
+import { getSafeSession, isInvalidRefreshTokenError, supabase } from './supabase';
 import { useRouter, useSegments } from 'expo-router';
-
-function isInvalidRefreshTokenError(error: unknown) {
-  const message = typeof (error as any)?.message === 'string' ? (error as any).message : '';
-  return message.includes('Invalid Refresh Token') || message.includes('Refresh Token Not Found');
-}
 
 type AuthContextType = {
   session: Session | null;
@@ -65,9 +60,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       if (handledInvalidRefresh.current) return;
       handledInvalidRefresh.current = true;
 
-      if (error) {
-        console.warn('[AuthProvider] Invalid refresh token. Clearing local session.');
-      }
+      console.log('Cleared invalid Supabase session');
+      if (error) console.log('[AuthProvider] Cleared invalid session due to:', error);
 
       try {
         await (supabase.auth as any).signOut({ scope: 'local' });
@@ -86,15 +80,43 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
     (async () => {
       try {
-        const { data, error } = await supabase.auth.getSession();
-        if (error && isInvalidRefreshTokenError(error) && !data.session) {
-          await clearLocalSession(error);
+        const session = await getSafeSession();
+        setSession(session);
+        if (session) {
+          await fetchCouple();
+        }
+      } catch (e) {
+        if (isInvalidRefreshTokenError(e)) {
+          console.warn('[AuthProvider] auth session catch:', (e as any)?.message ?? e);
+          await clearLocalSession(e);
+          return;
+        }
+        console.log('[AuthProvider] Auth session load error:', e);
+      } finally {
+        setLoading(false);
+      }
+    })();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, nextSession) => {
+      try {
+        const eventName = String(_event);
+        if (eventName === 'TOKEN_REFRESH_FAILED') {
+          await clearLocalSession('TOKEN_REFRESH_FAILED');
           return;
         }
 
-        setSession(data.session);
-        if (data.session) {
+        if (!nextSession && _event === 'SIGNED_OUT') {
+          setSession(null);
+          setHasCouple(false);
+          setLoading(false);
+          return;
+        }
+
+        setSession(nextSession);
+        if (nextSession) {
           await fetchCouple();
+        } else {
+          setHasCouple(false);
         }
         setLoading(false);
       } catch (e) {
@@ -102,25 +124,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
           await clearLocalSession(e);
           return;
         }
+        console.log('[AuthProvider] onAuthStateChange error:', e);
         setLoading(false);
       }
-    })();
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event, session) => {
-      if (!session && _event === 'SIGNED_OUT') {
-        setSession(null);
-        setHasCouple(false);
-        setLoading(false);
-        return;
-      }
-
-      setSession(session);
-      if (session) {
-        await fetchCouple();
-      } else {
-        setHasCouple(false);
-      }
-      setLoading(false);
     });
 
     return () => subscription.unsubscribe();

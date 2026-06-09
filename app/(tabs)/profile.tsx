@@ -109,7 +109,26 @@ export default function ProfileScreen() {
 
     setSaving(true);
     try {
-      const { data: { user } } = await supabase.auth.getUser();
+      const { data, error } = await supabase.auth.getUser();
+      if (error) {
+        const message = error.message || '';
+        if (message.includes('Invalid Refresh Token') || message.includes('Refresh Token Not Found')) {
+          console.warn('[Profile] Invalid refresh token, clearing local session');
+          try {
+            await (supabase.auth as any).signOut({ scope: 'local' });
+          } catch {
+            try {
+              await supabase.auth.signOut();
+            } catch {
+              // ignore
+            }
+          }
+          throw new Error('Sesi├│n caducada. Inicia sesi├│n de nuevo.');
+        }
+        throw error;
+      }
+
+      const user = data?.user ?? null;
       if (!user) throw new Error('Usuario no encontrado');
 
       let finalAvatarUrl = profile?.avatar_url || null;
@@ -482,3 +501,4 @@ const styles = StyleSheet.create({
   cancelBtn: { padding: 16, alignItems: 'center' },
   cancelText: { color: TEXT_SECONDARY, fontWeight: '600', fontSize: 15 },
 });
+

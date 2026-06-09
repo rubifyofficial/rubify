@@ -2,6 +2,8 @@
   "extends": "expo/tsconfig.base",
   "compilerOptions": {
     "strict": true,
+    "jsx": "react-native",
+    "baseUrl": ".",
     "paths": {
       "@/*": [
         "./*"
@@ -13,5 +15,12 @@
     "**/*.tsx",
     ".expo/types/**/*.ts",
     "expo-env.d.ts"
+  ],
+  "exclude": [
+    "supabase/functions",
+    "backup-untracked",
+    "recovered-from-patch",
+    "backup-*",
+    "*.patch"
   ]
 }
