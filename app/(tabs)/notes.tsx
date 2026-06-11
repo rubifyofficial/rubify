@@ -2318,8 +2318,13 @@ export default function NotesScreen() {
   const hasMainTextDraft = noteText.trim().length > 0;
   const shouldShowMainPhotoPreview = !noteText.trim() && !!displayedMainPhotoUri;
   const albumMemories = useMemo(() => buildAlbumMemories(notes, userId, partnerName), [notes, partnerName, userId]);
-  const leftPageMemories = useMemo(() => albumMemories.filter((_, index) => index % 2 === 0), [albumMemories]);
-  const rightPageMemories = useMemo(() => albumMemories.filter((_, index) => index % 2 === 1), [albumMemories]);
+  const albumMemoryClusters = useMemo(() => {
+    const clusters: AlbumMemory[][] = [];
+    for (let i = 0; i < albumMemories.length; i += 3) {
+      clusters.push(albumMemories.slice(i, i + 3));
+    }
+    return clusters;
+  }, [albumMemories]);
 
   if (loading) {
     return (
@@ -3037,99 +3042,117 @@ export default function NotesScreen() {
 
               <View style={s.openBookSpread}>
                 <View style={s.openBookShadow} />
-                <View style={s.openBookPageLeft}>
-                  <View style={s.openBookPageGlow} />
+                <View style={s.scrapbookCanvas}>
+                  <View style={s.scrapbookCanvasGlowTop} pointerEvents="none" />
+                  <View style={s.scrapbookCanvasGlowBottom} pointerEvents="none" />
+                  <View style={s.scrapbookCanvasDotCluster} pointerEvents="none">
+                    <View style={s.scrapbookCanvasDot} />
+                    <View style={s.scrapbookCanvasDot} />
+                    <View style={s.scrapbookCanvasDot} />
+                  </View>
                   {albumMemories.length > 0 ? (
-                    <ScrollView style={s.albumPageScroll} contentContainerStyle={s.albumPageContent} showsVerticalScrollIndicator={false}>
-                      {leftPageMemories.map((memory) => (
-                        <View
-                          key={memory.id}
-                          style={[
-                            s.albumCard,
-                            memory.cardTone === 'pink'
-                              ? s.albumCardPink
-                              : memory.cardTone === 'cream'
-                                ? s.albumCardCream
-                                : s.albumCardLilac,
-                          ]}
-                        >
-                          <View style={s.albumCardTop}>
-                            <View style={[s.authorBadge, memory.isMine ? s.authorBadgeMine : s.authorBadgePartner]}>
-                              <Text style={[s.authorBadgeText, memory.isMine ? s.authorBadgeTextMine : s.authorBadgeTextPartner]}>
-                                {memory.authorLabel}
-                              </Text>
-                            </View>
-                            <View style={s.timeRow}>
-                              <Heart size={12} color="#D17399" strokeWidth={1.8} />
-                              <Text style={s.timeText}>{memory.dateLabel}</Text>
-                            </View>
-                          </View>
-                          {memory.imageUri ? (
-                            <Image source={{ uri: memory.imageUri }} style={s.albumMemoryImage} resizeMode="cover" />
-                          ) : (
-                            <View style={[s.albumMemoryPreview, { backgroundColor: memory.backgroundColor }]}>
-                              <Text style={s.albumMemoryPreviewLabel}>{memory.kindLabel}</Text>
-                            </View>
-                          )}
-                          <Text style={s.albumMemoryKind}>{memory.kindLabel}</Text>
-                          <Text style={s.albumCardText} numberOfLines={memory.imageUri ? 5 : 7}>
-                            {memory.previewText}
-                          </Text>
-                        </View>
-                      ))}
-                    </ScrollView>
-                  ) : null}
-                </View>
+                    <ScrollView style={s.albumPageScroll} contentContainerStyle={s.albumScrapbookContent} showsVerticalScrollIndicator={false}>
+                      <View style={s.scrapbookHeaderCard}>
+                        <Text style={s.scrapbookHeaderTitle}>Recuerdos juntos</Text>
+                        <Text style={s.scrapbookHeaderSubtitle}>pequenos momentos guardados con amor</Text>
+                      </View>
+                      <View style={s.albumScrapbookFlow}>
+                        {albumMemoryClusters.map((cluster, clusterIndex) => (
+                          <View
+                            key={`cluster-${clusterIndex}`}
+                            style={[s.scrapbookCluster, clusterIndex % 2 === 1 && s.scrapbookClusterAlt]}
+                          >
+                            {cluster.map((memory, memoryIndex) => {
+                              const seed = fnv1aHash(memory.id);
+                              const variant = memory.imageUri ? 'photo' : memory.kindLabel === 'Texto' ? 'text' : 'mixed';
+                              const rotation = ((seed % 9) - 4) * 0.7;
+                              const slotStyle =
+                                clusterIndex % 2 === 0
+                                  ? memoryIndex === 0
+                                    ? s.scrapbookSlotEvenPrimary
+                                    : memoryIndex === 1
+                                      ? s.scrapbookSlotEvenSecondary
+                                      : s.scrapbookSlotEvenTertiary
+                                  : memoryIndex === 0
+                                    ? s.scrapbookSlotOddPrimary
+                                    : memoryIndex === 1
+                                      ? s.scrapbookSlotOddSecondary
+                                      : s.scrapbookSlotOddTertiary;
 
-                <View style={s.openBookBinding}>
-                  <View style={s.openBookBindingLine} />
-                  <View style={s.bindingRing} />
-                  <View style={s.bindingRing} />
-                  <View style={s.bindingRing} />
-                  <View style={s.bindingRing} />
-                  <View style={s.bindingRing} />
-                </View>
+                              return (
+                                <Pressable
+                                  key={memory.id}
+                                  style={[
+                                    s.scrapbookItem,
+                                    slotStyle,
+                                    variant === 'photo'
+                                      ? s.scrapbookPolaroid
+                                      : variant === 'text'
+                                        ? s.scrapbookNote
+                                        : s.scrapbookMixed,
+                                    { transform: [{ rotate: `${rotation}deg` }] },
+                                  ]}
+                                  onPress={() => {}}
+                                >
+                                  <View
+                                    style={[
+                                      s.scrapbookTape,
+                                      seed % 2 === 0 ? s.scrapbookTapeLeft : s.scrapbookTapeRight,
+                                      seed % 3 === 0 ? s.scrapbookTapeSoft : s.scrapbookTapeWarm,
+                                    ]}
+                                    pointerEvents="none"
+                                  />
+                                  <Text style={s.scrapbookDateText}>{memory.dateLabel}</Text>
 
-                <View style={s.openBookPageRight}>
-                  <View style={s.openBookPageGlowRight} />
-                  {albumMemories.length > 0 ? (
-                    <ScrollView style={s.albumPageScroll} contentContainerStyle={s.albumPageContent} showsVerticalScrollIndicator={false}>
-                      {rightPageMemories.map((memory) => (
-                        <View
-                          key={memory.id}
-                          style={[
-                            s.albumCard,
-                            memory.cardTone === 'pink'
-                              ? s.albumCardPink
-                              : memory.cardTone === 'cream'
-                                ? s.albumCardCream
-                                : s.albumCardLilac,
-                          ]}
-                        >
-                          <View style={s.albumCardTop}>
-                            <View style={[s.authorBadge, memory.isMine ? s.authorBadgeMine : s.authorBadgePartner]}>
-                              <Text style={[s.authorBadgeText, memory.isMine ? s.authorBadgeTextMine : s.authorBadgeTextPartner]}>
-                                {memory.authorLabel}
-                              </Text>
-                            </View>
-                            <View style={s.timeRow}>
-                              <Heart size={12} color="#D17399" strokeWidth={1.8} />
-                              <Text style={s.timeText}>{memory.dateLabel}</Text>
-                            </View>
+                                  {variant === 'photo' && memory.imageUri ? (
+                                    <>
+                                      <Image source={{ uri: memory.imageUri }} style={s.scrapbookPhoto} resizeMode="cover" />
+                                      <Text style={s.scrapbookTinyMeta}>{memory.authorLabel}</Text>
+                                      <Text style={s.scrapbookPhotoCaption} numberOfLines={2}>
+                                        {memory.previewText}
+                                      </Text>
+                                    </>
+                                  ) : variant === 'text' ? (
+                                    <>
+                                      <View style={s.scrapbookNotePin} pointerEvents="none" />
+                                      <Text style={s.scrapbookTinyMeta}>{memory.authorLabel}</Text>
+                                      <View style={s.scrapbookRuledLines} pointerEvents="none">
+                                        <View style={s.scrapbookLine} />
+                                        <View style={s.scrapbookLine} />
+                                        <View style={s.scrapbookLine} />
+                                      </View>
+                                      <Text
+                                        style={[
+                                          s.scrapbookNoteText,
+                                          fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null,
+                                        ]}
+                                        numberOfLines={4}
+                                      >
+                                        {memory.previewText}
+                                      </Text>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <View style={[s.scrapbookSketchPreview, { backgroundColor: memory.backgroundColor }]}>
+                                        <View style={s.scrapbookSketchStroke} />
+                                        <View style={[s.scrapbookSketchStroke, s.scrapbookSketchStrokeShort]} />
+                                        <View style={s.scrapbookMiniSticker} />
+                                      </View>
+                                      <Text style={s.scrapbookTinyMeta}>{memory.authorLabel}</Text>
+                                      <Text style={s.scrapbookMixedLabel}>
+                                        {memory.kindLabel === 'Dibujo' ? 'Nota con dibujo' : memory.kindLabel}
+                                      </Text>
+                                      <Text style={s.scrapbookMixedText} numberOfLines={3}>
+                                        {memory.previewText}
+                                      </Text>
+                                    </>
+                                  )}
+                                </Pressable>
+                              );
+                            })}
                           </View>
-                          {memory.imageUri ? (
-                            <Image source={{ uri: memory.imageUri }} style={s.albumMemoryImage} resizeMode="cover" />
-                          ) : (
-                            <View style={[s.albumMemoryPreview, { backgroundColor: memory.backgroundColor }]}>
-                              <Text style={s.albumMemoryPreviewLabel}>{memory.kindLabel}</Text>
-                            </View>
-                          )}
-                          <Text style={s.albumMemoryKind}>{memory.kindLabel}</Text>
-                          <Text style={s.albumCardText} numberOfLines={memory.imageUri ? 5 : 7}>
-                            {memory.previewText}
-                          </Text>
-                        </View>
-                      ))}
+                        ))}
+                      </View>
                     </ScrollView>
                   ) : null}
                 </View>
@@ -3161,7 +3184,7 @@ export default function NotesScreen() {
                     </View>
                     <View style={s.emptyAlbumCard}>
                       <Text style={s.emptyAlbumTitle}>Álbum</Text>
-                      <Text style={s.emptyAlbumText}>Aún no hay recuerdos guardados en esta página.</Text>
+                      <Text style={s.emptyAlbumText}>Aún no hay recuerdos guardados.</Text>
                     </View>
                   </View>
                 ) : null}
@@ -4889,11 +4912,11 @@ const s = StyleSheet.create({
   openBookSpread: {
     width: '100%',
     minHeight: Math.min(Math.max(SCREEN_HEIGHT * 0.62, 500), 620),
-    flexDirection: 'row',
-    alignItems: 'stretch',
     borderRadius: 34,
     overflow: 'hidden',
-    backgroundColor: '#F8F1EE',
+    backgroundColor: '#FBF5F1',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.62)',
   },
   openBookShadow: {
     ...StyleSheet.absoluteFillObject,
@@ -5181,6 +5204,359 @@ const s = StyleSheet.create({
     paddingTop: 14,
     paddingBottom: 48,
     gap: 14,
+  },
+  albumScrapbookContent: {
+    paddingHorizontal: 14,
+    paddingTop: 18,
+    paddingBottom: 28,
+  },
+  scrapbookCanvas: {
+    flex: 1,
+    backgroundColor: '#FFF9F4',
+  },
+  scrapbookCanvasGlowTop: {
+    position: 'absolute',
+    top: -40,
+    right: -24,
+    width: 180,
+    height: 180,
+    borderRadius: 90,
+    backgroundColor: 'rgba(248, 220, 232, 0.22)',
+  },
+  scrapbookCanvasGlowBottom: {
+    position: 'absolute',
+    bottom: -56,
+    left: -34,
+    width: 210,
+    height: 210,
+    borderRadius: 105,
+    backgroundColor: 'rgba(233, 224, 250, 0.16)',
+  },
+  scrapbookCanvasDotCluster: {
+    position: 'absolute',
+    top: 20,
+    left: 20,
+    flexDirection: 'row',
+    gap: 5,
+  },
+  scrapbookCanvasDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: 'rgba(209, 115, 153, 0.46)',
+  },
+  scrapbookHeaderCard: {
+    alignSelf: 'center',
+    marginBottom: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 16,
+    backgroundColor: 'rgba(255,255,255,0.64)',
+    borderWidth: 1,
+    borderColor: 'rgba(236, 201, 217, 0.58)',
+    transform: [{ rotate: '-1.2deg' }],
+  },
+  scrapbookHeaderTitle: {
+    color: TEXT,
+    fontSize: 16,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  scrapbookHeaderSubtitle: {
+    marginTop: 2,
+    color: TEXT_SOFT,
+    fontSize: 11,
+    textAlign: 'center',
+  },
+  albumScrapbookGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'space-between',
+    alignItems: 'flex-start',
+    paddingBottom: 24,
+  },
+  albumScrapbookFlow: {
+    paddingBottom: 24,
+  },
+  scrapbookCluster: {
+    position: 'relative',
+    minHeight: 232,
+    marginBottom: 6,
+  },
+  scrapbookClusterAlt: {
+    minHeight: 244,
+  },
+  scrapbookPageDecorLeft: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: 'hidden',
+    opacity: 0.9,
+  },
+  scrapbookPageDecorRight: {
+    ...StyleSheet.absoluteFillObject,
+    overflow: 'hidden',
+    opacity: 0.9,
+  },
+  scrapbookPageBlobA: {
+    position: 'absolute',
+    top: 54,
+    left: -28,
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: 'rgba(248, 220, 232, 0.18)',
+  },
+  scrapbookPageBlobB: {
+    position: 'absolute',
+    bottom: 44,
+    right: -34,
+    width: 170,
+    height: 170,
+    borderRadius: 85,
+    backgroundColor: 'rgba(233, 224, 250, 0.16)',
+  },
+  scrapbookPageBlobC: {
+    position: 'absolute',
+    top: 70,
+    right: -26,
+    width: 150,
+    height: 150,
+    borderRadius: 75,
+    backgroundColor: 'rgba(255, 223, 233, 0.16)',
+  },
+  scrapbookPageBlobD: {
+    position: 'absolute',
+    bottom: 52,
+    left: -42,
+    width: 190,
+    height: 190,
+    borderRadius: 95,
+    backgroundColor: 'rgba(255, 247, 199, 0.12)',
+  },
+  scrapbookItem: {
+    position: 'absolute',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(230, 187, 205, 0.46)',
+    shadowColor: SHADOW,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.22,
+    shadowRadius: 12,
+    elevation: 2,
+    overflow: 'hidden',
+  },
+  scrapbookSlotEvenPrimary: {
+    left: '2%',
+    top: 8,
+    width: '40%',
+  },
+  scrapbookSlotEvenSecondary: {
+    right: '4%',
+    top: 30,
+    width: '34%',
+  },
+  scrapbookSlotEvenTertiary: {
+    left: '28%',
+    top: 128,
+    width: '38%',
+  },
+  scrapbookSlotOddPrimary: {
+    right: '3%',
+    top: 8,
+    width: '39%',
+  },
+  scrapbookSlotOddSecondary: {
+    left: '5%',
+    top: 44,
+    width: '33%',
+  },
+  scrapbookSlotOddTertiary: {
+    right: '20%',
+    top: 138,
+    width: '36%',
+  },
+  scrapbookPolaroid: {
+    backgroundColor: WHITE,
+    paddingTop: 7,
+    paddingHorizontal: 7,
+    paddingBottom: 10,
+  },
+  scrapbookNote: {
+    backgroundColor: '#FFFBEF',
+    paddingHorizontal: 10,
+    paddingTop: 10,
+    paddingBottom: 12,
+  },
+  scrapbookMixed: {
+    backgroundColor: '#FFF6FA',
+    paddingHorizontal: 10,
+    paddingTop: 10,
+    paddingBottom: 11,
+  },
+  scrapbookTape: {
+    position: 'absolute',
+    top: -6,
+    width: 28,
+    height: 10,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255, 223, 233, 0.9)',
+  },
+  scrapbookTapeLeft: {
+    left: 22,
+    transform: [{ rotate: '-10deg' }],
+  },
+  scrapbookTapeRight: {
+    right: 22,
+    transform: [{ rotate: '10deg' }],
+  },
+  scrapbookTapeSoft: {
+    backgroundColor: 'rgba(255, 230, 238, 0.92)',
+  },
+  scrapbookTapeWarm: {
+    backgroundColor: 'rgba(255, 237, 207, 0.92)',
+  },
+  scrapbookHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    gap: 8,
+    marginBottom: 8,
+  },
+  scrapbookDateText: {
+    color: TEXT_SOFT,
+    fontSize: 10,
+    fontWeight: '700',
+    marginBottom: 6,
+  },
+  scrapbookPhoto: {
+    width: '100%',
+    aspectRatio: 1,
+    minHeight: 90,
+    borderRadius: 10,
+    backgroundColor: '#FBE7EF',
+    marginBottom: 7,
+  },
+  scrapbookCaptionRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+  },
+  scrapbookCaptionText: {
+    flex: 1,
+    color: TEXT,
+    fontSize: 12,
+    lineHeight: 17,
+  },
+  scrapbookKindPill: {
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: 'rgba(232, 140, 175, 0.16)',
+  },
+  scrapbookKindText: {
+    color: '#B2547C',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  scrapbookRuledLines: {
+    marginBottom: 8,
+  },
+  scrapbookLine: {
+    height: 1,
+    backgroundColor: 'rgba(220, 178, 197, 0.35)',
+    marginBottom: 7,
+  },
+  scrapbookBodyText: {
+    color: TEXT,
+    fontSize: 13,
+    lineHeight: 19,
+  },
+  scrapbookTinyMeta: {
+    color: '#B06C86',
+    fontSize: 10,
+    fontWeight: '700',
+    marginBottom: 4,
+  },
+  scrapbookPhotoCaption: {
+    color: TEXT,
+    fontSize: 11,
+    lineHeight: 15,
+  },
+  scrapbookNotePin: {
+    position: 'absolute',
+    top: 8,
+    right: 10,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#E7A4BE',
+  },
+  scrapbookNoteText: {
+    color: '#8E5873',
+    fontSize: 15,
+    lineHeight: 19,
+  },
+  scrapbookMiniCollage: {
+    borderRadius: 14,
+    padding: 10,
+    marginBottom: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.7)',
+  },
+  scrapbookMiniBlockLarge: {
+    width: '100%',
+    height: 34,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.7)',
+    marginBottom: 8,
+  },
+  scrapbookMiniBlockRow: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  scrapbookMiniBlock: {
+    flex: 1,
+    height: 26,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255,255,255,0.6)',
+  },
+  scrapbookSketchPreview: {
+    height: 74,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.72)',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 8,
+    justifyContent: 'center',
+  },
+  scrapbookSketchStroke: {
+    height: 2,
+    borderRadius: 999,
+    backgroundColor: 'rgba(123, 91, 108, 0.35)',
+    marginBottom: 10,
+  },
+  scrapbookSketchStrokeShort: {
+    width: '72%',
+  },
+  scrapbookMiniSticker: {
+    position: 'absolute',
+    right: 10,
+    bottom: 10,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: 'rgba(255,255,255,0.7)',
+  },
+  scrapbookMixedLabel: {
+    color: '#A55B7C',
+    fontSize: 11,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  scrapbookMixedText: {
+    color: TEXT,
+    fontSize: 11,
+    lineHeight: 15,
   },
   albumCard: {
     borderRadius: 24,
