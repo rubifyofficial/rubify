@@ -41,7 +41,7 @@ import {
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import Svg, { Path } from 'react-native-svg';
+import Svg, { Circle, Path } from 'react-native-svg';
 import { supabase } from '../../lib/supabase';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -71,10 +71,13 @@ type DbNote = {
 };
 
 type DrawPoint = { x: number; y: number };
+type EditorToolMode = 'pencil' | 'marker' | 'soft' | 'spray' | 'crayon' | 'eraser';
 type DrawStroke = {
   id: string;
   color: string;
   width: number;
+  opacity: number;
+  brush: EditorToolMode;
   points: DrawPoint[];
   path: string;
 };
@@ -123,7 +126,6 @@ type EditorStickerElement = {
 };
 
 type EditorCategory = 'pen' | 'text' | 'sticker' | 'bucket';
-type EditorToolMode = 'pencil' | 'marker' | 'eraser';
 type EditorFontStyle = 'normal' | 'script' | 'maquina' | 'serif' | 'romantica' | 'fuerte';
 const EDITOR_CANVAS_DEFAULT_BG = '#FFF7FB';
 const EDITOR_BACKGROUND_COLORS = [
@@ -162,22 +164,180 @@ function fmtDate(iso: string): string {
   }
 }
 
-function shouldAddDrawPoint(prev: DrawPoint | null, next: DrawPoint): boolean {
+function shouldAddDrawPoint(prev: DrawPoint | null, next: DrawPoint, minDistance: number, maxDistance = 75): boolean {
   if (!prev) return true;
   const dx = next.x - prev.x;
   const dy = next.y - prev.y;
-  return dx * dx + dy * dy >= 3 * 3;
+  const distSq = dx * dx + dy * dy;
+  if (distSq < minDistance * minDistance) return false;
+  if (distSq > maxDistance * maxDistance) return false;
+  return true;
 }
 
-function buildSimpleSvgPath(points: DrawPoint[]): string {
+function smoothPoints(points: DrawPoint[], strength: number): DrawPoint[] {
+  if (points.length < 3) return points;
+  const t = clampNumber(strength, 0, 1);
+  if (t <= 0) return points;
+
+  const nextPoints: DrawPoint[] = [];
+  nextPoints.push(points[0]);
+  for (let i = 1; i < points.length - 1; i += 1) {
+    const prev = points[i - 1];
+    const cur = points[i];
+    const next = points[i + 1];
+    const sx = (prev.x + cur.x * 2 + next.x) / 4;
+    const sy = (prev.y + cur.y * 2 + next.y) / 4;
+    nextPoints.push({
+      x: cur.x + (sx - cur.x) * t,
+      y: cur.y + (sy - cur.y) * t,
+    });
+  }
+  nextPoints.push(points[points.length - 1]);
+  return nextPoints;
+}
+
+function buildSmoothSvgPath(points: DrawPoint[]): string {
   if (points.length === 0) return '';
   const parts: string[] = [];
   parts.push(`M ${points[0].x.toFixed(1)} ${points[0].y.toFixed(1)}`);
-  for (let i = 1; i < points.length; i += 1) {
+  if (points.length === 1) return parts.join(' ');
+
+  for (let i = 1; i < points.length - 1; i += 1) {
     const p = points[i];
-    parts.push(`L ${p.x.toFixed(1)} ${p.y.toFixed(1)}`);
+    const next = points[i + 1];
+    const midX = (p.x + next.x) / 2;
+    const midY = (p.y + next.y) / 2;
+    parts.push(`Q ${p.x.toFixed(1)} ${p.y.toFixed(1)} ${midX.toFixed(1)} ${midY.toFixed(1)}`);
   }
+  const last = points[points.length - 1];
+  parts.push(`L ${last.x.toFixed(1)} ${last.y.toFixed(1)}`);
   return parts.join(' ');
+}
+
+function fnv1aHash(input: string): number {
+  let hash = 2166136261;
+  for (let i = 0; i < input.length; i += 1) {
+    hash ^= input.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return hash >>> 0;
+}
+
+function mulberry32(seed: number): () => number {
+  let t = seed >>> 0;
+  return () => {
+    t += 0x6d2b79f5;
+    let x = t;
+    x = Math.imul(x ^ (x >>> 15), x | 1);
+    x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
+    return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+type BrushPreset = {
+  widthMultiplier: number;
+  opacityMultiplier: number;
+  minPointDistance: number;
+  smoothing: number;
+};
+
+const DRAW_BRUSH_PRESETS: Record<EditorToolMode, BrushPreset> = {
+  pencil: { widthMultiplier: 0.95, opacityMultiplier: 0.82, minPointDistance: 2.6, smoothing: 0.18 },
+  marker: { widthMultiplier: 1.65, opacityMultiplier: 0.95, minPointDistance: 2.2, smoothing: 0.22 },
+  soft: { widthMultiplier: 1.15, opacityMultiplier: 0.75, minPointDistance: 2.0, smoothing: 0.5 },
+  spray: { widthMultiplier: 1.9, opacityMultiplier: 0.65, minPointDistance: 6.5, smoothing: 0.35 },
+  crayon: { widthMultiplier: 1.35, opacityMultiplier: 0.82, minPointDistance: 3.6, smoothing: 0.28 },
+  eraser: { widthMultiplier: 1.65, opacityMultiplier: 1, minPointDistance: 2.8, smoothing: 0.22 },
+};
+
+function getBrushStrokeWidth(brush: EditorToolMode, baseWidth: number): number {
+  const preset = DRAW_BRUSH_PRESETS[brush] ?? DRAW_BRUSH_PRESETS.pencil;
+  return clampNumber(baseWidth * preset.widthMultiplier, 1, 22);
+}
+
+function getBrushOpacity(brush: EditorToolMode, baseOpacity: number): number {
+  if (brush === 'eraser') return 1;
+  const preset = DRAW_BRUSH_PRESETS[brush] ?? DRAW_BRUSH_PRESETS.pencil;
+  return clampNumber(baseOpacity * preset.opacityMultiplier, 0.04, 1);
+}
+
+function buildBrushPath(points: DrawPoint[], brush: EditorToolMode): string {
+  if (brush === 'spray') return '';
+  const preset = DRAW_BRUSH_PRESETS[brush] ?? DRAW_BRUSH_PRESETS.pencil;
+  const smoothed = smoothPoints(points, preset.smoothing);
+  return buildSmoothSvgPath(smoothed);
+}
+
+type BrushDot = { cx: number; cy: number; r: number; alpha: number };
+
+function buildSprayDots(points: DrawPoint[], width: number, opacity: number, seed: number): BrushDot[] {
+  if (points.length < 2) return [];
+  const rand = mulberry32(seed);
+  const dots: BrushDot[] = [];
+  const radius = Math.max(6, width * 1.25);
+  const spacing = Math.max(6, width * 0.6);
+  const dotsPerStep = clampNumber(2 + Math.floor(width / 7), 2, 5);
+
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1];
+    const b = points[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy);
+    if (!Number.isFinite(dist) || dist <= 0) continue;
+    const steps = Math.max(1, Math.ceil(dist / spacing));
+    for (let s = 0; s <= steps; s += 1) {
+      const t = s / steps;
+      const baseX = a.x + dx * t;
+      const baseY = a.y + dy * t;
+      for (let k = 0; k < dotsPerStep; k += 1) {
+        const angle = rand() * Math.PI * 2;
+        const rr = Math.sqrt(rand()) * radius;
+        const cx = baseX + Math.cos(angle) * rr;
+        const cy = baseY + Math.sin(angle) * rr;
+        const r = Math.max(0.6, width * (0.07 + rand() * 0.2));
+        const alpha = clampNumber(opacity * (0.06 + rand() * 0.12), 0.01, 0.35);
+        dots.push({ cx, cy, r, alpha });
+      }
+    }
+  }
+
+  return dots;
+}
+
+function buildCrayonDots(points: DrawPoint[], width: number, opacity: number, seed: number): BrushDot[] {
+  if (points.length < 2) return [];
+  const rand = mulberry32(seed ^ 0x9e3779b9);
+  const dots: BrushDot[] = [];
+  const radius = Math.max(3, width * 0.55);
+  const spacing = Math.max(5, width * 0.55);
+  const dotsPerStep = clampNumber(1 + Math.floor(width / 8), 1, 3);
+
+  for (let i = 1; i < points.length; i += 1) {
+    const a = points[i - 1];
+    const b = points[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy);
+    if (!Number.isFinite(dist) || dist <= 0) continue;
+    const steps = Math.max(1, Math.ceil(dist / spacing));
+    for (let s = 0; s <= steps; s += 1) {
+      const t = s / steps;
+      const baseX = a.x + dx * t;
+      const baseY = a.y + dy * t;
+      for (let k = 0; k < dotsPerStep; k += 1) {
+        const angle = rand() * Math.PI * 2;
+        const rr = Math.sqrt(rand()) * radius;
+        const cx = baseX + Math.cos(angle) * rr;
+        const cy = baseY + Math.sin(angle) * rr;
+        const r = Math.max(0.5, width * (0.04 + rand() * 0.08));
+        const alpha = clampNumber(opacity * (0.08 + rand() * 0.18), 0.02, 0.3);
+        dots.push({ cx, cy, r, alpha });
+      }
+    }
+  }
+
+  return dots;
 }
 
 function clampNumber(value: number, min: number, max: number): number {
@@ -1009,22 +1169,17 @@ export default function NotesScreen() {
 
     const startStroke = (p: DrawPoint) => {
       if (isTouchingPhotoRef.current) return;
-      // #region debug-point A:drawing-start
-      console.log('[DRAW-DEBUG] drawing start', {
-        editorCategory,
-        x: Number(p.x.toFixed(1)),
-        y: Number(p.y.toFixed(1)),
-        activePhotoId: editorActivePhotoId,
-        isTouchingPhoto: isTouchingPhotoRef.current,
-      });
-      fetch('http://192.168.100.35:7777/event', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sessionId: 'photo-gesture-bug', runId: 'pre-fix', hypothesisId: 'A', location: 'notes.tsx:startStroke', msg: '[DEBUG] drawing start', data: { editorCategory, x: Number(p.x.toFixed(1)), y: Number(p.y.toFixed(1)), activePhotoId: editorActivePhotoId, photoGestureCount: editorPhotoGestureCountRef.current }, ts: Date.now() }) }).catch(() => {});
-      // #endregion
       const points = [p];
-      const path = buildSimpleSvgPath(points);
+      const opacity = getBrushOpacity(editorToolMode, editorOpacity);
+      const width = getBrushStrokeWidth(editorToolMode, editorStrokeWidth);
+      const baseColor = editorToolMode === 'eraser' ? editorCanvasBackground : editorColor;
+      const path = buildBrushPath(points, editorToolMode);
       setEditorCurrentStroke({
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        color: getStrokeColor(editorToolMode, editorColor, editorCanvasBackground, editorOpacity),
-        width: getStrokeWidth(editorStrokeWidth),
+        color: baseColor,
+        width,
+        opacity,
+        brush: editorToolMode,
         points,
         path,
       });
@@ -1035,12 +1190,13 @@ export default function NotesScreen() {
       setEditorCurrentStroke((current) => {
         if (!current) return current;
         const prev = current.points[current.points.length - 1] ?? null;
-        if (!shouldAddDrawPoint(prev, p)) return current;
+        const preset = DRAW_BRUSH_PRESETS[current.brush] ?? DRAW_BRUSH_PRESETS.pencil;
+        if (!shouldAddDrawPoint(prev, p, preset.minPointDistance)) return current;
         const nextPoints = [...current.points, p];
         return {
           ...current,
           points: nextPoints,
-          path: buildSimpleSvgPath(nextPoints),
+          path: buildBrushPath(nextPoints, current.brush),
         };
       });
     };
@@ -1687,27 +1843,178 @@ export default function NotesScreen() {
                   ))}
 
                   <Svg width="100%" height="100%" style={StyleSheet.absoluteFill} pointerEvents="none">
-                    {editorStrokes.map((stroke) => (
-                      <Path
-                        key={stroke.id}
-                        d={stroke.path}
-                        stroke={stroke.color}
-                        strokeWidth={stroke.width}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        fill="none"
-                      />
-                    ))}
-                    {editorCurrentStroke ? (
-                      <Path
-                        d={editorCurrentStroke.path}
-                        stroke={editorCurrentStroke.color}
-                        strokeWidth={editorCurrentStroke.width}
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        fill="none"
-                      />
-                    ) : null}
+                    {editorStrokes.map((stroke) => {
+                      const seed = fnv1aHash(stroke.id);
+                      const baseStrokeColor =
+                        stroke.brush === 'eraser' ? stroke.color : applyOpacityToColor(stroke.color, stroke.opacity);
+
+                      if (stroke.brush === 'spray') {
+                        const preset = DRAW_BRUSH_PRESETS.spray;
+                        const points = smoothPoints(stroke.points, preset.smoothing);
+                        const dots = buildSprayDots(points, stroke.width, stroke.opacity, seed);
+                        return (
+                          <React.Fragment key={stroke.id}>
+                            {dots.map((d, i) => (
+                              <Circle
+                                key={`${stroke.id}-spr-${i}`}
+                                cx={d.cx}
+                                cy={d.cy}
+                                r={d.r}
+                                fill={applyOpacityToColor(stroke.color, d.alpha)}
+                              />
+                            ))}
+                          </React.Fragment>
+                        );
+                      }
+
+                      if (stroke.brush === 'crayon') {
+                        const preset = DRAW_BRUSH_PRESETS.crayon;
+                        const points = smoothPoints(stroke.points, preset.smoothing);
+                        const dots = buildCrayonDots(points, stroke.width, stroke.opacity, seed);
+                        return (
+                          <React.Fragment key={stroke.id}>
+                            <Path
+                              d={stroke.path}
+                              stroke={baseStrokeColor}
+                              strokeWidth={stroke.width}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              fill="none"
+                            />
+                            {dots.map((d, i) => (
+                              <Circle
+                                key={`${stroke.id}-cry-${i}`}
+                                cx={d.cx}
+                                cy={d.cy}
+                                r={d.r}
+                                fill={applyOpacityToColor(stroke.color, d.alpha)}
+                              />
+                            ))}
+                          </React.Fragment>
+                        );
+                      }
+
+                      if (stroke.brush === 'soft') {
+                        return (
+                          <React.Fragment key={stroke.id}>
+                            <Path
+                              d={stroke.path}
+                              stroke={applyOpacityToColor(stroke.color, Math.min(1, stroke.opacity * 0.22))}
+                              strokeWidth={stroke.width * 2.05}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              fill="none"
+                            />
+                            <Path
+                              d={stroke.path}
+                              stroke={baseStrokeColor}
+                              strokeWidth={stroke.width}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              fill="none"
+                            />
+                          </React.Fragment>
+                        );
+                      }
+
+                      return (
+                        <Path
+                          key={stroke.id}
+                          d={stroke.path}
+                          stroke={baseStrokeColor}
+                          strokeWidth={stroke.width}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          fill="none"
+                        />
+                      );
+                    })}
+                    {editorCurrentStroke ? (() => {
+                      const stroke = editorCurrentStroke;
+                      const seed = fnv1aHash(stroke.id);
+                      const baseStrokeColor =
+                        stroke.brush === 'eraser' ? stroke.color : applyOpacityToColor(stroke.color, stroke.opacity);
+
+                      if (stroke.brush === 'spray') {
+                        const preset = DRAW_BRUSH_PRESETS.spray;
+                        const points = smoothPoints(stroke.points, preset.smoothing);
+                        const dots = buildSprayDots(points, stroke.width, stroke.opacity, seed);
+                        return (
+                          <>
+                            {dots.map((d, i) => (
+                              <Circle
+                                key={`${stroke.id}-spr-live-${i}`}
+                                cx={d.cx}
+                                cy={d.cy}
+                                r={d.r}
+                                fill={applyOpacityToColor(stroke.color, d.alpha)}
+                              />
+                            ))}
+                          </>
+                        );
+                      }
+
+                      if (stroke.brush === 'crayon') {
+                        const preset = DRAW_BRUSH_PRESETS.crayon;
+                        const points = smoothPoints(stroke.points, preset.smoothing);
+                        const dots = buildCrayonDots(points, stroke.width, stroke.opacity, seed);
+                        return (
+                          <>
+                            <Path
+                              d={stroke.path}
+                              stroke={baseStrokeColor}
+                              strokeWidth={stroke.width}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              fill="none"
+                            />
+                            {dots.map((d, i) => (
+                              <Circle
+                                key={`${stroke.id}-cry-live-${i}`}
+                                cx={d.cx}
+                                cy={d.cy}
+                                r={d.r}
+                                fill={applyOpacityToColor(stroke.color, d.alpha)}
+                              />
+                            ))}
+                          </>
+                        );
+                      }
+
+                      if (stroke.brush === 'soft') {
+                        return (
+                          <>
+                            <Path
+                              d={stroke.path}
+                              stroke={applyOpacityToColor(stroke.color, Math.min(1, stroke.opacity * 0.22))}
+                              strokeWidth={stroke.width * 2.05}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              fill="none"
+                            />
+                            <Path
+                              d={stroke.path}
+                              stroke={baseStrokeColor}
+                              strokeWidth={stroke.width}
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              fill="none"
+                            />
+                          </>
+                        );
+                      }
+
+                      return (
+                        <Path
+                          d={stroke.path}
+                          stroke={baseStrokeColor}
+                          strokeWidth={stroke.width}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          fill="none"
+                        />
+                      );
+                    })() : null}
                   </Svg>
                 </View>
 
@@ -1781,7 +2088,7 @@ export default function NotesScreen() {
 
                     {editorCategory === 'pen' ? (
                       <>
-                        <View style={s.editorToolbarRow}>
+                        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.dynamicToolsScrollRow}>
                           <Pressable
                             style={[s.toolChip, s.toolSubChip, editorToolMode === 'pencil' && s.toolChipActive]}
                             onPress={() => setEditorToolMode('pencil')}
@@ -1800,13 +2107,43 @@ export default function NotesScreen() {
                             <Text style={[s.toolChipText, editorToolMode === 'marker' && s.toolChipTextActive]}>Marcador</Text>
                           </Pressable>
                           <Pressable
+                            style={[s.toolChip, s.toolSubChip, editorToolMode === 'soft' && s.toolChipActive]}
+                            onPress={() => {
+                              setEditorToolMode('soft');
+                              setEditorOpacity((prev) => (prev > 0.95 ? 0.7 : prev));
+                            }}
+                            disabled={saving}
+                          >
+                            <Text style={[s.toolChipText, editorToolMode === 'soft' && s.toolChipTextActive]}>Pluma suave</Text>
+                          </Pressable>
+                          <Pressable
+                            style={[s.toolChip, s.toolSubChip, editorToolMode === 'spray' && s.toolChipActive]}
+                            onPress={() => {
+                              setEditorToolMode('spray');
+                              setEditorOpacity((prev) => (prev > 0.55 ? 0.35 : prev));
+                            }}
+                            disabled={saving}
+                          >
+                            <Text style={[s.toolChipText, editorToolMode === 'spray' && s.toolChipTextActive]}>Spray</Text>
+                          </Pressable>
+                          <Pressable
+                            style={[s.toolChip, s.toolSubChip, editorToolMode === 'crayon' && s.toolChipActive]}
+                            onPress={() => {
+                              setEditorToolMode('crayon');
+                              setEditorOpacity((prev) => (prev > 0.95 ? 0.75 : prev));
+                            }}
+                            disabled={saving}
+                          >
+                            <Text style={[s.toolChipText, editorToolMode === 'crayon' && s.toolChipTextActive]}>Crayón</Text>
+                          </Pressable>
+                          <Pressable
                             style={[s.toolChip, s.toolSubChip, editorToolMode === 'eraser' && s.toolChipActive]}
                             onPress={() => setEditorToolMode('eraser')}
                             disabled={saving}
                           >
                             <Text style={[s.toolChipText, editorToolMode === 'eraser' && s.toolChipTextActive]}>Borrador</Text>
                           </Pressable>
-                        </View>
+                        </ScrollView>
 
                         <View style={s.sliderRow}>
                           <Text style={s.sliderLabel}>Grosor</Text>
@@ -2044,7 +2381,13 @@ export default function NotesScreen() {
                       const drawing = hasDrawing
                         ? {
                             backgroundColor: editorCanvasBackground,
-                            strokes: strokesForSave.map((st) => ({ color: st.color, width: st.width, points: st.points })),
+                            strokes: strokesForSave.map((st) => ({
+                              color: st.color,
+                              width: st.width,
+                              opacity: st.opacity,
+                              brush: st.brush,
+                              points: st.points,
+                            })),
                             photos: editorPhotos,
                             texts: canvasTextsForSave,
                             stickers: editorStickers,
