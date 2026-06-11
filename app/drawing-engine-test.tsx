@@ -7,7 +7,6 @@ import getStroke from 'perfect-freehand';
 
 type Point = { x: number; y: number; t: number; pressure?: number };
 type BrushDot = { x: number; y: number; r: number; a: number };
-type SprayStamp = { x: number; y: number; size: number; opacity: number; rotation: number };
 
 type BrushType = 'pencil' | 'marker' | 'pen' | 'spray' | 'highlighter' | 'watercolor';
 
@@ -20,7 +19,6 @@ type Stroke = {
   points: Point[];
   d: string;
   fillD?: string;
-  stamps?: SprayStamp[];
   grain?: BrushDot[];
 };
 
@@ -158,54 +156,6 @@ function mixHex(base: string, other: string, amount: number): string {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
-function buildCircleSubpath(cx: number, cy: number, r: number): string {
-  return [
-    `M ${(cx - r).toFixed(2)} ${cy.toFixed(2)}`,
-    `a ${r.toFixed(2)} ${r.toFixed(2)} 0 1 0 ${(r * 2).toFixed(2)} 0`,
-    `a ${r.toFixed(2)} ${r.toFixed(2)} 0 1 0 ${(-r * 2).toFixed(2)} 0`,
-  ].join(' ');
-}
-
-function createSprayStampTexture(seed: number) {
-  const rand = mulberry32(seed);
-  const outerParts: string[] = [];
-  const coreParts: string[] = [];
-  const grainParts: string[] = [];
-
-  for (let i = 0; i < 24; i += 1) {
-    const angle = rand() * Math.PI * 2;
-    const radiusFromCenter = Math.pow(rand(), 1.55) * 27;
-    const cx = Math.cos(angle) * radiusFromCenter;
-    const cy = Math.sin(angle) * radiusFromCenter;
-    const r = 10 + rand() * 12;
-    outerParts.push(buildCircleSubpath(cx, cy, r));
-  }
-
-  for (let i = 0; i < 22; i += 1) {
-    const angle = rand() * Math.PI * 2;
-    const radiusFromCenter = Math.pow(rand(), 1.7) * 18;
-    const cx = Math.cos(angle) * radiusFromCenter;
-    const cy = Math.sin(angle) * radiusFromCenter;
-    const r = 4.8 + rand() * 7.2;
-    coreParts.push(buildCircleSubpath(cx, cy, r));
-  }
-
-  for (let i = 0; i < 32; i += 1) {
-    const angle = rand() * Math.PI * 2;
-    const radiusFromCenter = Math.pow(rand(), 1.85) * 21;
-    const cx = Math.cos(angle) * radiusFromCenter;
-    const cy = Math.sin(angle) * radiusFromCenter;
-    const r = 1.2 + rand() * 2.4;
-    grainParts.push(buildCircleSubpath(cx, cy, r));
-  }
-
-  return {
-    outerD: outerParts.join(' '),
-    coreD: coreParts.join(' '),
-    grainD: grainParts.join(' '),
-  };
-}
-
 function getFreehandOptions(brushType: BrushType, width: number) {
   switch (brushType) {
     case 'marker':
@@ -329,7 +279,7 @@ function getBrushMinDistance(brush: BrushType, width: number): number {
     case 'highlighter':
       return clampNumber(6.2 + width * 0.22, 6.2, 9.8);
     case 'spray':
-      return clampNumber(8.6 + width * 0.3, 8.6, 12);
+      return clampNumber(5.4 + width * 0.18, 5.4, 8.6);
     case 'watercolor':
       return clampNumber(8.6 + width * 0.28, 8.6, 12);
     default:
@@ -345,64 +295,6 @@ function shouldAddPoint(prev: Point | null, next: Point, minDistance: number, ma
   if (distSq < minDistance * minDistance) return false;
   if (distSq > maxDistance * maxDistance) return false;
   return true;
-}
-
-function sampleCenteredOffset(rand: () => number, sigma: number): number {
-  // Fast gaussian-like distribution without expensive Box-Muller math.
-  return ((rand() + rand() + rand() + rand()) - 2) * sigma;
-}
-
-const SPRAY_STAMP_BASE_SIZE = 96;
-const SPRAY_STAMP_TEXTURE = createSprayStampTexture(0x51a7f11);
-const SPRAY_STAMP_OUTER_PATH = Skia.Path.MakeFromSVGString(SPRAY_STAMP_TEXTURE.outerD) ?? Skia.Path.Make();
-const SPRAY_STAMP_CORE_PATH = Skia.Path.MakeFromSVGString(SPRAY_STAMP_TEXTURE.coreD) ?? Skia.Path.Make();
-const SPRAY_STAMP_GRAIN_PATH = Skia.Path.MakeFromSVGString(SPRAY_STAMP_TEXTURE.grainD) ?? Skia.Path.Make();
-const MAX_SPRAY_STAMPS_PER_STROKE = 72;
-const MAX_SPRAY_STAMPS_PER_SEGMENT = 5;
-
-function buildSprayStampsForSegment(
-  a: Point,
-  b: Point,
-  width: number,
-  opacity: number,
-  seed: number,
-  currentCount: number
-): SprayStamp[] {
-  if (currentCount >= MAX_SPRAY_STAMPS_PER_STROKE) return [];
-
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  const dist = Math.hypot(dx, dy);
-  if (!Number.isFinite(dist) || dist <= 0) return [];
-
-  const brushRadius = clampNumber(width * 3.1, 18, 56);
-  const spacing = clampNumber(brushRadius * 0.42, 8, 24);
-  const steps = clampNumber(Math.ceil(dist / spacing), 1, 4);
-  const rand = mulberry32(seed + currentCount * 977);
-  const stamps: SprayStamp[] = [];
-  const maxAllowed = Math.min(MAX_SPRAY_STAMPS_PER_SEGMENT, MAX_SPRAY_STAMPS_PER_STROKE - currentCount);
-
-  for (let s = 0; s <= steps; s += 1) {
-    const t = steps === 0 ? 0 : s / steps;
-    const baseX = a.x + dx * t;
-    const baseY = a.y + dy * t;
-    if (stamps.length >= maxAllowed) return stamps;
-
-    const offsetX = sampleCenteredOffset(rand, width * 0.14);
-    const offsetY = sampleCenteredOffset(rand, width * 0.14);
-    const size = clampNumber(brushRadius * (1.18 + rand() * 0.42), 24, 88);
-    const stampOpacity = clampNumber(opacity * (0.2 + rand() * 0.12), 0.08, 0.4);
-    const rotation = (rand() - 0.5) * 0.65;
-    stamps.push({
-      x: baseX + offsetX,
-      y: baseY + offsetY,
-      size,
-      opacity: stampOpacity,
-      rotation,
-    });
-  }
-
-  return stamps;
 }
 
 function getBrushSmoothing(brush: BrushType): number {
@@ -477,26 +369,17 @@ function StrokeLayer({ stroke, keySuffix }: { stroke: Stroke; keySuffix: string 
   }, [stroke.fillD]);
 
   if (brush === 'spray') {
-    const stamps = stroke.stamps ?? [];
     return (
       <Group>
-        {stamps.map((stamp, i) => (
-          <Group
-            key={`${stroke.id}-${keySuffix}-s-${i}`}
-            transform={[
-              { translateX: stamp.x },
-              { translateY: stamp.y },
-              { rotate: stamp.rotation },
-              { scale: stamp.size / SPRAY_STAMP_BASE_SIZE },
-            ]}
-          >
-            <Path path={SPRAY_STAMP_OUTER_PATH} color={stroke.color} style="fill" opacity={stroke.opacity * stamp.opacity * 0.24}>
-              <BlurMask blur={stamp.size * 0.08} style="normal" />
-            </Path>
-            <Path path={SPRAY_STAMP_CORE_PATH} color={stroke.color} style="fill" opacity={stroke.opacity * stamp.opacity * 0.34} />
-            <Path path={SPRAY_STAMP_GRAIN_PATH} color={stroke.color} style="fill" opacity={stroke.opacity * stamp.opacity * 0.1} />
-          </Group>
-        ))}
+        <Path path={skPath} color={stroke.color} style="stroke" strokeWidth={stroke.width * 3.1} strokeCap="round" strokeJoin="round" opacity={stroke.opacity * 0.1}>
+          <BlurMask blur={stroke.width * 1.15} style="normal" />
+        </Path>
+        <Path path={skPath} color={stroke.color} style="stroke" strokeWidth={stroke.width * 1.95} strokeCap="round" strokeJoin="round" opacity={stroke.opacity * 0.18}>
+          <BlurMask blur={stroke.width * 0.42} style="normal" />
+        </Path>
+        <Path path={skPath} color={stroke.color} style="stroke" strokeWidth={stroke.width * 0.95} strokeCap="round" strokeJoin="round" opacity={stroke.opacity * 0.12}>
+          <BlurMask blur={stroke.width * 0.12} style="normal" />
+        </Path>
       </Group>
     );
   }
@@ -593,16 +476,8 @@ const BrushPreview = React.memo(function BrushPreview({ brush }: { brush: BrushT
     const smoothed = smoothPoints(points, getBrushSmoothing(brush));
     const d = buildSmoothSvgPath(smoothed);
     const fillD = brush === 'spray' || brush === 'watercolor' ? undefined : buildFreehandFillPath(points, brush, width);
-    const seed = fnv1aHash(id);
 
-    if (brush === 'spray') {
-      const stamps: SprayStamp[] = [];
-      for (let i = 1; i < points.length; i += 1) {
-        const seg = buildSprayStampsForSegment(points[i - 1], points[i], width, op, seed, stamps.length);
-        if (seg.length > 0) stamps.push(...seg);
-      }
-      return { id, brush, color: previewColor, width, opacity: op, points: [], d, stamps };
-    }
+    const seed = fnv1aHash(id);
 
     if (brush === 'pencil') {
       const grain: BrushDot[] = [];
@@ -649,7 +524,6 @@ export default function DrawingEngineTestScreen() {
       points: [],
       d: st.d,
       fillD: st.fillD,
-      stamps: st.stamps ? [...st.stamps] : undefined,
       grain: st.grain ? [...st.grain] : undefined,
     };
   };
@@ -692,7 +566,6 @@ export default function DrawingEngineTestScreen() {
         points: [p],
         d,
         fillD,
-        stamps: brush === 'spray' ? [] : undefined,
         grain: brush === 'pencil' ? [] : undefined,
       };
       strokeRef.current = stroke;
@@ -715,13 +588,7 @@ export default function DrawingEngineTestScreen() {
 
       st.points.push(next);
 
-      if (st.brush === 'spray') {
-        const stamps = st.stamps ?? [];
-        const seed = fnv1aHash(st.id);
-        const newStamps = buildSprayStampsForSegment(prev ?? next, next, st.width, st.opacity, seed, stamps.length);
-        if (newStamps.length > 0) stamps.push(...newStamps);
-        st.stamps = stamps;
-      } else if (st.brush === 'pencil') {
+      if (st.brush === 'pencil') {
         const grain = st.grain ?? [];
         const seed = fnv1aHash(st.id);
         const max = 220;
