@@ -43,6 +43,21 @@ import {
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import {
+  DrawingBrushPreview as SharedDrawingBrushPreview,
+  DrawingBrushType as SharedDrawingBrushType,
+  DrawingPoint as SharedDrawingPoint,
+  DrawingStroke as SharedDrawingStroke,
+  DrawingStrokeLayer as SharedDrawingStrokeLayer,
+  buildGrainDotsForSegment as buildSharedGrainDotsForSegment,
+  buildStrokePaths as buildSharedStrokePaths,
+  getBrushMinDistance as getSharedBrushMinDistance,
+  getBrushOpacityMultiplier as getSharedBrushOpacityMultiplier,
+  getBrushWidthMultiplier as getSharedBrushWidthMultiplier,
+  getMinVisibleOpacity as getSharedMinVisibleOpacity,
+  fnv1aHash as sharedFnv1aHash,
+  shouldAddPoint as shouldAddSharedPoint
+} from '../../lib/drawing-engine';
 import { supabase } from '../../lib/supabase';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -71,7 +86,7 @@ type DbNote = {
   updated_at: string;
 };
 
-type DrawPoint = { x: number; y: number };
+type DrawPoint = { x: number; y: number; t?: number; pressure?: number };
 type EditorToolMode =
   | 'pencil'
   | 'marker'
@@ -82,17 +97,7 @@ type EditorToolMode =
   | 'eraser'
   | 'soft'
   | 'crayon';
-type DrawStroke = {
-  id: string;
-  color: string;
-  width: number;
-  opacity: number;
-  brush: EditorToolMode;
-  points: DrawPoint[];
-  path: string;
-  fillPath?: string;
-  stamps?: BrushDot[];
-};
+type DrawStroke = SharedDrawingStroke;
 
 type EditorPhotoElement = {
   id: string;
@@ -265,29 +270,25 @@ const DRAW_BRUSH_PRESETS: Record<EditorToolMode, BrushPreset> = {
   eraser: { widthMultiplier: 1.7, opacityMultiplier: 1, minPointDistance: 2.8, smoothing: 0.28 },
 };
 
-function normalizeDrawBrush(brush: EditorToolMode): Exclude<EditorToolMode, 'soft' | 'crayon'> {
+function normalizeDrawBrush(brush: EditorToolMode): SharedDrawingBrushType {
   if (brush === 'soft') return 'pen';
   if (brush === 'crayon') return 'pencil';
   return brush;
 }
 
 function getBrushStrokeWidth(brush: EditorToolMode, baseWidth: number): number {
-  const preset = DRAW_BRUSH_PRESETS[normalizeDrawBrush(brush)] ?? DRAW_BRUSH_PRESETS.pencil;
-  return clampNumber(baseWidth * preset.widthMultiplier, 1, 22);
+  return clampNumber(baseWidth * getSharedBrushWidthMultiplier(normalizeDrawBrush(brush)), 1, 34);
 }
 
 function getBrushOpacity(brush: EditorToolMode, baseOpacity: number): number {
   const normalized = normalizeDrawBrush(brush);
   if (normalized === 'eraser') return 1;
-  const preset = DRAW_BRUSH_PRESETS[normalized] ?? DRAW_BRUSH_PRESETS.pencil;
-  return clampNumber(baseOpacity * preset.opacityMultiplier, 0.04, 1);
+  return clampNumber(baseOpacity * getSharedBrushOpacityMultiplier(normalized), 0.04, 1);
 }
 
 function buildBrushPath(points: DrawPoint[], brush: EditorToolMode): string {
   const normalized = normalizeDrawBrush(brush);
-  const preset = DRAW_BRUSH_PRESETS[normalized] ?? DRAW_BRUSH_PRESETS.pencil;
-  const smoothed = smoothPoints(points, preset.smoothing);
-  return buildSmoothSvgPath(smoothed);
+  return buildSharedStrokePaths(points as SharedDrawingPoint[], normalized, 1).d;
 }
 
 function getSvgPathFromStroke(stroke: number[][]): string {
@@ -704,62 +705,19 @@ const DrawStrokeRenderer = React.memo(function DrawStrokeRenderer({
   stroke: DrawStroke;
   backgroundColor: string;
 }) {
-  const brushRaw = (stroke as unknown as { brush?: EditorToolMode }).brush ?? 'pencil';
-  const brush = normalizeDrawBrush(brushRaw);
-  const opacity = clampNumber(stroke.opacity ?? 1, 0.02, 1);
-  const strokePath = stroke.path || buildBrushPath(stroke.points ?? [], brush);
-  const skStrokePath = useMemo(() => Skia.Path.MakeFromSVGString(strokePath) ?? Skia.Path.Make(), [strokePath]);
+  const brush = normalizeDrawBrush((stroke as unknown as { brush?: EditorToolMode }).brush ?? 'pencil');
+  const nextStroke = useMemo<SharedDrawingStroke>(() => {
+    const nextPaths = stroke.d ? { d: stroke.d, fillD: stroke.fillD } : buildSharedStrokePaths(stroke.points ?? [], brush, stroke.width);
+    return {
+      ...stroke,
+      brush,
+      d: nextPaths.d,
+      fillD: nextPaths.fillD,
+      grain: stroke.grain,
+    };
+  }, [brush, stroke]);
 
-  const fillD =
-    stroke.fillPath ??
-    (brush !== 'spray' && brush !== 'watercolor' ? buildFreehandFillPath(stroke.points ?? [], brush, stroke.width) : undefined);
-  const skFillPath = useMemo(() => (fillD ? Skia.Path.MakeFromSVGString(fillD) : null), [fillD]);
-
-  if (brush === 'spray') {
-    return (
-      <Group>
-        <SkiaPath path={skStrokePath} color={stroke.color} style="stroke" strokeWidth={stroke.width * 3.1} strokeCap="round" strokeJoin="round" opacity={opacity * 0.1}>
-          <BlurMask blur={stroke.width * 1.15} style="normal" />
-        </SkiaPath>
-        <SkiaPath path={skStrokePath} color={stroke.color} style="stroke" strokeWidth={stroke.width * 1.95} strokeCap="round" strokeJoin="round" opacity={opacity * 0.18}>
-          <BlurMask blur={stroke.width * 0.42} style="normal" />
-        </SkiaPath>
-        <SkiaPath path={skStrokePath} color={stroke.color} style="stroke" strokeWidth={stroke.width * 0.95} strokeCap="round" strokeJoin="round" opacity={opacity * 0.12}>
-          <BlurMask blur={stroke.width * 0.12} style="normal" />
-        </SkiaPath>
-      </Group>
-    );
-  }
-
-  if (brush === 'watercolor') {
-    return (
-      <Group>
-        <SkiaPath path={skStrokePath} color={stroke.color} style="stroke" strokeWidth={stroke.width * 3.6} strokeCap="round" strokeJoin="round" opacity={opacity * 0.07}>
-          <BlurMask blur={stroke.width * 1.45} style="normal" />
-        </SkiaPath>
-        <SkiaPath path={skStrokePath} color={stroke.color} style="stroke" strokeWidth={stroke.width * 2.3} strokeCap="round" strokeJoin="round" opacity={opacity * 0.1}>
-          <BlurMask blur={stroke.width * 0.85} style="normal" />
-        </SkiaPath>
-        <SkiaPath path={skStrokePath} color={stroke.color} style="stroke" strokeWidth={stroke.width * 1.2} strokeCap="round" strokeJoin="round" opacity={opacity * 0.12} />
-      </Group>
-    );
-  }
-
-  if (skFillPath) {
-    if (brush === 'highlighter') {
-      return (
-        <Group blendMode="multiply">
-          <SkiaPath path={skFillPath} color={stroke.color} style="fill" opacity={opacity * 0.22} />
-        </Group>
-      );
-    }
-    if (brush === 'eraser') {
-      return <SkiaPath path={skFillPath} color={backgroundColor} style="fill" opacity={1} />;
-    }
-    return <SkiaPath path={skFillPath} color={stroke.color} style="fill" opacity={opacity} />;
-  }
-
-  return <SkiaPath path={skStrokePath} color={stroke.color} style="stroke" strokeWidth={stroke.width} strokeCap="round" strokeJoin="round" opacity={opacity} />;
+  return <SharedDrawingStrokeLayer stroke={nextStroke} keySuffix="n" backgroundColor={backgroundColor} />;
 });
 
 const CommittedDrawLayer = React.memo(function CommittedDrawLayer({
@@ -1634,21 +1592,34 @@ export default function NotesScreen() {
         }
         const brush = normalizeDrawBrush(stroke.brush);
         stroke.brush = brush;
-        stroke.path = buildBrushPath(stroke.points, brush);
-        stroke.fillPath = buildFreehandFillPath(stroke.points, brush, stroke.width);
-        setEditorCurrentStroke({ ...stroke });
+        const nextPaths = buildSharedStrokePaths(stroke.points, brush, stroke.width);
+        stroke.d = nextPaths.d;
+        stroke.fillD = nextPaths.fillD;
+        setEditorCurrentStroke({
+          ...stroke,
+          points: [...stroke.points],
+          grain: stroke.grain ? [...stroke.grain] : undefined,
+        });
       });
     };
 
     const startStroke = (p: DrawPoint) => {
       if (isTouchingPhotoRef.current) return;
-      const points = [p];
+      const startedAt = Date.now();
+      const startPoint: SharedDrawingPoint = { x: p.x, y: p.y, t: startedAt, pressure: 0.5 };
+      const points: SharedDrawingPoint[] = [startPoint];
       const brush = normalizeDrawBrush(editorToolMode);
-      const opacity = getBrushOpacity(brush, editorOpacity);
+      const opacity =
+        brush === 'eraser'
+          ? 1
+          : clampNumber(
+              Math.max(getSharedMinVisibleOpacity(brush, editorColor), editorOpacity * getSharedBrushOpacityMultiplier(brush)),
+              0.04,
+              1
+            );
       const width = getBrushStrokeWidth(brush, editorStrokeWidth);
       const baseColor = brush === 'eraser' ? editorCanvasBackground : editorColor;
-      const path = buildBrushPath(points, brush);
-      const fillPath = buildFreehandFillPath(points, brush, width);
+      const nextPaths = buildSharedStrokePaths(points, brush, width);
       const stroke: DrawStroke = {
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         color: baseColor,
@@ -1656,8 +1627,9 @@ export default function NotesScreen() {
         opacity,
         brush,
         points,
-        path,
-        fillPath,
+        d: nextPaths.d,
+        fillD: nextPaths.fillD,
+        grain: brush === 'pencil' ? [] : undefined,
       };
       drawStrokeRef.current = stroke;
       setEditorCurrentStroke(stroke);
@@ -1669,10 +1641,35 @@ export default function NotesScreen() {
       if (!current) return;
       const prev = current.points[current.points.length - 1] ?? null;
       const brush = normalizeDrawBrush(current.brush);
-      const preset = DRAW_BRUSH_PRESETS[brush] ?? DRAW_BRUSH_PRESETS.pencil;
-      if (!shouldAddDrawPoint(prev, p, preset.minPointDistance)) return;
+      const now = Date.now();
+      const dt = Math.max(16, now - (prev?.t ?? now));
+      const dist = prev ? Math.hypot(p.x - prev.x, p.y - prev.y) : 0;
+      const speed = dist / dt;
+      const nextPressure = clampNumber(1 - speed * 2.2, 0.14, 1);
+      const nextPoint: SharedDrawingPoint = {
+        x: p.x,
+        y: p.y,
+        t: now,
+        pressure: brush === 'pen' ? nextPressure : 0.5,
+      };
+      const minDistance = getSharedBrushMinDistance(brush, current.width);
+      if (!shouldAddSharedPoint(prev, nextPoint, minDistance)) return;
 
-      current.points.push(p);
+      current.points.push(nextPoint);
+      if (brush === 'pencil') {
+        const grain = current.grain ?? [];
+        const newDots = buildSharedGrainDotsForSegment(
+          prev ?? nextPoint,
+          nextPoint,
+          current.width,
+          current.opacity,
+          sharedFnv1aHash(current.id),
+          grain.length,
+          220
+        );
+        if (newDots.length > 0) grain.push(...newDots);
+        current.grain = grain;
+      }
       scheduleStrokeUpdate();
     };
 
@@ -1693,11 +1690,13 @@ export default function NotesScreen() {
       }
       const brush = normalizeDrawBrush(current.brush);
       current.brush = brush;
-      current.path = buildBrushPath(current.points, brush);
-      current.fillPath = buildFreehandFillPath(current.points, brush, current.width);
+      const nextPaths = buildSharedStrokePaths(current.points, brush, current.width);
+      current.d = nextPaths.d;
+      current.fillD = nextPaths.fillD;
       const finalized: DrawStroke = {
         ...current,
         points: [...current.points],
+        grain: current.grain ? [...current.grain] : undefined,
       };
       setEditorStrokes((prev) => [...prev, finalized]);
       setEditorCurrentStroke(null);
@@ -2441,7 +2440,12 @@ export default function NotesScreen() {
                                 accessibilityState={{ selected: active }}
                               >
                                 <View style={s.brushChipRow}>
-                                  <BrushPreview brush={b.key} />
+                                  <SharedDrawingBrushPreview
+                                    brush={b.key}
+                                    style={s.brushPreviewWrap}
+                                    canvasStyle={s.brushPreviewCanvas}
+                                    backgroundColor={EDITOR_CANVAS_DEFAULT_BG}
+                                  />
                                   <Text style={[s.brushChipText, active && s.brushChipTextActive]}>{b.label}</Text>
                                 </View>
                               </Pressable>
@@ -3202,7 +3206,6 @@ function EditorTextItem({
       style={[
         s.editorCanvasTextItem,
         { width, minHeight: height, zIndex: isActive ? 18 : 14 },
-        isActive && s.editorCanvasTextItemActive,
         animatedStyle,
       ]}
     >
@@ -3421,7 +3424,6 @@ function EditorStickerItem({
         style={[
           s.editorStickerItem,
           { width, height, zIndex: isActive ? 16 : 12 },
-          isActive && s.editorStickerItemActive,
           animatedStyle,
         ]}
       >
@@ -3860,6 +3862,10 @@ const s = StyleSheet.create({
     maxWidth: 240,
     paddingHorizontal: 8,
     paddingVertical: 5,
+    backgroundColor: 'transparent',
+    borderWidth: 0,
+    shadowOpacity: 0,
+    elevation: 0,
     color: TEXT,
     fontSize: 22,
     fontWeight: '600',
