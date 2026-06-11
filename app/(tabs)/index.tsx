@@ -412,6 +412,12 @@ export default function HomeScreen() {
             onPress={() => router.push('/ver-juntos')} 
           />
         </ScrollView>
+        <Pressable
+          style={[s.memoryLinkButton, { alignSelf: 'flex-start', marginTop: 6, marginBottom: 6 }]}
+          onPress={() => router.push('/drawing-engine-test')}
+        >
+          <Text style={s.memoryLinkButtonText}>Abrir test de dibujo</Text>
+        </Pressable>
 
         {/* --- 5. Mood check-in section --- */}
         <Text style={s.sectionTitle}>¿Cómo se sienten hoy?</Text>
