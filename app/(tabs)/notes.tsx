@@ -63,6 +63,7 @@ import {
 import { supabase } from '../../lib/supabase';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const NOTES_BUCKET = 'notes';
 const BG = '#FFF7FB';
 const TEXT = '#4C2A3D';
 const TEXT_SOFT = '#8E6D7D';
@@ -82,7 +83,8 @@ type DbNote = {
   content: string | null;
   note_type: string;
   image_url: string | null;
-  drawing_data: string | null;
+  drawing_data: unknown | null;
+  drawing_preview_url?: string | null;
   is_shared: boolean;
   created_at: string;
   updated_at: string;
@@ -91,37 +93,37 @@ type DbNote = {
 type StoredDrawingData = {
   version?: number;
   backgroundColor?: string;
+  previewImageUrl?: string | null;
+  preview_image_url?: string | null;
   photos?: Array<{ uri?: string | null }>;
   texts?: Array<{ text?: string | null }>;
   stickers?: Array<{ sticker?: string | null }>;
   strokes?: Array<unknown>;
 };
 
+type AlbumMemoryKind = 'text' | 'photo' | 'drawing' | 'mixed';
+
 type AlbumMemory = {
   id: string;
-  authorLabel: string;
-  isMine: boolean;
-  dateLabel: string;
-  imageUri: string | null;
+  kind: AlbumMemoryKind;
+  title?: string | null;
+  text?: string | null;
   previewText: string;
-  cardTone: 'pink' | 'cream' | 'lilac';
-  backgroundColor: string;
-  kindLabel: 'Texto' | 'Foto' | 'Dibujo' | 'Mixta';
+  imageUrl?: string | null;
+  drawingPreviewUrl?: string | null;
+  previewImageUrl?: string | null;
+  createdAt?: string | null;
+  createdBy?: string | null;
+  isMine?: boolean;
+  drawingData?: StoredDrawingData | null;
+  backgroundColor?: string | null;
+  raw?: unknown;
 };
 
-type AlbumEntry = {
-  id: string;
-  createdAt: string;
-  dateLabel: string;
-  isMine: boolean;
-  authorLabel: string;
-  type: 'text' | 'photo' | 'drawing' | 'mixed';
-  text: string | null;
-  photoUrl: string | null;
-  drawingUrl: string | null;
-  previewImage: string | null;
-  backgroundColor: string;
-  kindLabel: AlbumMemory['kindLabel'];
+type UploadNotePhotoResult = {
+  path: string;
+  publicUrl: string | null;
+  signedUrl: string | null;
 };
 
 type DrawPoint = { x: number; y: number; t?: number; pressure?: number };
@@ -219,100 +221,151 @@ function fmtDate(iso: string): string {
   }
 }
 
-function parseStoredDrawingData(raw: string | null): StoredDrawingData | null {
-  if (!raw) return null;
-  try {
-    const parsed = JSON.parse(raw) as StoredDrawingData;
-    return parsed && typeof parsed === 'object' ? parsed : null;
-  } catch {
-    return null;
+function safeParseDrawingData(value: unknown): StoredDrawingData | null {
+  if (!value) return null;
+  if (typeof value === 'object') return value as StoredDrawingData;
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value) as StoredDrawingData;
+    } catch (error) {
+      console.log('[ALBUM_DATA] invalid drawing_data', error);
+      return null;
+    }
   }
+  return null;
 }
 
-function getAlbumMemoryImageUri(note: DbNote, drawing: StoredDrawingData | null): string | null {
-  if (typeof note.image_url === 'string' && note.image_url.trim().length > 0) return note.image_url.trim();
-  const drawingPhoto = drawing?.photos?.find((item) => typeof item?.uri === 'string' && item.uri.trim().length > 0)?.uri?.trim();
-  return drawingPhoto ?? null;
+function getPreviewText(value: unknown, fallback = 'Recuerdo'): string {
+  const text = typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : '';
+  if (!text) return fallback;
+  return text.length > 80 ? `${text.slice(0, 80)}...` : text;
 }
 
-function getAlbumMemoryPreviewText(note: DbNote, drawing: StoredDrawingData | null): string {
-  const content = note.content?.trim();
-  if (content) return content;
+function normalizeNoteToAlbumMemory(note: DbNote, currentUserId?: string | null): AlbumMemory | null {
+  if (!note?.id) return null;
 
-  const drawingText = drawing?.texts?.map((item) => item?.text?.trim() ?? '').find((value) => value.length > 0);
-  if (drawingText) return drawingText;
+  const drawingData = safeParseDrawingData(note.drawing_data);
+  const content = typeof note.content === 'string' ? note.content.trim() : '';
+  const imageUrl = typeof note.image_url === 'string' && note.image_url.trim() ? note.image_url.trim() : null;
+  const firstDrawingText =
+    drawingData?.texts?.find?.((t) => typeof t?.text === 'string' && t.text.trim())?.text?.trim() || null;
+  const firstDrawingPhoto =
+    drawingData?.photos?.find?.((p) => typeof p?.uri === 'string' && p.uri.trim())?.uri?.trim() || null;
+  const drawingPreviewUrl =
+    (typeof note.drawing_preview_url === 'string' && note.drawing_preview_url.trim() ? note.drawing_preview_url.trim() : null) ||
+    (typeof drawingData?.previewImageUrl === 'string' && drawingData.previewImageUrl.trim() ? drawingData.previewImageUrl.trim() : null) ||
+    (typeof drawingData?.preview_image_url === 'string' && drawingData.preview_image_url.trim() ? drawingData.preview_image_url.trim() : null) ||
+    null;
+  const previewImageUrl = drawingPreviewUrl || imageUrl || firstDrawingPhoto || null;
 
-  const parts: string[] = [];
-  if ((drawing?.strokes?.length ?? 0) > 0) parts.push('dibujo');
-  if ((drawing?.photos?.length ?? 0) > 0) parts.push(drawing?.photos?.length === 1 ? 'foto' : 'fotos');
-  if ((drawing?.stickers?.length ?? 0) > 0) parts.push(drawing?.stickers?.length === 1 ? 'sticker' : 'stickers');
-  if ((drawing?.texts?.length ?? 0) > 0) parts.push('texto');
-  if (parts.length > 0) return `Nota con ${parts.join(', ')}.`;
-
-  return note.title?.trim() || 'Recuerdo guardado.';
-}
-
-function getAlbumMemoryKind(note: DbNote, drawing: StoredDrawingData | null, imageUri: string | null): AlbumMemory['kindLabel'] {
-  if (note.note_type === 'photo' || (!!imageUri && !drawing?.strokes?.length && !drawing?.texts?.length && !drawing?.stickers?.length)) {
-    return 'Foto';
+  let kind: AlbumMemoryKind;
+  if (note.note_type === 'photo' || (!!imageUrl && !drawingData)) {
+    kind = 'photo';
+  } else if (note.note_type === 'drawing') {
+    kind = 'drawing';
+  } else if (drawingData && (imageUrl || content || firstDrawingText)) {
+    kind = 'mixed';
+  } else if (drawingData) {
+    kind = 'drawing';
+  } else {
+    kind = 'text';
   }
-  if ((drawing?.strokes?.length ?? 0) > 0) return 'Dibujo';
-  if ((drawing?.photos?.length ?? 0) > 0 || (drawing?.texts?.length ?? 0) > 0 || (drawing?.stickers?.length ?? 0) > 0) return 'Mixta';
-  return 'Texto';
-}
 
-function getAlbumEntryText(note: DbNote, drawing: StoredDrawingData | null): string | null {
-  const content = note.content?.trim();
-  if (content) return content;
-  const textItems = drawing?.texts
-    ?.map((item) => item?.text?.trim() ?? '')
-    .filter((value) => value.length > 0);
-  if (!textItems || textItems.length === 0) return null;
-  return textItems.join('\n');
-}
+  const previewText =
+    content
+      ? getPreviewText(content)
+      : firstDrawingText
+        ? getPreviewText(firstDrawingText)
+        : kind === 'photo'
+          ? 'Foto'
+          : kind === 'drawing' || kind === 'mixed'
+            ? 'Nota con dibujo'
+            : 'Recuerdo';
 
-function normalizeAlbumEntry(note: DbNote, userId: string | null, partnerName: string, index: number): AlbumEntry {
-  const drawing = parseStoredDrawingData(note.drawing_data);
-  const photoUrl = getAlbumMemoryImageUri(note, drawing);
-  const kindLabel = getAlbumMemoryKind(note, drawing, photoUrl);
-  const isMine = !!userId && note.created_by === userId;
-  const text = getAlbumEntryText(note, drawing);
-  const inferredType: AlbumEntry['type'] =
-    note.note_type === 'photo'
-      ? 'photo'
-      : note.note_type === 'drawing'
-        ? 'drawing'
-        : note.note_type === 'mixed'
-          ? 'mixed'
-          : note.note_type === 'text'
-            ? 'text'
-            : kindLabel === 'Foto'
-              ? 'photo'
-              : kindLabel === 'Dibujo'
-                ? 'drawing'
-                : kindLabel === 'Mixta'
-                  ? 'mixed'
-                  : 'text';
-
-  const previewImage = photoUrl;
   return {
-    id: note.id,
-    createdAt: note.created_at,
-    dateLabel: fmtDate(note.created_at),
-    isMine,
-    authorLabel: isMine ? 'Tú' : partnerName,
-    type: inferredType,
-    text,
-    photoUrl,
-    drawingUrl: null,
-    previewImage,
-    backgroundColor: drawing?.backgroundColor || (index % 2 === 0 ? '#FFF2F7' : '#FFF8EE'),
-    kindLabel,
+    id: String(note.id),
+    kind,
+    title: note.title ?? null,
+    text: content || firstDrawingText || null,
+    previewText,
+    imageUrl,
+    drawingPreviewUrl,
+    previewImageUrl,
+    createdAt: note.created_at ?? null,
+    createdBy: note.created_by ?? null,
+    isMine: currentUserId ? note.created_by === currentUserId : false,
+    drawingData,
+    backgroundColor: drawingData?.backgroundColor ?? null,
+    raw: note,
   };
 }
 
-function buildAlbumEntries(notes: DbNote[], userId: string | null, partnerName: string): AlbumEntry[] {
-  return notes.map((note, index) => normalizeAlbumEntry(note, userId, partnerName, index));
+function normalizeNotesToAlbumMemories(notes: DbNote[], currentUserId?: string | null): AlbumMemory[] {
+  return notes
+    .map((note) => normalizeNoteToAlbumMemory(note, currentUserId))
+    .filter((item): item is AlbumMemory => item !== null)
+    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+}
+
+function extractNotesStoragePath(urlOrPath?: string | null): string | null {
+  if (!urlOrPath || typeof urlOrPath !== 'string') return null;
+
+  const value = urlOrPath.trim();
+  if (!value) return null;
+
+  if (
+    !value.startsWith('http://') &&
+    !value.startsWith('https://') &&
+    !value.startsWith('file://') &&
+    !value.startsWith('content://')
+  ) {
+    return value.replace(/^\/+/, '');
+  }
+
+  const publicMarker = `/storage/v1/object/public/${NOTES_BUCKET}/`;
+  const signedMarker = `/storage/v1/object/sign/${NOTES_BUCKET}/`;
+
+  const publicIndex = value.indexOf(publicMarker);
+  if (publicIndex >= 0) {
+    return decodeURIComponent(value.slice(publicIndex + publicMarker.length).split('?')[0]);
+  }
+
+  const signedIndex = value.indexOf(signedMarker);
+  if (signedIndex >= 0) {
+    return decodeURIComponent(value.slice(signedIndex + signedMarker.length).split('?')[0]);
+  }
+
+  return null;
+}
+
+async function verifyNotesStorageImage(urlOrPath?: string | null) {
+  const path = extractNotesStoragePath(urlOrPath);
+
+  console.log('[STORAGE_DEBUG] input', {
+    hasInput: !!urlOrPath,
+    inputStart: typeof urlOrPath === 'string' ? urlOrPath.slice(0, 160) : null,
+    extractedPath: path,
+  });
+
+  if (!path) {
+    return { path: null, signedUrl: null, ok: false };
+  }
+
+  const { data: signedData, error: signedError } = await supabase.storage
+    .from(NOTES_BUCKET)
+    .createSignedUrl(path, 60 * 60);
+
+  console.log('[STORAGE_DEBUG] signed url result', {
+    path,
+    hasSignedUrl: !!signedData?.signedUrl,
+    signedError,
+  });
+
+  return {
+    path,
+    signedUrl: signedData?.signedUrl || null,
+    ok: !!signedData?.signedUrl && !signedError,
+  };
 }
 
 function truncateText(value: string, maxChars: number): string {
@@ -361,14 +414,11 @@ function getSpreadPageLayouts(side: 'left' | 'right', pageWidth: number, pageHei
   return source.map((layout) => clampMemoryPieceLayout(layout, pageWidth, pageHeight));
 }
 
-function getMemoryPreviewLabel(item: AlbumEntry): string {
-  const text = item.text?.trim();
-  if (text) return truncateText(text, 80);
-  if (item.kindLabel === 'Dibujo') return 'Nota con dibujo';
-  return 'Recuerdo';
+function getMemoryPreviewLabel(item: AlbumMemory): string {
+  return getPreviewText(item.previewText, 'Recuerdo');
 }
 
-function getMemoryCaption(item: AlbumEntry): string {
+function getMemoryCaption(item: AlbumMemory): string {
   if (item.createdAt) {
     const formatted = fmtDate(item.createdAt);
     if (formatted) return formatted;
@@ -376,17 +426,17 @@ function getMemoryCaption(item: AlbumEntry): string {
   return getMemoryPreviewLabel(item);
 }
 
-function getMemoryPaperTone(item: AlbumEntry): string {
-  if (item.type === 'text') return item.isMine ? '#FFF7F1' : '#FFF2F7';
-  if (item.type === 'drawing') return '#FFF9F1';
+function getMemoryPaperTone(item: AlbumMemory): string {
+  if (item.kind === 'text') return item.isMine ? '#FFF7F1' : '#FFF2F7';
+  if (item.kind === 'drawing') return '#FFF9F1';
   return '#FFFDF8';
 }
 
 type MemoryAttachment = 'tape' | 'double_tape' | 'clip';
 
-function getMemoryAttachment(item: AlbumEntry, seed: number): MemoryAttachment {
-  if (item.type === 'photo') return seed % 2 === 0 ? 'double_tape' : 'tape';
-  if (item.type === 'drawing') return seed % 3 === 0 ? 'tape' : 'clip';
+function getMemoryAttachment(item: AlbumMemory, seed: number): MemoryAttachment {
+  if (item.kind === 'photo') return seed % 2 === 0 ? 'double_tape' : 'tape';
+  if (item.kind === 'drawing') return seed % 3 === 0 ? 'tape' : 'clip';
   return seed % 4 === 0 ? 'clip' : 'tape';
 }
 
@@ -394,6 +444,16 @@ function getSeededRotate(rotate: string, seed: number): string {
   const base = Number.parseFloat(rotate.replace('deg', ''));
   const jitter = ((seed % 9) - 4) * 0.35;
   return `${base + jitter}deg`;
+}
+
+function getImageUriType(imageUri: string | null): 'supabase-public' | 'https' | 'file' | 'content' | 'invalid' | 'null' {
+  if (!imageUri) return 'null';
+  if (imageUri.startsWith('file://')) return 'file';
+  if (imageUri.startsWith('content://')) return 'content';
+  if (imageUri.startsWith('https://')) {
+    return imageUri.includes('supabase') ? 'supabase-public' : 'https';
+  }
+  return 'invalid';
 }
 
 function shouldAddDrawPoint(prev: DrawPoint | null, next: DrawPoint, minDistance: number, maxDistance = 75): boolean {
@@ -1268,6 +1328,7 @@ export default function NotesScreen() {
   const [coupleId, setCoupleId] = useState<string | null>(null);
   const [partnerName, setPartnerName] = useState('Tu pareja');
   const [notes, setNotes] = useState<DbNote[]>([]);
+  const [memories, setMemories] = useState<AlbumMemory[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
@@ -1310,6 +1371,7 @@ export default function NotesScreen() {
     width: number;
     height: number;
   } | null>(null);
+  const signedUrlCacheRef = useRef<Record<string, string>>({});
   const isTouchingPhotoRef = useRef(false);
   const isTouchingTextRef = useRef(false);
   const isTouchingStickerRef = useRef(false);
@@ -1342,6 +1404,8 @@ export default function NotesScreen() {
         return false;
       }
 
+      console.log('[ALBUM_DATA] raw notes count', data?.length);
+      console.log('[ALBUM_DATA] first raw note keys', data?.[0] ? Object.keys(data[0]) : []);
       setNotes(data ?? []);
       if (context === 'album') {
         setAlbumError(null);
@@ -1447,13 +1511,9 @@ export default function NotesScreen() {
     Alert.alert('Notas', 'Muy pronto podrás usar esta opción.');
   }, []);
 
-  const handleOpenAlbum = useCallback(async () => {
+  const handleOpenAlbum = useCallback(() => {
     setShowAlbum(true);
-    if (!coupleId) return;
-    setAlbumLoading(true);
-    await fetchNotes(coupleId, 'album');
-    setAlbumLoading(false);
-  }, [coupleId, fetchNotes]);
+  }, []);
 
   const handleClearNote = useCallback(() => {
     setNoteText('');
@@ -1467,28 +1527,53 @@ export default function NotesScreen() {
     setNoteText(value);
   }, []);
 
-  const uploadNotePhoto = useCallback(async (photo: EditorPhotoElement, cid: string, uid: string) => {
-    const response = await fetch(photo.uri);
-    const arrayBuffer = await response.arrayBuffer();
-    const filePath = `${uid}/${cid}/note-photo-${Date.now()}-${photo.id}.jpg`;
-    const bucketName = 'notes';
+  const uploadNotePhoto = useCallback(async (photo: EditorPhotoElement, cid: string, uid: string): Promise<UploadNotePhotoResult> => {
+    const localUri = photo.uri;
+    const ext = localUri.split('.').pop()?.split('?')[0] || 'jpg';
+    const normalizedExt = ext.toLowerCase() === 'png' ? 'png' : 'jpg';
+    const contentType = normalizedExt === 'png' ? 'image/png' : 'image/jpeg';
+    const path = `${uid}/${cid}/note-photo-${Date.now()}-${photo.id}.${normalizedExt}`;
 
-    const { error: uploadError } = await supabase.storage.from(bucketName).upload(filePath, arrayBuffer, {
-      contentType: 'image/jpeg',
-      upsert: true,
+    console.log('[PHOTO_UPLOAD] path', path);
+    console.log('[PHOTO_UPLOAD] localUri', localUri);
+
+    const response = await fetch(localUri);
+    const arrayBuffer = await response.arrayBuffer();
+
+    console.log('[PHOTO_UPLOAD] bytes', arrayBuffer.byteLength);
+
+    const { data, error } = await supabase.storage
+      .from(NOTES_BUCKET)
+      .upload(path, arrayBuffer, {
+        contentType,
+        upsert: false,
+      });
+
+    console.log('[PHOTO_UPLOAD] upload result', { data, error });
+
+    if (error) {
+      throw error;
+    }
+
+    const { data: publicData } = supabase.storage
+      .from(NOTES_BUCKET)
+      .getPublicUrl(path);
+
+    const { data: signedData, error: signedError } = await supabase.storage
+      .from(NOTES_BUCKET)
+      .createSignedUrl(path, 60 * 60);
+
+    console.log('[PHOTO_UPLOAD] urls', {
+      publicUrl: publicData?.publicUrl,
+      signedUrl: signedData?.signedUrl,
+      signedError,
     });
 
-    if (uploadError) {
-      throw uploadError;
-    }
-
-    const { data: publicData } = supabase.storage.from(bucketName).getPublicUrl(filePath);
-    const publicUrl = publicData?.publicUrl ?? null;
-
-    if (!publicUrl) {
-      throw new Error('No se pudo obtener la URL pública');
-    }
-    return publicUrl;
+    return {
+      path,
+      publicUrl: publicData?.publicUrl || null,
+      signedUrl: signedData?.signedUrl || null,
+    };
   }, []);
 
   const pickSingleImageFromLibrary = useCallback(async (): Promise<string | null> => {
@@ -1594,9 +1679,10 @@ export default function NotesScreen() {
         const uploadedPhotos = await Promise.all(
           (drawing.photos ?? []).map(async (p) => {
             try {
-              const url = await uploadNotePhoto(p, coupleId, userId);
-              if (!photoUrlForDb) photoUrlForDb = url;
-              return { ...p, uri: url };
+              const uploadResult = await uploadNotePhoto(p, coupleId, userId);
+              const persistedUrl = uploadResult.publicUrl || uploadResult.path;
+              if (!photoUrlForDb) photoUrlForDb = persistedUrl;
+              return { ...p, uri: persistedUrl };
             } catch (e) {
               console.log('[Notas] photo upload error', e);
               return p;
@@ -2115,7 +2201,7 @@ export default function NotesScreen() {
       setNoteText('');
 
       try {
-        const uploadedUrl = await uploadNotePhoto(
+        const uploadResult = await uploadNotePhoto(
           {
             id: `main-photo-${Date.now()}`,
             uri,
@@ -2129,6 +2215,8 @@ export default function NotesScreen() {
           coupleId,
           userId
         );
+        const uploadedUrlForDb = uploadResult.publicUrl || uploadResult.path;
+        const uploadedUrlForUi = uploadResult.signedUrl || uploadResult.publicUrl || uploadResult.path;
 
         const payload = {
           couple_id: coupleId,
@@ -2137,7 +2225,7 @@ export default function NotesScreen() {
           content: null,
           note_type: 'photo',
           is_shared: true,
-          image_url: uploadedUrl,
+          image_url: uploadedUrlForDb,
           drawing_data: null,
         };
 
@@ -2147,7 +2235,7 @@ export default function NotesScreen() {
           throw insertError;
         }
 
-        setMainCardPhotoUri(uploadedUrl);
+        setMainCardPhotoUri(uploadedUrlForUi);
         await fetchNotes(coupleId);
       } catch (error) {
         console.log('[Notas] handleSaveMainPhotoNote error', error);
@@ -2447,22 +2535,112 @@ export default function NotesScreen() {
   const displayedMainPhotoUri = mainCardPhotoUri;
   const hasMainTextDraft = noteText.trim().length > 0;
   const shouldShowMainPhotoPreview = !noteText.trim() && !!displayedMainPhotoUri;
-  const memories = useMemo(() => buildAlbumEntries(notes, userId, partnerName), [notes, partnerName, userId]);
   const bookWidth = Math.min(SCREEN_WIDTH * 0.92, 380);
   const bookHeight = Math.min(SCREEN_HEIGHT * 0.58, 500);
   const foldWidth = 8;
   const pageWidth = (bookWidth - foldWidth) / 2;
   const pageHeight = bookHeight;
+  const firstImageMemory = useMemo(
+    () =>
+      memories.find(
+        (item) =>
+          typeof item.previewImageUrl === 'string' ||
+          typeof item.drawingPreviewUrl === 'string' ||
+          typeof item.imageUrl === 'string'
+      ) ?? null,
+    [memories]
+  );
+  const firstImageUri =
+    firstImageMemory?.previewImageUrl ||
+    firstImageMemory?.drawingPreviewUrl ||
+    firstImageMemory?.imageUrl ||
+    null;
   const spreadItems = useMemo(() => memories.slice(0, 6), [memories]);
   const leftItems = useMemo(() => spreadItems.slice(0, 3), [spreadItems]);
   const rightItems = useMemo(() => spreadItems.slice(3, 6), [spreadItems]);
   const leftLayouts = useMemo(() => getSpreadPageLayouts('left', pageWidth, pageHeight), [pageHeight, pageWidth]);
   const rightLayouts = useMemo(() => getSpreadPageLayouts('right', pageWidth, pageHeight), [pageHeight, pageWidth]);
 
+  const resolveAlbumPreviewUrls = useCallback(async (items: AlbumMemory[]) => {
+    return Promise.all(
+      items.map(async (item) => {
+        const originalPreview =
+          item.previewImageUrl ||
+          item.drawingPreviewUrl ||
+          item.imageUrl ||
+          null;
+
+        if (!originalPreview || typeof originalPreview !== 'string') {
+          return item;
+        }
+
+        const cacheKey = originalPreview.trim();
+        if (!cacheKey) {
+          return item;
+        }
+
+        const cachedSignedUrl = signedUrlCacheRef.current[cacheKey];
+        if (cachedSignedUrl) {
+          return { ...item, previewImageUrl: cachedSignedUrl };
+        }
+
+        try {
+          const resolvedPreview = await verifyNotesStorageImage(cacheKey);
+          if (resolvedPreview.signedUrl) {
+            signedUrlCacheRef.current[cacheKey] = resolvedPreview.signedUrl;
+            return {
+              ...item,
+              previewImageUrl: resolvedPreview.signedUrl,
+            };
+          }
+        } catch (error) {
+          console.log('[STORAGE_DEBUG] resolve preview error', {
+            id: item.id,
+            originalPreview: cacheKey.slice(0, 160),
+            error,
+          });
+        }
+
+        return item;
+      })
+    );
+  }, []);
+
   useEffect(() => {
-    if (!showAlbum) return;
-    console.log('[ALBUM_UI] render spread items', spreadItems.length);
-  }, [showAlbum, spreadItems.length]);
+    let cancelled = false;
+
+    const syncMemories = async () => {
+      const normalized = normalizeNotesToAlbumMemories(notes, userId);
+      const resolved = await resolveAlbumPreviewUrls(normalized);
+
+      if (!cancelled) {
+        setMemories((current) => {
+          const isSame =
+            current.length === resolved.length &&
+            current.every(
+              (item, index) =>
+                item.id === resolved[index]?.id &&
+                item.previewImageUrl === resolved[index]?.previewImageUrl &&
+                item.previewText === resolved[index]?.previewText &&
+                item.kind === resolved[index]?.kind
+            );
+
+          if (isSame) {
+            return current;
+          }
+
+          console.log('[ALBUM_DATA] loaded count', resolved.length);
+          return resolved;
+        });
+      }
+    };
+
+    syncMemories();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [notes, resolveAlbumPreviewUrls, userId]);
 
   if (loading) {
     return (
@@ -3295,19 +3473,26 @@ function PageDecoration({ side }: { side: 'left' | 'right' }) {
 
 function PolaroidPiece({
   item,
+  imageUri,
   seed,
   caption,
   fontsLoaded,
   attachment,
 }: {
-  item: AlbumEntry;
+  item: AlbumMemory;
+  imageUri: string | null;
   seed: number;
   caption: string;
   fontsLoaded: boolean;
   attachment: MemoryAttachment;
 }) {
   const [imageFailed, setImageFailed] = useState(false);
-  const imageUri = item.previewImage || item.photoUrl || item.drawingUrl;
+  const safeImageUri = typeof imageUri === 'string' && imageUri.trim().length > 0 ? imageUri.trim() : null;
+  const hasImage = !!safeImageUri && !imageFailed;
+
+  useEffect(() => {
+    setImageFailed(false);
+  }, [safeImageUri]);
 
   return (
     <View style={s.polaroidWrap}>
@@ -3315,16 +3500,29 @@ function PolaroidPiece({
       <View style={s.polaroidShadow} pointerEvents="none" />
       <View style={s.polaroidFrame}>
         <View style={s.polaroidPhotoArea}>
-          {imageUri && !imageFailed ? (
-            <Image source={{ uri: imageUri }} style={s.polaroidImage} resizeMode="cover" onError={() => setImageFailed(true)} />
-          ) : (
-            <View style={s.polaroidPlaceholder}>
-              <View style={s.polaroidPlaceholderInner}>
-                <Text style={s.polaroidPlaceholderIcon}>✦</Text>
-                <Text style={s.polaroidPlaceholderText}>Foto</Text>
-              </View>
+          {hasImage ? (
+          <Image
+            source={{ uri: safeImageUri }}
+            style={s.polaroidImage}
+            resizeMode="cover"
+            onLoad={() => console.log('[ALBUM_IMAGE] polaroid loaded', item.id)}
+            onError={(error) => {
+              console.log('[ALBUM_IMAGE] polaroid error', item.id, {
+                imageUriType: getImageUriType(safeImageUri),
+                imageUriStart: safeImageUri ? safeImageUri.slice(0, 160) : null,
+                nativeEvent: error.nativeEvent,
+              });
+              setImageFailed(true);
+            }}
+          />
+        ) : (
+          <View style={s.polaroidPlaceholder}>
+            <View style={s.polaroidPlaceholderInner}>
+              <Text style={s.polaroidPlaceholderIcon}>✦</Text>
+              <Text style={s.polaroidPlaceholderText}>Foto</Text>
             </View>
-          )}
+          </View>
+        )}
         </View>
         <Text
           style={[s.polaroidCaption, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]}
@@ -3345,13 +3543,13 @@ function NotePaperPiece({
   seed,
   attachment,
 }: {
-  item: AlbumEntry;
+  item: AlbumMemory;
   caption: string;
   fontsLoaded: boolean;
   seed: number;
   attachment: MemoryAttachment;
 }) {
-  const previewText = item.text?.trim() ? truncateText(item.text, 92) : 'Recuerdo';
+  const previewText = getPreviewText(item.previewText, 'Recuerdo');
   const stampLabel = item.createdAt ? caption : '♡';
 
   return (
@@ -3384,26 +3582,48 @@ function NotePaperPiece({
 
 function DrawingPiece({
   item,
+  imageUri,
   caption,
   seed,
   fontsLoaded,
   attachment,
 }: {
-  item: AlbumEntry;
+  item: AlbumMemory;
+  imageUri: string | null;
   caption: string;
   seed: number;
   fontsLoaded: boolean;
   attachment: MemoryAttachment;
 }) {
   const [imageFailed, setImageFailed] = useState(false);
-  const imageUri = item.previewImage || item.photoUrl || item.drawingUrl;
+  const safeImageUri = typeof imageUri === 'string' && imageUri.trim().length > 0 ? imageUri.trim() : null;
+  const hasImage = !!safeImageUri && !imageFailed;
+
+  useEffect(() => {
+    setImageFailed(false);
+  }, [safeImageUri]);
 
   return (
     <View style={s.drawingWrap}>
       {attachment === 'clip' ? <PaperClip side={seed % 2 === 0 ? 'right' : 'left'} /> : <TapePiece seed={seed} variant="single" />}
-      <View style={[s.drawingCard, { backgroundColor: getMemoryPaperTone(item) || item.backgroundColor || '#FFF8EE' }]}>
-        {imageUri && !imageFailed ? (
-          <Image source={{ uri: imageUri }} style={s.drawingImage} resizeMode="cover" onError={() => setImageFailed(true)} />
+      <View style={[s.drawingCard, { backgroundColor: item.backgroundColor || getMemoryPaperTone(item) || '#FFF8EE' }]}>
+        {hasImage ? (
+          <View style={s.drawingImageFrame}>
+            <Image
+              source={{ uri: safeImageUri }}
+              style={s.drawingImage}
+              resizeMode="cover"
+              onLoad={() => console.log('[ALBUM_IMAGE] drawing loaded', item.id)}
+              onError={(error) => {
+                console.log('[ALBUM_IMAGE] drawing error', item.id, {
+                  imageUriType: getImageUriType(safeImageUri),
+                  imageUriStart: safeImageUri ? safeImageUri.slice(0, 80) : null,
+                  nativeEvent: error.nativeEvent,
+                });
+                setImageFailed(true);
+              }}
+            />
+          </View>
         ) : (
           <View style={s.drawingFallback}>
             <Text style={s.drawingFallbackIcon}>✦</Text>
@@ -3427,20 +3647,20 @@ function DrawingPiece({
 }
 
 type MemoryPieceProps = {
-  item: AlbumEntry;
+  item: AlbumMemory;
   layout: MemoryPieceLayout;
   fontsLoaded: boolean;
   onPress?: () => void;
 };
 
 const MemoryPiece = React.memo(function MemoryPiece({ item, layout, fontsLoaded, onPress }: MemoryPieceProps) {
-  const previewImage = item.previewImage || item.photoUrl || item.drawingUrl;
-  const isPhotoPiece = item.type === 'photo' || (item.type === 'mixed' && !!previewImage);
-  const isTextPiece = item.type === 'text' && !previewImage;
+  const imageUri = item.previewImageUrl || item.drawingPreviewUrl || item.imageUrl || null;
+  const hasImage = typeof imageUri === 'string' && imageUri.trim().length > 0;
+  const safeImageUri = hasImage ? imageUri.trim() : null;
   const caption = getMemoryCaption(item);
   const seed = fnv1aHash(item.id);
   const attachment = getMemoryAttachment(item, seed);
-  const pieceZIndex = isPhotoPiece ? 4 : isTextPiece ? 2 : 3;
+  const pieceZIndex = item.kind === 'photo' || (item.kind === 'mixed' && hasImage) ? 4 : item.kind === 'text' ? 2 : 3;
 
   return (
     <TouchableOpacity
@@ -3458,12 +3678,18 @@ const MemoryPiece = React.memo(function MemoryPiece({ item, layout, fontsLoaded,
         },
       ]}
     >
-      {isPhotoPiece ? (
-        <PolaroidPiece item={item} seed={seed} caption={caption} fontsLoaded={fontsLoaded} attachment={attachment} />
-      ) : isTextPiece ? (
-        <NotePaperPiece item={item} caption={caption} fontsLoaded={fontsLoaded} seed={seed} attachment={attachment} />
+      {item.kind === 'photo' ? (
+        <PolaroidPiece item={item} imageUri={safeImageUri} seed={seed} caption={caption} fontsLoaded={fontsLoaded} attachment={attachment} />
+      ) : item.kind === 'mixed' ? (
+        hasImage ? (
+          <PolaroidPiece item={item} imageUri={safeImageUri} seed={seed} caption={caption} fontsLoaded={fontsLoaded} attachment={attachment} />
+        ) : (
+          <NotePaperPiece item={item} caption={caption} fontsLoaded={fontsLoaded} seed={seed} attachment={attachment} />
+        )
+      ) : item.kind === 'drawing' ? (
+        <DrawingPiece item={item} imageUri={safeImageUri} caption={caption} seed={seed} fontsLoaded={fontsLoaded} attachment={attachment} />
       ) : (
-        <DrawingPiece item={item} caption={caption} seed={seed} fontsLoaded={fontsLoaded} attachment={attachment} />
+        <NotePaperPiece item={item} caption={caption} fontsLoaded={fontsLoaded} seed={seed} attachment={attachment} />
       )}
     </TouchableOpacity>
   );
@@ -5585,7 +5811,6 @@ const s = StyleSheet.create({
   polaroidWrap: {
     width: '100%',
     height: '100%',
-    paddingTop: 10,
   },
   polaroidShadow: {
     position: 'absolute',
@@ -5598,11 +5823,9 @@ const s = StyleSheet.create({
   },
   polaroidFrame: {
     flex: 1,
-    borderRadius: 8,
+    borderRadius: 10,
     backgroundColor: '#FFFDF8',
-    paddingTop: 8,
-    paddingHorizontal: 8,
-    paddingBottom: 11,
+    padding: 7,
     borderWidth: 1,
     borderColor: 'rgba(120, 70, 45, 0.10)',
     shadowColor: SHADOW,
@@ -5613,9 +5836,12 @@ const s = StyleSheet.create({
   },
   polaroidPhotoArea: {
     flex: 1,
-    borderRadius: 3,
+    minHeight: 72,
+    borderRadius: 7,
     overflow: 'hidden',
-    backgroundColor: '#F8EEE9',
+    backgroundColor: '#FBE2ED',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   polaroidImage: {
     width: '100%',
@@ -5657,7 +5883,6 @@ const s = StyleSheet.create({
   drawingWrap: {
     width: '100%',
     height: '100%',
-    paddingTop: 10,
   },
   paperClip: {
     position: 'absolute',
@@ -5693,10 +5918,8 @@ const s = StyleSheet.create({
   drawingCard: {
     flex: 1,
     borderRadius: 10,
-    backgroundColor: '#FFF8EE',
-    paddingTop: 10,
-    paddingHorizontal: 9,
-    paddingBottom: 9,
+    backgroundColor: '#FFF8EF',
+    padding: 8,
     borderWidth: 1,
     borderColor: 'rgba(120, 70, 45, 0.10)',
     shadowColor: SHADOW,
@@ -5704,12 +5927,17 @@ const s = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 8,
   },
-  drawingImage: {
-    width: '100%',
+  drawingImageFrame: {
     flex: 1,
     minHeight: 62,
-    borderRadius: 4,
+    borderRadius: 7,
+    overflow: 'hidden',
     marginBottom: 8,
+  },
+  drawingImage: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 7,
   },
   drawingFallback: {
     flex: 1,
