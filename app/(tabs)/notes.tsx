@@ -124,12 +124,6 @@ type AlbumEntry = {
   kindLabel: AlbumMemory['kindLabel'];
 };
 
-type AlbumSpread = {
-  id: string;
-  left: AlbumEntry[];
-  right: AlbumEntry[];
-};
-
 type DrawPoint = { x: number; y: number; t?: number; pressure?: number };
 type EditorToolMode =
   | 'pencil'
@@ -267,27 +261,6 @@ function getAlbumMemoryKind(note: DbNote, drawing: StoredDrawingData | null, ima
   return 'Texto';
 }
 
-function buildAlbumMemories(notes: DbNote[], userId: string | null, partnerName: string): AlbumMemory[] {
-  return notes.map((note, index) => {
-    const drawing = parseStoredDrawingData(note.drawing_data);
-    const imageUri = getAlbumMemoryImageUri(note, drawing);
-    const kindLabel = getAlbumMemoryKind(note, drawing, imageUri);
-    const isMine = !!userId && note.created_by === userId;
-
-    return {
-      id: note.id,
-      authorLabel: isMine ? 'Tú' : partnerName,
-      isMine,
-      dateLabel: fmtDate(note.created_at),
-      imageUri,
-      previewText: getAlbumMemoryPreviewText(note, drawing),
-      cardTone: (['pink', 'cream', 'lilac'] as const)[index % 3],
-      backgroundColor: drawing?.backgroundColor || (index % 2 === 0 ? '#FFF2F7' : '#FFF8EE'),
-      kindLabel,
-    };
-  });
-}
-
 function getAlbumEntryText(note: DbNote, drawing: StoredDrawingData | null): string | null {
   const content = note.content?.trim();
   if (content) return content;
@@ -340,19 +313,6 @@ function normalizeAlbumEntry(note: DbNote, userId: string | null, partnerName: s
 
 function buildAlbumEntries(notes: DbNote[], userId: string | null, partnerName: string): AlbumEntry[] {
   return notes.map((note, index) => normalizeAlbumEntry(note, userId, partnerName, index));
-}
-
-function chunkIntoSpreads(items: AlbumEntry[], perSpread = 6): AlbumSpread[] {
-  const spreads: AlbumSpread[] = [];
-  for (let i = 0; i < items.length; i += perSpread) {
-    const slice = items.slice(i, i + perSpread);
-    spreads.push({
-      id: `spread-${i}`,
-      left: slice.slice(0, 3),
-      right: slice.slice(3, 6),
-    });
-  }
-  return spreads;
 }
 
 function truncateText(value: string, maxChars: number): string {
@@ -3263,99 +3223,6 @@ export default function NotesScreen() {
   );
 }
 
-const AlbumSpreadView = React.memo(function AlbumSpreadView({
-  spread,
-  fontsLoaded,
-  onSelect,
-}: {
-  spread: AlbumSpread;
-  fontsLoaded: boolean;
-  onSelect: (entry: AlbumEntry) => void;
-}) {
-  return (
-    <View style={s.albumSpread}>
-      <View style={s.openBookPageLeft}>
-        <View style={s.openBookPageGlow} pointerEvents="none" />
-        <AlbumPageView side="left" items={spread.left} fontsLoaded={fontsLoaded} onSelect={onSelect} />
-      </View>
-      <View style={s.openBookBindingSoft} pointerEvents="none">
-        <View style={s.openBookBindingLineSoft} />
-      </View>
-      <View style={s.openBookPageRight}>
-        <View style={s.openBookPageGlowRight} pointerEvents="none" />
-        <AlbumPageView side="right" items={spread.right} fontsLoaded={fontsLoaded} onSelect={onSelect} />
-      </View>
-    </View>
-  );
-});
-
-function AlbumPageView({
-  side,
-  items,
-  fontsLoaded,
-  onSelect,
-}: {
-  side: 'left' | 'right';
-  items: AlbumEntry[];
-  fontsLoaded: boolean;
-  onSelect: (entry: AlbumEntry) => void;
-}) {
-  const slots = useMemo(() => getAlbumPageSlots(items.length, side), [items.length, side]);
-  return (
-    <View style={s.albumPageCanvas}>
-      {items.map((entry, index) => (
-        <MemoryPiece
-          key={entry.id}
-          entry={entry}
-          fontsLoaded={fontsLoaded}
-          slot={slots[index] ?? slots[0]}
-          onPress={() => onSelect(entry)}
-        />
-      ))}
-    </View>
-  );
-}
-
-type AlbumSlot = { left: number; top: number; width: number; rotate: number };
-
-function getAlbumPageSlots(count: number, side: 'left' | 'right'): AlbumSlot[] {
-  const left3: AlbumSlot[] = [
-    { left: 14, top: 22, width: 124, rotate: -3.2 },
-    { left: 150, top: 36, width: 112, rotate: 2.2 },
-    { left: 48, top: 210, width: 148, rotate: -1.1 },
-  ];
-  const right3: AlbumSlot[] = [
-    { left: 148, top: 28, width: 118, rotate: 2.8 },
-    { left: 14, top: 44, width: 114, rotate: -2.2 },
-    { left: 56, top: 218, width: 144, rotate: 1.2 },
-  ];
-  const left2: AlbumSlot[] = [
-    { left: 20, top: 26, width: 138, rotate: -2.6 },
-    { left: 96, top: 214, width: 148, rotate: 1.4 },
-  ];
-  const right2: AlbumSlot[] = [
-    { left: 104, top: 26, width: 138, rotate: 2.4 },
-    { left: 16, top: 206, width: 148, rotate: -1.2 },
-  ];
-  const left1: AlbumSlot[] = [{ left: 52, top: 74, width: 168, rotate: -1.4 }];
-  const right1: AlbumSlot[] = [{ left: 52, top: 74, width: 168, rotate: 1.4 }];
-  if (count <= 1) return side === 'left' ? left1 : right1;
-  if (count === 2) return side === 'left' ? left2 : right2;
-  return side === 'left' ? left3 : right3;
-}
-
-function getLegacyMemoryPieceLayout(item: AlbumEntry, slot: AlbumSlot): MemoryPieceLayout {
-  const previewImage = item.previewImage || item.photoUrl || item.drawingUrl;
-  const height = previewImage ? 150 : item.type === 'text' ? 110 : 124;
-  return {
-    x: slot.left,
-    y: slot.top,
-    w: slot.width,
-    h: height,
-    rotate: `${slot.rotate}deg`,
-  };
-}
-
 function TapePiece({ seed, variant = 'single' }: { seed: number; variant?: 'single' | 'double' }) {
   if (variant === 'double') {
     return (
@@ -3559,24 +3426,14 @@ function DrawingPiece({
   );
 }
 
-type MemoryPieceProps =
-  | {
-      item: AlbumEntry;
-      layout: MemoryPieceLayout;
-      fontsLoaded: boolean;
-      onPress?: () => void;
-    }
-  | {
-      entry: AlbumEntry;
-      slot: AlbumSlot;
-      fontsLoaded: boolean;
-      onPress: () => void;
-    };
+type MemoryPieceProps = {
+  item: AlbumEntry;
+  layout: MemoryPieceLayout;
+  fontsLoaded: boolean;
+  onPress?: () => void;
+};
 
-const MemoryPiece = React.memo(function MemoryPiece(props: MemoryPieceProps) {
-  const item = 'item' in props ? props.item : props.entry;
-  const layout = 'item' in props ? props.layout : getLegacyMemoryPieceLayout(props.entry, props.slot);
-  const onPress = props.onPress;
+const MemoryPiece = React.memo(function MemoryPiece({ item, layout, fontsLoaded, onPress }: MemoryPieceProps) {
   const previewImage = item.previewImage || item.photoUrl || item.drawingUrl;
   const isPhotoPiece = item.type === 'photo' || (item.type === 'mixed' && !!previewImage);
   const isTextPiece = item.type === 'text' && !previewImage;
@@ -3602,11 +3459,11 @@ const MemoryPiece = React.memo(function MemoryPiece(props: MemoryPieceProps) {
       ]}
     >
       {isPhotoPiece ? (
-        <PolaroidPiece item={item} seed={seed} caption={caption} fontsLoaded={props.fontsLoaded} attachment={attachment} />
+        <PolaroidPiece item={item} seed={seed} caption={caption} fontsLoaded={fontsLoaded} attachment={attachment} />
       ) : isTextPiece ? (
-        <NotePaperPiece item={item} caption={caption} fontsLoaded={props.fontsLoaded} seed={seed} attachment={attachment} />
+        <NotePaperPiece item={item} caption={caption} fontsLoaded={fontsLoaded} seed={seed} attachment={attachment} />
       ) : (
-        <DrawingPiece item={item} caption={caption} seed={seed} fontsLoaded={props.fontsLoaded} attachment={attachment} />
+        <DrawingPiece item={item} caption={caption} seed={seed} fontsLoaded={fontsLoaded} attachment={attachment} />
       )}
     </TouchableOpacity>
   );
