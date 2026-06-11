@@ -95,6 +95,15 @@ type EditorTextElement = {
   rotation: number;
 };
 
+type EditorStickerElement = {
+  id: string;
+  sticker: string;
+  x: number;
+  y: number;
+  scale: number;
+  rotation: number;
+};
+
 type EditorCategory = 'pen' | 'text' | 'sticker' | 'bucket';
 type EditorToolMode = 'pencil' | 'marker' | 'eraser';
 const EDITOR_CANVAS_DEFAULT_BG = '#FFF7FB';
@@ -239,6 +248,40 @@ function getEditorTextVariantStyle(variant: EditorTextElement['fontVariant']) {
   }
 }
 
+function estimateEditorStickerSize(sticker: EditorStickerElement): { width: number; height: number } {
+  const base = 44;
+  return { width: base, height: base };
+}
+
+function estimateEditorStickerBounds(sticker: EditorStickerElement): { left: number; right: number; top: number; bottom: number } {
+  const { width, height } = estimateEditorStickerSize(sticker);
+  const scaledWidth = width * sticker.scale;
+  const scaledHeight = height * sticker.scale;
+  const rad = (sticker.rotation * Math.PI) / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+  const bboxW = Math.abs(cos) * scaledWidth + Math.abs(sin) * scaledHeight;
+  const bboxH = Math.abs(sin) * scaledWidth + Math.abs(cos) * scaledHeight;
+  const centerX = sticker.x + width / 2;
+  const centerY = sticker.y + height / 2;
+  return {
+    left: centerX - bboxW / 2,
+    right: centerX + bboxW / 2,
+    top: centerY - bboxH / 2,
+    bottom: centerY + bboxH / 2,
+  };
+}
+
+function findEditorStickerAtPoint(point: DrawPoint, stickers: EditorStickerElement[]): EditorStickerElement | null {
+  for (let i = stickers.length - 1; i >= 0; i -= 1) {
+    const bounds = estimateEditorStickerBounds(stickers[i]);
+    if (point.x >= bounds.left && point.x <= bounds.right && point.y >= bounds.top && point.y <= bounds.bottom) {
+      return stickers[i];
+    }
+  }
+  return null;
+}
+
 function isPointOnAnyPhoto(point: DrawPoint, photos: EditorPhotoElement[]): boolean {
   for (let i = photos.length - 1; i >= 0; i -= 1) {
     const p = photos[i];
@@ -363,11 +406,15 @@ export default function NotesScreen() {
   const [editorTextElements, setEditorTextElements] = useState<EditorTextElement[]>([]);
   const [editorActiveTextId, setEditorActiveTextId] = useState<string | null>(null);
   const [editorEditingTextId, setEditorEditingTextId] = useState<string | null>(null);
+  const [editorStickers, setEditorStickers] = useState<EditorStickerElement[]>([]);
+  const [selectedSticker, setSelectedSticker] = useState<string | null>(null);
+  const [editorActiveStickerId, setEditorActiveStickerId] = useState<string | null>(null);
   const [editorTextFontSize, setEditorTextFontSize] = useState(22);
   const [selectedTextStyle, setSelectedTextStyle] = useState<EditorTextElement['fontVariant']>('normal');
   const [editorCanvasSize, setEditorCanvasSize] = useState({ width: 0, height: 0 });
   const [isEditorPhotoSheetOpen, setIsEditorPhotoSheetOpen] = useState(false);
   const [editorDraggingTextId, setEditorDraggingTextId] = useState<string | null>(null);
+  const [editorDraggingStickerId, setEditorDraggingStickerId] = useState<string | null>(null);
   const [isEditorTextOverTrash, setIsEditorTextOverTrash] = useState(false);
   const [editorTrashTargetLayout, setEditorTrashTargetLayout] = useState<{
     x: number;
@@ -377,6 +424,7 @@ export default function NotesScreen() {
   } | null>(null);
   const isTouchingPhotoRef = useRef(false);
   const isTouchingTextRef = useRef(false);
+  const isTouchingStickerRef = useRef(false);
   const editorPhotoGestureCountRef = useRef(0);
   const canvasTouchStartedOnPhotoRef = useRef(false);
   const editorTextInputRefs = useRef<Record<string, TextInput | null>>({});
@@ -529,6 +577,7 @@ export default function NotesScreen() {
             strokes: { color: string; width: number; points: DrawPoint[] }[];
             photos: EditorPhotoElement[];
             texts: EditorTextElement[];
+            stickers: EditorStickerElement[];
           }
         | null;
       noteType: 'text' | 'drawing' | 'mixed';
@@ -596,6 +645,14 @@ export default function NotesScreen() {
             scale: t.scale ?? 1,
             rotation: t.rotation ?? 0,
           })),
+          stickers: (drawing.stickers ?? []).map((s) => ({
+            id: s.id,
+            sticker: s.sticker,
+            x: s.x,
+            y: s.y,
+            scale: s.scale ?? 1,
+            rotation: s.rotation ?? 0,
+          })),
         });
       }
 
@@ -634,6 +691,9 @@ export default function NotesScreen() {
         setEditorTextElements([]);
         setEditorActiveTextId(null);
         setEditorEditingTextId(null);
+        setEditorStickers([]);
+        setSelectedSticker(null);
+        setEditorActiveStickerId(null);
         setEditorCategory('pen');
         setIsEditorColorPanelOpen(false);
         setEditorCategoryBeforeColor('pen');
@@ -666,6 +726,9 @@ export default function NotesScreen() {
     setEditorTextElements([]);
     setEditorActiveTextId(null);
     setEditorEditingTextId(null);
+    setEditorStickers([]);
+    setSelectedSticker(null);
+    setEditorActiveStickerId(null);
     setEditorTextFontSize(22);
     setSelectedTextStyle('normal');
     setIsEditorOpen(true);
@@ -677,6 +740,18 @@ export default function NotesScreen() {
       next: Partial<Pick<EditorTextElement, 'text' | 'x' | 'y' | 'color' | 'fontSize' | 'fontVariant' | 'scale' | 'rotation'>>
     ) => {
       setEditorTextElements((prev) =>
+        prev.map((item) => {
+          if (item.id !== id) return item;
+          return { ...item, ...next };
+        })
+      );
+    },
+    []
+  );
+
+  const updateEditorStickerElement = useCallback(
+    (id: string, next: Partial<Pick<EditorStickerElement, 'x' | 'y' | 'scale' | 'rotation'>>) => {
+      setEditorStickers((prev) =>
         prev.map((item) => {
           if (item.id !== id) return item;
           return { ...item, ...next };
@@ -751,6 +826,38 @@ export default function NotesScreen() {
       finalizeEditorTextElement,
       selectedTextStyle,
     ]
+  );
+
+  const addEditorStickerAtPoint = useCallback(
+    (point: DrawPoint) => {
+      if (!selectedSticker || saving) return;
+      if (editorEditingTextId) {
+        finalizeEditorTextElement(editorEditingTextId);
+      }
+      const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const size = estimateEditorStickerSize({
+        id,
+        sticker: selectedSticker,
+        x: point.x,
+        y: point.y,
+        scale: 1,
+        rotation: 0,
+      });
+      const initial: EditorStickerElement = {
+        id,
+        sticker: selectedSticker,
+        x: point.x - size.width / 2,
+        y: point.y - size.height / 2,
+        scale: 1,
+        rotation: 0,
+      };
+      setEditorActivePhotoId(null);
+      setEditorActiveTextId(null);
+      setEditorEditingTextId(null);
+      setEditorStickers((prev) => [...prev, initial]);
+      setEditorActiveStickerId(id);
+    },
+    [editorEditingTextId, finalizeEditorTextElement, saving, selectedSticker]
   );
 
   useEffect(() => {
@@ -847,7 +954,8 @@ export default function NotesScreen() {
         !editorPhotoGestureCountRef.current &&
         !canvasTouchStartedOnPhotoRef.current &&
         !isPointOnAnyPhoto(getPoint(e), editorPhotos) &&
-        !isPointOnAnyTextElement(getPoint(e), editorTextElements),
+        !isPointOnAnyTextElement(getPoint(e), editorTextElements) &&
+        !findEditorStickerAtPoint(getPoint(e), editorStickers),
       onMoveShouldSetPanResponder: (e) =>
         editorCategory === 'pen' &&
         !isTouchingPhotoRef.current &&
@@ -855,7 +963,8 @@ export default function NotesScreen() {
         !editorPhotoGestureCountRef.current &&
         !canvasTouchStartedOnPhotoRef.current &&
         !isPointOnAnyPhoto(getPoint(e), editorPhotos) &&
-        !isPointOnAnyTextElement(getPoint(e), editorTextElements),
+        !isPointOnAnyTextElement(getPoint(e), editorTextElements) &&
+        !findEditorStickerAtPoint(getPoint(e), editorStickers),
       onPanResponderGrant: (e) => {
         setEditorActivePhotoId(null);
         startStroke(getPoint(e));
@@ -870,7 +979,18 @@ export default function NotesScreen() {
         endStroke();
       },
     });
-  }, [editorActivePhotoId, editorCanvasBackground, editorCategory, editorColor, editorOpacity, editorPhotos, editorStrokeWidth, editorTextElements, editorToolMode]);
+  }, [
+    editorActivePhotoId,
+    editorCanvasBackground,
+    editorCategory,
+    editorColor,
+    editorOpacity,
+    editorPhotos,
+    editorStickers,
+    editorStrokeWidth,
+    editorTextElements,
+    editorToolMode,
+  ]);
 
   const addEditorPhoto = useCallback(
     (uri: string) => {
@@ -969,6 +1089,18 @@ export default function NotesScreen() {
     setEditorActiveTextId(id);
   }, []);
 
+  const bringEditorStickerToFront = useCallback((id: string) => {
+    setEditorStickers((prev) => {
+      const idx = prev.findIndex((item) => item.id === id);
+      if (idx < 0) return prev;
+      const next = [...prev];
+      const [item] = next.splice(idx, 1);
+      next.push(item);
+      return next;
+    });
+    setEditorActiveStickerId(id);
+  }, []);
+
   const handleEditorPhotoInteractionStart = useCallback((id: string) => {
     const nextCount = editorPhotoGestureCountRef.current + 1;
     editorPhotoGestureCountRef.current = nextCount;
@@ -987,6 +1119,7 @@ export default function NotesScreen() {
       }
       setEditorActivePhotoId(null);
       setEditorActiveTextId(id);
+      setEditorActiveStickerId(null);
       setEditorEditingTextId(null);
       Keyboard.dismiss();
     },
@@ -998,10 +1131,38 @@ export default function NotesScreen() {
       isTouchingTextRef.current = true;
       canvasTouchStartedOnPhotoRef.current = true;
       setEditorActivePhotoId(null);
+      setEditorActiveStickerId(null);
       setEditorActiveTextId(id);
     },
     []
   );
+
+  const handleEditorStickerInteractionStart = useCallback(
+    (id: string) => {
+      const nextCount = editorPhotoGestureCountRef.current + 1;
+      editorPhotoGestureCountRef.current = nextCount;
+      isTouchingPhotoRef.current = true;
+      isTouchingStickerRef.current = true;
+      if (editorEditingTextId) {
+        finalizeEditorTextElement(editorEditingTextId);
+      }
+      setEditorActivePhotoId(null);
+      setEditorActiveTextId(null);
+      setEditorEditingTextId(null);
+      setEditorActiveStickerId(id);
+      Keyboard.dismiss();
+    },
+    [editorEditingTextId, finalizeEditorTextElement]
+  );
+
+  const handleEditorStickerTouchStart = useCallback((id: string) => {
+    isTouchingStickerRef.current = true;
+    canvasTouchStartedOnPhotoRef.current = true;
+    setEditorActivePhotoId(null);
+    setEditorActiveTextId(null);
+    setEditorEditingTextId(null);
+    setEditorActiveStickerId(id);
+  }, []);
 
   const isEditorPointOverTrashTarget = useCallback(
     (x: number, y: number) => {
@@ -1049,12 +1210,45 @@ export default function NotesScreen() {
     [isEditorPointOverTrashTarget, updateEditorTextElement]
   );
 
+  const handleEditorStickerDragStart = useCallback((id: string) => {
+    setEditorDraggingStickerId(id);
+    setIsEditorTextOverTrash(false);
+    setEditorActiveStickerId(id);
+    setEditorActivePhotoId(null);
+    setEditorActiveTextId(null);
+  }, []);
+
+  const handleEditorStickerDragMove = useCallback(
+    (centerX: number, centerY: number) => {
+      const over = isEditorPointOverTrashTarget(centerX, centerY);
+      setIsEditorTextOverTrash((prev) => (prev === over ? prev : over));
+    },
+    [isEditorPointOverTrashTarget]
+  );
+
+  const handleEditorStickerDragEnd = useCallback(
+    (id: string, nextX: number, nextY: number, centerX: number, centerY: number) => {
+      const shouldDelete = isEditorPointOverTrashTarget(centerX, centerY);
+      if (shouldDelete) {
+        setEditorStickers((prev) => prev.filter((item) => item.id !== id));
+        setEditorActiveStickerId((current) => (current === id ? null : current));
+      } else {
+        updateEditorStickerElement(id, { x: nextX, y: nextY });
+      }
+      setEditorDraggingStickerId(null);
+      setIsEditorTextOverTrash(false);
+      isTouchingStickerRef.current = false;
+    },
+    [isEditorPointOverTrashTarget, updateEditorStickerElement]
+  );
+
   const handleEditorPhotoInteractionEnd = useCallback(() => {
     const nextCount = Math.max(0, editorPhotoGestureCountRef.current - 1);
     editorPhotoGestureCountRef.current = nextCount;
     isTouchingPhotoRef.current = nextCount > 0;
     if (nextCount === 0) {
       isTouchingTextRef.current = false;
+      isTouchingStickerRef.current = false;
     }
     canvasTouchStartedOnPhotoRef.current = false;
   }, []);
@@ -1236,21 +1430,35 @@ export default function NotesScreen() {
                       canvasTouchStartedOnPhotoRef.current = true;
                       return;
                     }
+                    if (isTouchingStickerRef.current) {
+                      canvasTouchStartedOnPhotoRef.current = true;
+                      return;
+                    }
                     const point = { x: Number(e.nativeEvent.locationX ?? 0), y: Number(e.nativeEvent.locationY ?? 0) };
                     const touchedPhoto = isPointOnAnyPhoto(point, editorPhotos);
                     const touchedText = findEditorTextAtPoint(point, editorTextElements);
-                    canvasTouchStartedOnPhotoRef.current = touchedPhoto || !!touchedText;
+                    const touchedSticker = findEditorStickerAtPoint(point, editorStickers);
+                    canvasTouchStartedOnPhotoRef.current = touchedPhoto || !!touchedText || !!touchedSticker;
                     if (touchedPhoto) {
                       if (editorEditingTextId) {
                         finalizeEditorTextElement(editorEditingTextId);
                         Keyboard.dismiss();
                       }
                       setEditorActiveTextId(null);
+                      setEditorActiveStickerId(null);
                       return;
                     }
                     if (touchedText) {
                       setEditorActivePhotoId(null);
+                      setEditorActiveStickerId(null);
                       activateEditorTextElement(touchedText.id, false);
+                      return;
+                    }
+                    if (touchedSticker) {
+                      setEditorActivePhotoId(null);
+                      setEditorActiveTextId(null);
+                      setEditorEditingTextId(null);
+                      setEditorActiveStickerId(touchedSticker.id);
                       return;
                     }
                     setEditorActivePhotoId(null);
@@ -1259,21 +1467,28 @@ export default function NotesScreen() {
                       Keyboard.dismiss();
                     }
                     setEditorDraggingTextId(null);
+                    setEditorDraggingStickerId(null);
                     setIsEditorTextOverTrash(false);
                     isTouchingTextRef.current = false;
+                    isTouchingStickerRef.current = false;
                     if (editorCategory === 'text' && !saving) {
                       addEditorTextAtPoint(point);
+                    } else if (editorCategory === 'sticker' && !saving && selectedSticker) {
+                      addEditorStickerAtPoint(point);
                     } else {
                       setEditorActiveTextId(null);
+                      setEditorActiveStickerId(null);
                     }
                   }}
                   onTouchEnd={() => {
                     canvasTouchStartedOnPhotoRef.current = false;
                     isTouchingTextRef.current = false;
+                    isTouchingStickerRef.current = false;
                   }}
                   onTouchCancel={() => {
                     canvasTouchStartedOnPhotoRef.current = false;
                     isTouchingTextRef.current = false;
+                    isTouchingStickerRef.current = false;
                   }}
                   onLayout={(e) => {
                     const { width, height } = e.nativeEvent.layout;
@@ -1292,6 +1507,22 @@ export default function NotesScreen() {
                   }}
                 >
                   <View style={s.editorCanvasDrawSurface} {...editorPanResponder.panHandlers} />
+                  {editorStickers.map((item) => (
+                    <EditorStickerItem
+                      key={item.id}
+                      stickerItem={item}
+                      isActive={editorActiveStickerId === item.id}
+                      onTouchStart={handleEditorStickerTouchStart}
+                      onBringToFront={bringEditorStickerToFront}
+                      onInteractionStart={handleEditorStickerInteractionStart}
+                      onInteractionEnd={handleEditorPhotoInteractionEnd}
+                      onMove={updateEditorStickerElement}
+                      onDragStart={handleEditorStickerDragStart}
+                      onDragMove={handleEditorStickerDragMove}
+                      onDragEnd={handleEditorStickerDragEnd}
+                      disabled={saving}
+                    />
+                  ))}
                   {editorTextElements.map((item) => (
                     <EditorTextItem
                       key={item.id}
@@ -1315,7 +1546,7 @@ export default function NotesScreen() {
                       disabled={saving}
                     />
                   ))}
-                  {editorActiveTextId && !editorEditingTextId ? (
+                  {((editorActiveTextId && !editorEditingTextId) || editorActiveStickerId) ? (
                     <View
                       pointerEvents="none"
                       onLayout={(e) => {
@@ -1325,7 +1556,7 @@ export default function NotesScreen() {
                       style={[
                         s.editorTrashTarget,
                         isEditorTextOverTrash && s.editorTrashTargetActive,
-                        editorDraggingTextId && s.editorTrashTargetVisible,
+                        (editorDraggingTextId || editorDraggingStickerId) && s.editorTrashTargetVisible,
                       ]}
                     >
                       <Trash2 size={18} color={isEditorTextOverTrash ? '#FFFFFF' : '#B2547C'} strokeWidth={2.2} />
@@ -1535,16 +1766,21 @@ export default function NotesScreen() {
                         showsHorizontalScrollIndicator={false}
                         contentContainerStyle={s.dynamicToolsScrollRow}
                       >
-                        {['♡', '✨', '⭐', '🌸', '💌', '🧸'].map((item) => (
-                          <Pressable
-                            key={item}
-                            style={[s.stickerChip]}
-                            onPress={() => Alert.alert('Notas', 'Muy pronto podrás usar stickers aquí.')}
-                            disabled={saving}
-                          >
-                            <Text style={s.stickerChipText}>{item}</Text>
-                          </Pressable>
-                        ))}
+                        {['♡', '💖', '✨', '⭐', '🌙', '☀️', '🌸', '🌹', '🦋', '💌', '🧸', '🎀', '🫶', '💫', '🔥', '😘', '🥰', '🐻', '🐱', '🍓'].map(
+                          (item) => {
+                            const isActive = selectedSticker === item;
+                            return (
+                              <Pressable
+                                key={item}
+                                style={[s.stickerChip, isActive && s.stickerChipActive]}
+                                onPress={() => setSelectedSticker(item)}
+                                disabled={saving}
+                              >
+                                <Text style={s.stickerChipText}>{item}</Text>
+                              </Pressable>
+                            );
+                          }
+                        )}
                       </ScrollView>
                     ) : null}
 
@@ -1660,7 +1896,8 @@ export default function NotesScreen() {
                         (editorCurrentStroke?.points?.length ?? 0) > 1 ||
                         editorCanvasBackground !== EDITOR_CANVAS_DEFAULT_BG ||
                         editorPhotos.length > 0 ||
-                        canvasTextsForSave.length > 0;
+                        canvasTextsForSave.length > 0 ||
+                        editorStickers.length > 0;
                       const strokesForSave = editorCurrentStroke ? [...editorStrokes, editorCurrentStroke] : editorStrokes;
                       const drawing = hasDrawing
                         ? {
@@ -1668,6 +1905,7 @@ export default function NotesScreen() {
                             strokes: strokesForSave.map((st) => ({ color: st.color, width: st.width, points: st.points })),
                             photos: editorPhotos,
                             texts: canvasTextsForSave,
+                            stickers: editorStickers,
                           }
                         : null;
                       const text = editorText;
@@ -2225,6 +2463,182 @@ function EditorTextItem({
   return <GestureDetector gesture={composedGesture}>{content}</GestureDetector>;
 }
 
+function EditorStickerItem({
+  stickerItem,
+  isActive,
+  onTouchStart,
+  onBringToFront,
+  onInteractionStart,
+  onInteractionEnd,
+  onMove,
+  onDragStart,
+  onDragMove,
+  onDragEnd,
+  disabled,
+}: {
+  stickerItem: EditorStickerElement;
+  isActive: boolean;
+  onTouchStart: (id: string) => void;
+  onBringToFront: (id: string) => void;
+  onInteractionStart: (id: string) => void;
+  onInteractionEnd: () => void;
+  onMove: (id: string, next: Partial<Pick<EditorStickerElement, 'x' | 'y' | 'scale' | 'rotation'>>) => void;
+  onDragStart: (id: string) => void;
+  onDragMove: (centerX: number, centerY: number) => void;
+  onDragEnd: (id: string, nextX: number, nextY: number, centerX: number, centerY: number) => void;
+  disabled: boolean;
+}) {
+  const { width, height } = estimateEditorStickerSize(stickerItem);
+  const localGestureCountRef = useRef(0);
+  const translateX = useSharedValue(stickerItem.x);
+  const translateY = useSharedValue(stickerItem.y);
+  const liveScale = useSharedValue(stickerItem.scale);
+  const liveRotation = useSharedValue((stickerItem.rotation * Math.PI) / 180);
+  const startX = useSharedValue(stickerItem.x);
+  const startY = useSharedValue(stickerItem.y);
+  const pinchStartScale = useSharedValue(stickerItem.scale);
+  const rotationStart = useSharedValue((stickerItem.rotation * Math.PI) / 180);
+
+  useEffect(() => {
+    if (localGestureCountRef.current > 0) return;
+    translateX.value = stickerItem.x;
+    translateY.value = stickerItem.y;
+    liveScale.value = stickerItem.scale;
+    liveRotation.value = (stickerItem.rotation * Math.PI) / 180;
+  }, [
+    liveRotation,
+    liveScale,
+    stickerItem.rotation,
+    stickerItem.scale,
+    stickerItem.x,
+    stickerItem.y,
+    translateX,
+    translateY,
+  ]);
+
+  const beginInteraction = useCallback(() => {
+    const next = localGestureCountRef.current + 1;
+    localGestureCountRef.current = next;
+    if (next === 1) {
+      onInteractionStart(stickerItem.id);
+      onBringToFront(stickerItem.id);
+    }
+  }, [onBringToFront, onInteractionStart, stickerItem.id]);
+
+  const endInteraction = useCallback(() => {
+    const next = Math.max(0, localGestureCountRef.current - 1);
+    localGestureCountRef.current = next;
+    if (next === 0) {
+      onInteractionEnd();
+    }
+  }, [onInteractionEnd]);
+
+  const persistScale = useCallback(
+    (scaleValue: number) => {
+      onMove(stickerItem.id, { scale: clampNumber(scaleValue, 0.45, 2.4) });
+    },
+    [onMove, stickerItem.id]
+  );
+
+  const persistRotation = useCallback(
+    (rotationRad: number) => {
+      onMove(stickerItem.id, { rotation: (rotationRad * 180) / Math.PI });
+    },
+    [onMove, stickerItem.id]
+  );
+
+  const panGesture = useMemo(() => {
+    return Gesture.Pan()
+      .enabled(!disabled)
+      .minPointers(1)
+      .maxPointers(1)
+      .onBegin(() => {
+        runOnJS(beginInteraction)();
+        runOnJS(onDragStart)(stickerItem.id);
+        startX.value = translateX.value;
+        startY.value = translateY.value;
+      })
+      .onUpdate((e) => {
+        translateX.value = startX.value + e.translationX;
+        translateY.value = startY.value + e.translationY;
+        runOnJS(onDragMove)(translateX.value + width / 2, translateY.value + height / 2);
+      })
+      .onFinalize(() => {
+        runOnJS(onDragEnd)(
+          stickerItem.id,
+          translateX.value,
+          translateY.value,
+          translateX.value + width / 2,
+          translateY.value + height / 2
+        );
+        runOnJS(endInteraction)();
+      });
+  }, [beginInteraction, disabled, endInteraction, height, onDragEnd, onDragMove, onDragStart, startX, startY, stickerItem.id, translateX, translateY, width]);
+
+  const pinchGesture = useMemo(() => {
+    return Gesture.Pinch()
+      .enabled(!disabled)
+      .onBegin(() => {
+        runOnJS(beginInteraction)();
+        pinchStartScale.value = liveScale.value;
+      })
+      .onUpdate((e) => {
+        const next = pinchStartScale.value * e.scale;
+        liveScale.value = Math.min(2.4, Math.max(0.45, next));
+      })
+      .onFinalize(() => {
+        runOnJS(persistScale)(liveScale.value);
+        runOnJS(endInteraction)();
+      });
+  }, [beginInteraction, disabled, endInteraction, liveScale, persistScale, pinchStartScale]);
+
+  const rotationGesture = useMemo(() => {
+    return Gesture.Rotation()
+      .enabled(!disabled)
+      .onBegin(() => {
+        runOnJS(beginInteraction)();
+        rotationStart.value = liveRotation.value;
+      })
+      .onUpdate((e) => {
+        liveRotation.value = rotationStart.value + e.rotation;
+      })
+      .onFinalize(() => {
+        runOnJS(persistRotation)(liveRotation.value);
+        runOnJS(endInteraction)();
+      });
+  }, [beginInteraction, disabled, endInteraction, liveRotation, persistRotation, rotationStart]);
+
+  const composedGesture = useMemo(() => {
+    return Gesture.Simultaneous(panGesture, pinchGesture, rotationGesture);
+  }, [panGesture, pinchGesture, rotationGesture]);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [
+      { translateX: translateX.value },
+      { translateY: translateY.value },
+      { scale: liveScale.value },
+      { rotateZ: `${liveRotation.value}rad` },
+    ],
+  }));
+
+  return (
+    <GestureDetector gesture={composedGesture}>
+      <Animated.View
+        pointerEvents="box-only"
+        onTouchStart={() => onTouchStart(stickerItem.id)}
+        style={[
+          s.editorStickerItem,
+          { width, height, zIndex: isActive ? 16 : 12 },
+          isActive && s.editorStickerItemActive,
+          animatedStyle,
+        ]}
+      >
+        <Text style={s.editorStickerLabel}>{stickerItem.sticker}</Text>
+      </Animated.View>
+    </GestureDetector>
+  );
+}
+
 function EditorPhotoSourceSheet({
   visible,
   onClose,
@@ -2602,6 +3016,22 @@ const s = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: 'rgba(255, 249, 252, 0.78)',
   },
+  editorStickerItem: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  editorStickerItemActive: {
+    borderRadius: 20,
+    backgroundColor: 'rgba(255, 248, 252, 0.68)',
+  },
+  editorStickerLabel: {
+    fontSize: 34,
+    textAlign: 'center',
+    includeFontPadding: false,
+  },
   editorTrashTarget: {
     position: 'absolute',
     top: 12,
@@ -2877,6 +3307,10 @@ const s = StyleSheet.create({
     borderColor: 'rgba(241, 215, 226, 0.9)',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  stickerChipActive: {
+    backgroundColor: '#F7D8E6',
+    borderColor: '#E2A8C1',
   },
   stickerChipText: {
     fontSize: 18,
