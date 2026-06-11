@@ -9,56 +9,55 @@ import { useFonts } from 'expo-font';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import {
-  Brush,
-  Check,
-  ChevronLeft,
-  Eraser,
-  Heart,
-  Image as ImageIcon,
-  PaintBucket,
-  Palette,
-  Plus,
-  Sparkles,
-  Trash2,
-  Type,
-  X
+    Brush,
+    Check,
+    ChevronLeft,
+    Eraser,
+    Heart,
+    Image as ImageIcon,
+    PaintBucket,
+    Palette,
+    Plus,
+    Sparkles,
+    Trash2,
+    Type,
+    X
 } from 'lucide-react-native';
 import getStroke from 'perfect-freehand';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
-  Dimensions,
-  FlatList,
-  Image,
-  Keyboard,
-  Modal,
-  PanResponder,
-  Platform,
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  TextInput,
-  View
+    ActivityIndicator,
+    Alert,
+    Dimensions,
+    Image,
+    Keyboard,
+    Modal,
+    PanResponder,
+    Platform,
+    Pressable,
+    ScrollView,
+    StyleSheet,
+    Text,
+    TextInput,
+    View
 } from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
-  DrawingBrushPreview as SharedDrawingBrushPreview,
-  DrawingBrushType as SharedDrawingBrushType,
-  DrawingPoint as SharedDrawingPoint,
-  DrawingStroke as SharedDrawingStroke,
-  DrawingStrokeLayer as SharedDrawingStrokeLayer,
-  buildGrainDotsForSegment as buildSharedGrainDotsForSegment,
-  buildStrokePaths as buildSharedStrokePaths,
-  getBrushMinDistance as getSharedBrushMinDistance,
-  getBrushOpacityMultiplier as getSharedBrushOpacityMultiplier,
-  getBrushWidthMultiplier as getSharedBrushWidthMultiplier,
-  getMinVisibleOpacity as getSharedMinVisibleOpacity,
-  fnv1aHash as sharedFnv1aHash,
-  shouldAddPoint as shouldAddSharedPoint
+    DrawingBrushPreview as SharedDrawingBrushPreview,
+    DrawingBrushType as SharedDrawingBrushType,
+    DrawingPoint as SharedDrawingPoint,
+    DrawingStroke as SharedDrawingStroke,
+    DrawingStrokeLayer as SharedDrawingStrokeLayer,
+    buildGrainDotsForSegment as buildSharedGrainDotsForSegment,
+    buildStrokePaths as buildSharedStrokePaths,
+    getBrushMinDistance as getSharedBrushMinDistance,
+    getBrushOpacityMultiplier as getSharedBrushOpacityMultiplier,
+    getBrushWidthMultiplier as getSharedBrushWidthMultiplier,
+    getMinVisibleOpacity as getSharedMinVisibleOpacity,
+    fnv1aHash as sharedFnv1aHash,
+    shouldAddPoint as shouldAddSharedPoint
 } from '../../lib/drawing-engine';
 import { supabase } from '../../lib/supabase';
 
@@ -2412,9 +2411,10 @@ export default function NotesScreen() {
   const displayedMainPhotoUri = mainCardPhotoUri;
   const hasMainTextDraft = noteText.trim().length > 0;
   const shouldShowMainPhotoPreview = !noteText.trim() && !!displayedMainPhotoUri;
-  const albumEntries = useMemo(() => buildAlbumEntries(notes, userId, partnerName), [notes, partnerName, userId]);
-  const albumSpreads = useMemo(() => chunkIntoSpreads(albumEntries, 6), [albumEntries]);
-  const [selectedAlbumEntry, setSelectedAlbumEntry] = useState<AlbumEntry | null>(null);
+  const bookWidth = Math.min(SCREEN_WIDTH * 0.92, 380);
+  const bookHeight = Math.min(SCREEN_HEIGHT * 0.58, 500);
+  const foldWidth = 8;
+  const pageWidth = (bookWidth - foldWidth) / 2;
 
   if (loading) {
     return (
@@ -3125,94 +3125,21 @@ export default function NotesScreen() {
         <View style={s.albumOverlayBackdrop}>
           <Pressable style={s.albumOverlayDismissArea} onPress={() => setShowAlbum(false)} />
           <View style={[s.albumOverlayCenter, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]}>
-            <View style={s.openBookContainer}>
+            <View style={s.albumStaticShellWrap}>
               <Pressable style={s.albumOverlayCloseButton} onPress={() => setShowAlbum(false)}>
                 <X size={18} color={TEXT} />
               </Pressable>
-
-              <View style={s.openBookSpread}>
-                <View style={s.openBookShadow} />
-                {albumSpreads.length > 0 ? (
-                  <FlatList
-                    data={albumSpreads}
-                    horizontal
-                    pagingEnabled
-                    showsHorizontalScrollIndicator={false}
-                    keyExtractor={(item) => item.id}
-                    style={s.albumPager}
-                    contentContainerStyle={s.albumPagerContent}
-                    initialNumToRender={1}
-                    windowSize={3}
-                    maxToRenderPerBatch={2}
-                    renderItem={({ item }) => (
-                      <AlbumSpreadView
-                        spread={item}
-                        fontsLoaded={fontsLoaded}
-                        onSelect={(entry) => setSelectedAlbumEntry(entry)}
-                      />
-                    )}
-                  />
-                ) : null}
-
-                {albumLoading ? (
-                  <View style={s.emptyAlbumState}>
-                    <View style={s.emptyAlbumBadge}>
-                      <ActivityIndicator size="small" color={PINK_STRONG} />
-                    </View>
-                    <View style={s.emptyAlbumCard}>
-                      <Text style={s.emptyAlbumTitle}>Cargando recuerdos...</Text>
-                      <Text style={s.emptyAlbumText}>Estamos preparando sus notas guardadas.</Text>
-                    </View>
-                  </View>
-                ) : albumError ? (
-                  <View style={s.emptyAlbumState}>
-                    <View style={s.emptyAlbumBadge}>
-                      <Heart size={22} color={PINK_STRONG} strokeWidth={1.8} />
-                    </View>
-                    <View style={s.emptyAlbumCard}>
-                      <Text style={s.emptyAlbumTitle}>No se pudieron cargar los recuerdos.</Text>
-                      <Text style={s.emptyAlbumText}>Inténtalo de nuevo en unos segundos.</Text>
-                    </View>
-                  </View>
-                ) : albumEntries.length === 0 ? (
-                  <View style={s.emptyAlbumState}>
-                    <View style={s.emptyAlbumBadge}>
-                      <Heart size={22} color={PINK_STRONG} strokeWidth={1.8} />
-                    </View>
-                    <View style={s.emptyAlbumCard}>
-                      <Text style={s.emptyAlbumTitle}>Álbum</Text>
-                      <Text style={s.emptyAlbumText}>Aún no hay recuerdos guardados.</Text>
-                    </View>
-                  </View>
-                ) : null}
+              <View style={[s.albumStaticBook, { width: bookWidth, height: bookHeight }]}>
+                <View style={[s.albumStaticPageLeft, { width: pageWidth, height: bookHeight }]}>
+                  <Text style={s.albumStaticPageLabel}>Página izquierda</Text>
+                </View>
+                <View style={[s.albumStaticFold, { width: foldWidth, height: bookHeight }]} />
+                <View style={[s.albumStaticPageRight, { width: pageWidth, height: bookHeight }]}>
+                  <Text style={s.albumStaticPageLabel}>Página derecha</Text>
+                </View>
               </View>
             </View>
           </View>
-        </View>
-      </Modal>
-      <Modal
-        visible={!!selectedAlbumEntry && showAlbum}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setSelectedAlbumEntry(null)}
-      >
-        <View style={s.albumDetailBackdrop}>
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setSelectedAlbumEntry(null)} />
-          {selectedAlbumEntry ? (
-            <View style={s.albumDetailCard}>
-              <Pressable style={s.albumDetailClose} onPress={() => setSelectedAlbumEntry(null)}>
-                <X size={18} color={TEXT} />
-              </Pressable>
-              <Text style={s.albumDetailDate}>{selectedAlbumEntry.dateLabel}</Text>
-              <Text style={s.albumDetailAuthor}>{selectedAlbumEntry.authorLabel}</Text>
-              {selectedAlbumEntry.previewImage ? (
-                <Image source={{ uri: selectedAlbumEntry.previewImage }} style={s.albumDetailImage} resizeMode="cover" />
-              ) : null}
-              <Text style={s.albumDetailBody}>
-                {selectedAlbumEntry.text?.trim()?.length ? selectedAlbumEntry.text : 'Recuerdo guardado.'}
-              </Text>
-            </View>
-          ) : null}
         </View>
       </Modal>
     </View>
@@ -3272,29 +3199,29 @@ function AlbumPageView({
   );
 }
 
-type AlbumSlot = { left: string; top: string; width: string; rotate: number };
+type AlbumSlot = { left: number; top: number; width: number; rotate: number };
 
 function getAlbumPageSlots(count: number, side: 'left' | 'right'): AlbumSlot[] {
   const left3: AlbumSlot[] = [
-    { left: '6%', top: '8%', width: '46%', rotate: -3.2 },
-    { left: '52%', top: '14%', width: '40%', rotate: 2.2 },
-    { left: '18%', top: '54%', width: '56%', rotate: -1.1 },
+    { left: 14, top: 22, width: 124, rotate: -3.2 },
+    { left: 150, top: 36, width: 112, rotate: 2.2 },
+    { left: 48, top: 210, width: 148, rotate: -1.1 },
   ];
   const right3: AlbumSlot[] = [
-    { left: '50%', top: '10%', width: '44%', rotate: 2.8 },
-    { left: '6%', top: '18%', width: '42%', rotate: -2.2 },
-    { left: '22%', top: '56%', width: '54%', rotate: 1.2 },
+    { left: 148, top: 28, width: 118, rotate: 2.8 },
+    { left: 14, top: 44, width: 114, rotate: -2.2 },
+    { left: 56, top: 218, width: 144, rotate: 1.2 },
   ];
   const left2: AlbumSlot[] = [
-    { left: '8%', top: '10%', width: '52%', rotate: -2.6 },
-    { left: '36%', top: '54%', width: '56%', rotate: 1.4 },
+    { left: 20, top: 26, width: 138, rotate: -2.6 },
+    { left: 96, top: 214, width: 148, rotate: 1.4 },
   ];
   const right2: AlbumSlot[] = [
-    { left: '40%', top: '10%', width: '52%', rotate: 2.4 },
-    { left: '6%', top: '52%', width: '56%', rotate: -1.2 },
+    { left: 104, top: 26, width: 138, rotate: 2.4 },
+    { left: 16, top: 206, width: 148, rotate: -1.2 },
   ];
-  const left1: AlbumSlot[] = [{ left: '18%', top: '20%', width: '64%', rotate: -1.4 }];
-  const right1: AlbumSlot[] = [{ left: '18%', top: '20%', width: '64%', rotate: 1.4 }];
+  const left1: AlbumSlot[] = [{ left: 52, top: 74, width: 168, rotate: -1.4 }];
+  const right1: AlbumSlot[] = [{ left: 52, top: 74, width: 168, rotate: 1.4 }];
   if (count <= 1) return side === 'left' ? left1 : right1;
   if (count === 2) return side === 'left' ? left2 : right2;
   return side === 'left' ? left3 : right3;
@@ -5046,6 +4973,14 @@ const s = StyleSheet.create({
     justifyContent: 'center',
     paddingHorizontal: 14,
   },
+  albumStaticShellWrap: {
+    width: '92%',
+    height: '68%',
+    alignSelf: 'center',
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'transparent',
+  },
   openBookContainer: {
     width: '100%',
     maxWidth: 420,
@@ -5070,6 +5005,233 @@ const s = StyleSheet.create({
     shadowOpacity: 0.7,
     shadowRadius: 16,
     elevation: 3,
+  },
+  albumStaticBook: {
+    flexDirection: 'row',
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: '#FFF4E8',
+    borderWidth: 1,
+    borderColor: 'rgba(120, 70, 45, 0.16)',
+    shadowColor: '#000',
+    shadowOpacity: 0.16,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 8 },
+    elevation: 8,
+  },
+  albumStaticPageLeft: {
+    backgroundColor: '#FFF7EC',
+    borderTopLeftRadius: 24,
+    borderBottomLeftRadius: 24,
+    padding: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  albumStaticFold: {
+    backgroundColor: 'rgba(120, 70, 45, 0.14)',
+  },
+  albumStaticPageRight: {
+    backgroundColor: '#FFF2E5',
+    borderTopRightRadius: 24,
+    borderBottomRightRadius: 24,
+    padding: 16,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  albumStaticPageLabel: {
+    color: '#6C454F',
+    fontSize: 15,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  albumPager: {
+    flex: 1,
+    width: '100%',
+  },
+  albumPagerContent: {
+    flexGrow: 1,
+  },
+  albumSpread: {
+    width: '100%',
+    flexDirection: 'row',
+    minHeight: Math.min(SCREEN_HEIGHT * 0.58, 500),
+  },
+  openBookBindingSoft: {
+    width: 8,
+    backgroundColor: 'rgba(120, 70, 45, 0.14)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  openBookBindingLineSoft: {
+    width: 4,
+    height: '100%',
+    backgroundColor: 'rgba(120, 70, 45, 0.1)',
+  },
+  albumPageCanvas: {
+    flex: 1,
+    position: 'relative',
+  },
+  memoryPieceBase: {
+    position: 'absolute',
+    borderRadius: 18,
+    overflow: 'hidden',
+    shadowColor: SHADOW,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.22,
+    shadowRadius: 12,
+    elevation: 2,
+  },
+  polaroidPiece: {
+    backgroundColor: WHITE,
+    borderRadius: 18,
+    padding: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(230, 187, 205, 0.46)',
+  },
+  tapePiece: {
+    position: 'absolute',
+    top: -6,
+    width: 28,
+    height: 10,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255, 223, 233, 0.9)',
+    zIndex: 2,
+  },
+  tapePieceLeft: {
+    left: 18,
+    transform: [{ rotate: '-10deg' }],
+  },
+  tapePieceRight: {
+    right: 18,
+    transform: [{ rotate: '10deg' }],
+  },
+  polaroidImg: {
+    width: '100%',
+    height: 92,
+    borderRadius: 12,
+    backgroundColor: '#FBE7EF',
+  },
+  polaroidCaptionSmall: {
+    marginTop: 8,
+    color: TEXT_SOFT,
+    fontSize: 12,
+    lineHeight: 16,
+    textAlign: 'center',
+  },
+  notePiece: {
+    backgroundColor: '#FFF0F5',
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(235, 193, 210, 0.9)',
+    padding: 14,
+    minHeight: 108,
+  },
+  notePiecePin: {
+    position: 'absolute',
+    top: 8,
+    right: 10,
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#E7A4BE',
+  },
+  notePieceText: {
+    color: TEXT,
+    fontSize: 14,
+    lineHeight: 19,
+  },
+  notePieceMeta: {
+    marginTop: 8,
+    color: TEXT_SOFT,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  drawingPiece: {
+    borderRadius: 18,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(230, 187, 205, 0.46)',
+    minHeight: 118,
+  },
+  drawingPreview: {
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.52)',
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    marginBottom: 10,
+  },
+  drawingPreviewLine: {
+    height: 2,
+    borderRadius: 999,
+    backgroundColor: 'rgba(123, 91, 108, 0.35)',
+    marginBottom: 10,
+  },
+  drawingPreviewLineShort: {
+    width: '72%',
+  },
+  drawingPreviewLineTiny: {
+    width: '48%',
+    marginBottom: 0,
+  },
+  drawingPieceLabel: {
+    color: '#A55B7C',
+    fontSize: 11,
+    fontWeight: '800',
+    marginBottom: 4,
+  },
+  drawingPieceCaption: {
+    color: TEXT,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  albumDetailBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(20,12,16,0.45)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 20,
+  },
+  albumDetailCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#FFF9FC',
+    borderRadius: 24,
+    padding: 20,
+    borderWidth: 1,
+    borderColor: BORDER,
+  },
+  albumDetailClose: {
+    position: 'absolute',
+    top: 12,
+    right: 12,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: WHITE,
+  },
+  albumDetailDate: {
+    color: TEXT_SOFT,
+    fontSize: 12,
+    marginBottom: 6,
+  },
+  albumDetailAuthor: {
+    color: TEXT,
+    fontSize: 16,
+    fontWeight: '700',
+    marginBottom: 12,
+  },
+  albumDetailImage: {
+    width: '100%',
+    height: 200,
+    borderRadius: 16,
+    marginBottom: 12,
+  },
+  albumDetailBody: {
+    color: TEXT,
+    fontSize: 14,
+    lineHeight: 20,
   },
   openBookSpread: {
     width: '100%',
@@ -5151,6 +5313,164 @@ const s = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#D8BCAF',
     marginVertical: 10,
+  },
+  memoryPiece: {
+    position: 'absolute',
+    borderRadius: 18,
+    overflow: 'hidden',
+    shadowColor: SHADOW,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.22,
+    shadowRadius: 12,
+    elevation: 2,
+  },
+  tapePieceBase: {
+    position: 'absolute',
+    width: 26,
+    height: 10,
+    borderRadius: 4,
+    backgroundColor: 'rgba(255, 223, 233, 0.9)',
+  },
+  tapePieceTop: {
+    top: -6,
+    left: 18,
+    transform: [{ rotate: '-8deg' }],
+  },
+  tapePieceCorner: {
+    top: 8,
+    right: 10,
+    transform: [{ rotate: '12deg' }],
+  },
+  polaroidWrap: {
+    width: '100%',
+    height: '100%',
+    paddingTop: 6,
+  },
+  polaroidFrame: {
+    flex: 1,
+    borderRadius: 16,
+    backgroundColor: WHITE,
+    padding: 8,
+    shadowColor: SHADOW,
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.2,
+    shadowRadius: 12,
+    elevation: 2,
+  },
+  polaroidPhotoArea: {
+    flex: 1,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: '#FBE7EF',
+  },
+  polaroidImage: {
+    width: '100%',
+    height: '100%',
+  },
+  polaroidPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FBE7EF',
+  },
+  polaroidCaption: {
+    marginTop: 8,
+    color: TEXT_SOFT,
+    fontSize: 12,
+    textAlign: 'center',
+  },
+  drawingWrap: {
+    width: '100%',
+    height: '100%',
+    paddingTop: 6,
+  },
+  drawingCard: {
+    flex: 1,
+    borderRadius: 16,
+    backgroundColor: '#FFF8EE',
+    padding: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(230, 187, 205, 0.46)',
+  },
+  drawingImage: {
+    width: '100%',
+    height: 84,
+    borderRadius: 12,
+    marginBottom: 8,
+  },
+  drawingFallback: {
+    height: 84,
+    borderRadius: 12,
+    backgroundColor: '#F7D8E5',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 8,
+  },
+  drawingFallbackText: {
+    color: TEXT_SOFT,
+    fontSize: 12,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  drawingCaption: {
+    color: TEXT,
+    fontSize: 12,
+    lineHeight: 16,
+  },
+  notePaperWrap: {
+    width: '100%',
+    height: '100%',
+    paddingTop: 6,
+  },
+  notePaperCard: {
+    flex: 1,
+    borderRadius: 16,
+    backgroundColor: '#FFF0F5',
+    borderWidth: 1,
+    borderColor: 'rgba(235, 193, 210, 0.9)',
+    paddingHorizontal: 12,
+    paddingTop: 12,
+    paddingBottom: 10,
+  },
+  notePaperLines: {
+    marginBottom: 10,
+  },
+  notePaperLine: {
+    height: 1,
+    backgroundColor: 'rgba(220, 178, 197, 0.35)',
+    marginBottom: 7,
+  },
+  notePaperText: {
+    color: TEXT,
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  notePaperStamp: {
+    position: 'absolute',
+    top: 8,
+    right: 10,
+    color: '#C16D93',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  emptyBookState: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 24,
+    paddingVertical: 24,
+  },
+  emptyBookTitle: {
+    color: TEXT,
+    fontSize: 18,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  emptyBookSubtitle: {
+    marginTop: 6,
+    color: TEXT_SOFT,
+    fontSize: 14,
+    lineHeight: 20,
+    textAlign: 'center',
   },
   scrapPolaroid: {
     position: 'absolute',
