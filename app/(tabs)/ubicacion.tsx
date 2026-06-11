@@ -480,7 +480,7 @@ export default function UbicacionScreen() {
         await Notifications.scheduleNotificationAsync({
           content: {
             title: "≡ƒÜ¿ SOS de tu pareja",
-            body: "Tu pareja necesita ayuda. Revisa su ubicaci├│n ahora.",
+            body: "Tu pareja necesita ayuda. Revisa su ubicación ahora.",
             sound: "default",
             priority: Notifications.AndroidNotificationPriority.MAX as any,
             data: {
@@ -569,7 +569,7 @@ export default function UbicacionScreen() {
     const lat = Number(myLocationRow?.latitude);
     const lng = Number(myLocationRow?.longitude);
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-      Alert.alert("Ubicaci├│n no disponible", "No pudimos obtener tu ubicaci├│n actual.");
+      Alert.alert("Ubicación no disponible", "No pudimos obtener tu ubicación actual.");
       return;
     }
 
@@ -587,7 +587,7 @@ export default function UbicacionScreen() {
         latitude: lat,
         longitude: lng,
         battery_percent: batteryPercent,
-        message: "Necesito ayuda. Esta es mi ubicaci├│n actual.",
+        message: "Necesito ayuda. Esta es mi ubicación actual.",
       };
 
       const { error } = await supabase
@@ -672,13 +672,13 @@ export default function UbicacionScreen() {
   const searchAddressLocation = useCallback(async () => {
     const address = placeAddress.trim();
     if (!address) {
-      setAddPlaceError("Escribe una direcci├│n o lugar.");
+      setAddPlaceError("Escribe una dirección o lugar.");
       return;
     }
 
     const apiKey = process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY;
     if (!apiKey) {
-      setAddPlaceError("No se encontr├│ Google Maps API key.");
+      setAddPlaceError("No se encontró Google Maps API key.");
       return;
     }
 
@@ -686,7 +686,7 @@ export default function UbicacionScreen() {
       setAddPlaceError(null);
 
       console.log("geocode query:", address);
-      const query = `${address}, Toluca, Estado de M├⌐xico, M├⌐xico`;
+      const query = `${address}, Toluca, Estado de México, México`;
       const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(query)}&region=mx&language=es&key=${apiKey}`;
       const response = await fetch(url);
       const json = await response.json();
@@ -695,12 +695,12 @@ export default function UbicacionScreen() {
       console.log("geocode results:", json?.results?.length);
 
       if (json?.status === "REQUEST_DENIED") {
-        setAddPlaceError("La b├║squeda por direcci├│n a├║n no est├í disponible. Intenta de nuevo en unos minutos o selecciona manualmente en el mapa.");
+        setAddPlaceError("La búsqueda por dirección aún no está disponible. Intenta de nuevo en unos minutos o selecciona manualmente en el mapa.");
         return;
       }
 
       if (json?.status === "ZERO_RESULTS") {
-        setAddPlaceError("No se encontr├│ esa direcci├│n. Intenta escribir una referencia m├ís completa.");
+        setAddPlaceError("No se encontró esa dirección. Intenta escribir una referencia más completa.");
         return;
       }
 
@@ -711,14 +711,14 @@ export default function UbicacionScreen() {
 
       const result = json?.results?.[0];
       if (!result) {
-        setAddPlaceError("No se encontr├│ esa direcci├│n. Intenta escribir una referencia m├ís completa.");
+        setAddPlaceError("No se encontró esa dirección. Intenta escribir una referencia más completa.");
         return;
       }
 
       const latitude = Number(result?.geometry?.location?.lat);
       const longitude = Number(result?.geometry?.location?.lng);
       if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) {
-        setAddPlaceError("No se encontr├│ esa direcci├│n. Intenta escribir una referencia m├ís completa.");
+        setAddPlaceError("No se encontró esa dirección. Intenta escribir una referencia más completa.");
         return;
       }
 
@@ -742,7 +742,7 @@ export default function UbicacionScreen() {
       );
     } catch (error) {
       console.warn("search address error:", error);
-      setAddPlaceError("No se pudo buscar la ubicaci├│n.");
+      setAddPlaceError("No se pudo buscar la ubicación.");
     }
   }, [placeAddress]);
 
@@ -860,11 +860,11 @@ export default function UbicacionScreen() {
 
   const saveNewPlace = useCallback(async () => {
     if (!resolvedUserId) {
-      setAddPlaceError('No se encontr├│ el usuario.');
+      setAddPlaceError('No se encontró el usuario.');
       return;
     }
     if (!resolvedCoupleId) {
-      setAddPlaceError('No se encontr├│ la pareja.');
+      setAddPlaceError('No se encontró la pareja.');
       return;
     }
     const name = newPlaceName.trim();
@@ -892,12 +892,12 @@ export default function UbicacionScreen() {
           latitude = latFromUserLocation;
           longitude = lngFromUserLocation;
         } else {
-          setAddPlaceError("No pudimos obtener tu ubicaci├│n actual. Actualiza tu ubicaci├│n primero.");
+          setAddPlaceError("No pudimos obtener tu ubicación actual. Actualiza tu ubicación primero.");
           return;
         }
       } else {
         if (!selectedPlaceCoordinate) {
-          setAddPlaceError("Primero selecciona una ubicaci├│n en el mapa.");
+          setAddPlaceError("Primero selecciona una ubicación en el mapa.");
           return;
         }
         latitude = Number(selectedPlaceCoordinate.latitude);
@@ -905,7 +905,7 @@ export default function UbicacionScreen() {
       }
 
       if (!Number.isFinite(Number(latitude)) || !Number.isFinite(Number(longitude))) {
-        setAddPlaceError('Ingresa latitud y longitud v├ílidas.');
+        setAddPlaceError('Ingresa latitud y longitud válidas.');
         return;
       }
 
@@ -1297,7 +1297,7 @@ export default function UbicacionScreen() {
     const lng = Number(partnerLocationRow?.longitude);
 
     if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
-      Alert.alert("Ubicaci├│n no disponible", "Todav├¡a no tenemos la ubicaci├│n de tu pareja.");
+      Alert.alert("Ubicación no disponible", "Todavía no tenemos la ubicación de tu pareja.");
       return;
     }
 
@@ -1703,12 +1703,12 @@ export default function UbicacionScreen() {
 
   const updateMyLocation = useCallback(async () => {
     if (!resolvedUserId) {
-      setSaveStatus('No se encontr├│ tu perfil');
+      setSaveStatus('No se encontró tu perfil');
       setSaveStatusType('error');
       return;
     }
     if (!resolvedCoupleId) {
-      setSaveStatus('No se encontr├│ la pareja');
+      setSaveStatus('No se encontró la pareja');
       setSaveStatusType('error');
       return;
     }
@@ -1735,7 +1735,7 @@ export default function UbicacionScreen() {
       if (existingPerm.status !== 'granted') {
         const requested = await Location.requestForegroundPermissionsAsync();
         if (requested.status !== 'granted') {
-          setSaveStatus('No se pudo obtener tu ubicaci├│n.');
+          setSaveStatus('No se pudo obtener tu ubicación.');
           setSaveStatusType('error');
           return;
         }
@@ -1749,7 +1749,7 @@ export default function UbicacionScreen() {
 
       const coords = loc?.coords;
       if (!coords || typeof coords.latitude !== 'number' || typeof coords.longitude !== 'number') {
-        setSaveStatus('No se pudo obtener tu ubicaci├│n.');
+        setSaveStatus('No se pudo obtener tu ubicación.');
         setSaveStatusType('error');
         return;
       }
@@ -1827,7 +1827,7 @@ export default function UbicacionScreen() {
           console.log('Location save error:', retry.error);
 
           if (retry.error) {
-            setSaveStatus('No se pudo actualizar tu ubicaci├│n autom├íticamente.');
+            setSaveStatus('No se pudo actualizar tu ubicación automáticamente.');
             setSaveStatusType('error');
             return;
           }
@@ -1843,7 +1843,7 @@ export default function UbicacionScreen() {
       console.log('Location save error:', error);
 
       if (error) {
-        setSaveStatus('No se pudo actualizar tu ubicaci├│n autom├íticamente.');
+        setSaveStatus('No se pudo actualizar tu ubicación automáticamente.');
         setSaveStatusType('error');
         return;
       }
@@ -1860,7 +1860,7 @@ export default function UbicacionScreen() {
       console.log('couple_locations fetch error:', fetchError);
       await fetchCoupleLocations();
     } catch (e) {
-      setSaveStatus('No se pudo actualizar tu ubicaci├│n autom├íticamente.');
+      setSaveStatus('No se pudo actualizar tu ubicación automáticamente.');
       setSaveStatusType('error');
     } finally {
       setSaving(false);
@@ -2094,7 +2094,7 @@ export default function UbicacionScreen() {
             <View style={s.modalHeaderRow}>
               <Text style={s.modalTitle}>Nuevo lugar</Text>
               <TouchableOpacity style={s.modalCloseBtn} onPress={() => setShowAddPlaceModal(false)}>
-                <Text style={s.modalCloseText}>├ù</Text>
+                <Text style={s.modalCloseText}>×</Text>
               </TouchableOpacity>
             </View>
 
@@ -2104,7 +2104,7 @@ export default function UbicacionScreen() {
                 onPress={() => setAddPlaceMode('current')}
               >
                 <Text style={[s.modeButtonText, addPlaceMode === 'current' && s.modeButtonTextActive]}>
-                  Usar mi ubicaci├│n actual
+                  Usar mi ubicación actual
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
@@ -2148,13 +2148,13 @@ export default function UbicacionScreen() {
               })}
             </View>
 
-            <Text style={s.modalLabel}>Ubicaci├│n</Text>
+            <Text style={s.modalLabel}>Ubicación</Text>
             {addPlaceMode === 'search' ? (
               <>
                 <TextInput
                   value={placeAddress}
                   onChangeText={setPlaceAddress}
-                  placeholder="Direcci├│n o nombre del lugar"
+                  placeholder="Dirección o nombre del lugar"
                   placeholderTextColor={TEXT_MUTED}
                   style={s.input}
                 />
@@ -2164,7 +2164,7 @@ export default function UbicacionScreen() {
                 </TouchableOpacity>
 
                 {selectedPlaceCoordinate ? (
-                  <Text style={s.locationSelectedText}>Ubicaci├│n seleccionada</Text>
+                  <Text style={s.locationSelectedText}>Ubicación seleccionada</Text>
                 ) : null}
 
                 <Pressable style={s.manualPickLink} onPress={startManualPlacePick}>
@@ -2173,7 +2173,7 @@ export default function UbicacionScreen() {
               </>
             ) : (
               <View style={s.locationInfoBox}>
-                <Text style={s.locationInfoText}>Se usar├í tu ubicaci├│n actual.</Text>
+                <Text style={s.locationInfoText}>Se usará tu ubicación actual.</Text>
               </View>
             )}
 
@@ -2186,7 +2186,7 @@ export default function UbicacionScreen() {
               ]}
               onPress={() => {
                 if (addPlaceMode === "search" && !selectedPlaceCoordinate) {
-                  setAddPlaceError("Primero selecciona una ubicaci├│n en el mapa.");
+                  setAddPlaceError("Primero selecciona una ubicación en el mapa.");
                   return;
                 }
                 saveNewPlace();
@@ -2216,7 +2216,7 @@ export default function UbicacionScreen() {
                 setShowMapLayerModal(false);
               }}
             >
-              <Text style={s.layerOptionText}>Est├índar</Text>
+              <Text style={s.layerOptionText}>Estándar</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -2226,7 +2226,7 @@ export default function UbicacionScreen() {
                 setShowMapLayerModal(false);
               }}
             >
-              <Text style={s.layerOptionText}>Sat├⌐lite</Text>
+              <Text style={s.layerOptionText}>Satélite</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -2236,7 +2236,7 @@ export default function UbicacionScreen() {
                 setShowMapLayerModal(false);
               }}
             >
-              <Text style={s.layerOptionText}>H├¡brido</Text>
+              <Text style={s.layerOptionText}>Híbrido</Text>
             </TouchableOpacity>
           </View>
         </Pressable>
@@ -2252,7 +2252,7 @@ export default function UbicacionScreen() {
           <Pressable style={s.sosModalCard} onPress={() => {}}>
             <Text style={s.sosModalTitle}>Emergencia</Text>
             <Text style={s.sosModalSubtitle}>
-              Elige una acci├│n. No llamaremos autom├íticamente sin confirmar.
+              Elige una acción. No llamaremos automáticamente sin confirmar.
             </Text>
 
             <TouchableOpacity
@@ -2280,7 +2280,7 @@ export default function UbicacionScreen() {
               }}
             >
               <Ionicons name="navigate" size={20} color="#d96f86" />
-              <Text style={s.sosActionText}>Compartir ubicaci├│n ahora</Text>
+              <Text style={s.sosActionText}>Compartir ubicación ahora</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -2331,9 +2331,9 @@ export default function UbicacionScreen() {
               <Text style={s.sosAlertIcon}>!</Text>
             </View>
 
-            <Text style={s.sosAlertTitle}>≡ƒÜ¿ SOS de tu pareja</Text>
+            <Text style={s.sosAlertTitle}>SOS de tu pareja</Text>
             <Text style={s.sosAlertSubtitle}>
-              Tu pareja necesita ayuda. Revisa su ubicaci├│n ahora.
+              Tu pareja necesita ayuda. Revisa su ubicación ahora.
             </Text>
 
             {activeSosEvent?.message ? (
@@ -2366,7 +2366,7 @@ export default function UbicacionScreen() {
               }}
             >
               <Ionicons name="location" size={21} color="#ffffff" />
-              <Text style={s.sosAlertPrimaryButtonText}>Ver ubicaci├│n</Text>
+              <Text style={s.sosAlertPrimaryButtonText}>Ver ubicación</Text>
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -2444,7 +2444,7 @@ export default function UbicacionScreen() {
                         ? { x: 0.88, y: 0.55 }
                         : { x: 0.5, y: 0.95 }
                   }
-                  title="T├║"
+                  title="Tú"
                   onPress={() => {
                     setShowPartnerMapActions(false);
                     setShowSavedPlaceActions(false);
@@ -2490,7 +2490,7 @@ export default function UbicacionScreen() {
                     const coordinate = event?.nativeEvent?.coordinate;
                     if (coordinate) setPendingPlaceCoordinate(coordinate);
                   }}
-                  title="Ubicaci├│n seleccionada"
+                  title="Ubicación seleccionada"
                 />
               ) : null}
 
@@ -2645,7 +2645,7 @@ export default function UbicacionScreen() {
 
             {isPickingPlaceOnMap && pendingPlaceCoordinate ? (
               <View style={s.pickLocationPanel}>
-                <Text style={s.pickLocationTitle}>Ajusta la ubicaci├│n</Text>
+                <Text style={s.pickLocationTitle}>Ajusta la ubicación</Text>
                 <Text style={s.pickLocationSubtitle}>
                   Toca el mapa o mueve el marcador para elegir el punto exacto.
                 </Text>
@@ -2669,7 +2669,7 @@ export default function UbicacionScreen() {
                       setShowAddPlaceModal(true);
                     }}
                   >
-                    <Text style={s.pickLocationConfirmText}>Confirmar ubicaci├│n</Text>
+                    <Text style={s.pickLocationConfirmText}>Confirmar ubicación</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -2685,7 +2685,7 @@ export default function UbicacionScreen() {
                   style={[s.mapFloatingButton, s.mapFloatingButtonPrimary]}
                   onPress={openPartnerDirections}
                 >
-                  <Text style={[s.mapFloatingButtonText, s.mapFloatingButtonTextPrimary]}>C├│mo llegar</Text>
+                  <Text style={[s.mapFloatingButtonText, s.mapFloatingButtonTextPrimary]}>Cómo llegar</Text>
                 </TouchableOpacity>
               </View>
             ) : null}
@@ -2700,14 +2700,14 @@ export default function UbicacionScreen() {
                   style={[s.mapFloatingButton, s.mapFloatingButtonPrimary]}
                   onPress={openSavedPlaceDirections}
                 >
-                  <Text style={[s.mapFloatingButtonText, s.mapFloatingButtonTextPrimary]}>C├│mo llegar</Text>
+                  <Text style={[s.mapFloatingButtonText, s.mapFloatingButtonTextPrimary]}>Cómo llegar</Text>
                 </TouchableOpacity>
               </View>
             ) : null}
           </>
         ) : (
           <View style={[s.mapEmptyOverlay, { position: 'relative', left: undefined, right: undefined, bottom: undefined, margin: 16 }]}>
-            <Text style={s.mapEmptyText}>Comparte tu ubicaci├│n para verla en el mapa.</Text>
+            <Text style={s.mapEmptyText}>Comparte tu ubicación para verla en el mapa.</Text>
           </View>
         )}
       </View>
@@ -2749,12 +2749,12 @@ export default function UbicacionScreen() {
             <View style={s.partnerInfoContent}>
               <Text style={s.partnerName}>{partnerName}</Text>
               <Text style={s.partnerStatus}>
-                {partnerLocationRow ? 'Compartiendo ubicaci├│n' : locationsLoading ? 'Cargando...' : 'Sin ubicaci├│n'}
+                {partnerLocationRow ? 'Compartiendo ubicación' : locationsLoading ? 'Cargando...' : 'Sin ubicación'}
               </Text>
               {distanceText !== null ? (
                 <Text style={s.partnerDistance}>Distancia aproximada: {distanceText}</Text>
               ) : null}
-              <Text style={s.partnerUpdatedAt}>├Ültima actualizaci├│n: {partnerRecordedAt ?? '--'}</Text>
+              <Text style={s.partnerUpdatedAt}>Última actualización: {partnerRecordedAt ?? '--'}</Text>
             </View>
           </TouchableOpacity>
 
@@ -2768,7 +2768,7 @@ export default function UbicacionScreen() {
               },
             ]}
           >
-            <Text style={s.sectionTitle}>Mi ubicaci├│n actual</Text>
+            <Text style={s.sectionTitle}>Mi ubicación actual</Text>
             <View style={s.myLocCard}>
               <MapPin size={24} color={ACCENT_RED} />
               <View style={{ flex: 1, marginLeft: 12 }}>
@@ -2788,19 +2788,19 @@ export default function UbicacionScreen() {
 
                 <View style={s.myLocationStatusRow}>
                   <View style={s.liveDot} />
-                  <Text style={s.myLocationStatusText}>Compartiendo autom├íticamente</Text>
+                  <Text style={s.myLocationStatusText}>Compartiendo automáticamente</Text>
                 </View>
 
-                <Text style={s.locationMetaText}>Actualizaci├│n autom├ítica cada 60 s</Text>
+                <Text style={s.locationMetaText}>Actualización automática cada 60 s</Text>
                 <Text style={s.locationMetaText}>
-                  ├Ültima actualizaci├│n: {myRecordedAt ? myRecordedAt : 'Esperando actualizaci├│n...'}
+                  Última actualización: {myRecordedAt ? myRecordedAt : 'Esperando actualización...'}
                 </Text>
                 {typeof myLocationRow?.accuracy_m === 'number' ? (
                   <Text style={s.locationMetaText}>
-                    Precisi├│n aproximada: {Math.round(Number(myLocationRow.accuracy_m))} m
+                    Precisión aproximada: {Math.round(Number(myLocationRow.accuracy_m))} m
                   </Text>
                 ) : null}
-                <Text style={s.locationMetaText}>Tu ubicaci├│n solo se comparte con tu pareja.</Text>
+                <Text style={s.locationMetaText}>Tu ubicación solo se comparte con tu pareja.</Text>
                 {saveStatusType === 'error' && saveStatus ? (
                   <Text style={s.locationMetaText}>{saveStatus}</Text>
                 ) : null}
@@ -3661,4 +3661,3 @@ const s = StyleSheet.create({
   locationMetaText: { fontSize: 13, fontWeight: '600', color: '#8f98a8', marginTop: 4 },
   sectionTitle: { fontSize: 18, fontWeight: '800', color: TEXT_DARK, marginBottom: 16 },
 });
-

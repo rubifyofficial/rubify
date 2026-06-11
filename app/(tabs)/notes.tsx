@@ -1,4 +1,10 @@
+import { DancingScript_600SemiBold } from '@expo-google-fonts/dancing-script';
+import { GreatVibes_400Regular } from '@expo-google-fonts/great-vibes';
+import { Montserrat_500Medium, Montserrat_800ExtraBold } from '@expo-google-fonts/montserrat';
+import { PlayfairDisplay_600SemiBold } from '@expo-google-fonts/playfair-display';
+import { SpecialElite_400Regular } from '@expo-google-fonts/special-elite';
 import Slider from '@react-native-community/slider';
+import { useFonts } from 'expo-font';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import {
@@ -24,6 +30,7 @@ import {
   Keyboard,
   Modal,
   PanResponder,
+  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -90,7 +97,18 @@ type EditorTextElement = {
   y: number;
   color: string;
   fontSize: number;
-  fontVariant: 'normal' | 'elegante' | 'manuscrita' | 'negrita';
+  fontVariant:
+    | 'normal'
+    | 'script'
+    | 'maquina'
+    | 'serif'
+    | 'romantica'
+    | 'fuerte'
+    | 'elegante'
+    | 'manuscrita'
+    | 'divertida'
+    | 'suave'
+    | 'negrita';
   scale: number;
   rotation: number;
 };
@@ -106,7 +124,29 @@ type EditorStickerElement = {
 
 type EditorCategory = 'pen' | 'text' | 'sticker' | 'bucket';
 type EditorToolMode = 'pencil' | 'marker' | 'eraser';
+type EditorFontStyle = 'normal' | 'script' | 'maquina' | 'serif' | 'romantica' | 'fuerte';
 const EDITOR_CANVAS_DEFAULT_BG = '#FFF7FB';
+const EDITOR_BACKGROUND_COLORS = [
+  '#FFF7FB',
+  '#FFFFFF',
+  '#FFFDF6',
+  '#FFF6E5',
+  '#F4E7D1',
+  '#FFE1D6',
+  '#FFE4EF',
+  '#FADAE8',
+  '#F1E8FF',
+  '#EADCF8',
+  '#E7F2FF',
+  '#DDEEFF',
+  '#E4F8EF',
+  '#E8F1E4',
+  '#FFF7C7',
+  '#FFF0A8',
+  '#FFD6C9',
+  '#F3F4F6',
+  '#EFEAE4',
+] as const;
 
 function fmtDate(iso: string): string {
   try {
@@ -218,33 +258,87 @@ function clampTextToCanvas(text: EditorTextElement, canvasWidth: number, canvasH
   };
 }
 
-function getEditorTextVariantStyle(variant: EditorTextElement['fontVariant']) {
+function normalizeEditorFontVariant(variant: EditorTextElement['fontVariant']): EditorFontStyle {
   switch (variant) {
-    case 'elegante':
-      return {
-        fontWeight: '600' as const,
-        fontStyle: 'normal' as const,
-        letterSpacing: 0.3,
-      };
-    case 'manuscrita':
-      return {
-        fontWeight: '500' as const,
-        fontStyle: 'italic' as const,
-        letterSpacing: 0.2,
-      };
+    case 'script':
+      return 'script';
+    case 'maquina':
+      return 'maquina';
+    case 'serif':
+      return 'serif';
+    case 'romantica':
+      return 'romantica';
+    case 'fuerte':
+      return 'fuerte';
     case 'negrita':
-      return {
-        fontWeight: '800' as const,
-        fontStyle: 'normal' as const,
-        letterSpacing: 0.1,
-      };
+      return 'fuerte';
+    case 'elegante':
+      return 'serif';
+    case 'manuscrita':
+      return 'romantica';
+    case 'divertida':
+      return 'maquina';
+    case 'suave':
+      return 'romantica';
     case 'normal':
     default:
-      return {
-        fontWeight: '500' as const,
-        fontStyle: 'normal' as const,
-        letterSpacing: 0,
-      };
+      return 'normal';
+  }
+}
+
+function getEditorTextVariantStyle(variant: EditorTextElement['fontVariant'], fontsLoaded: boolean) {
+  const normalized = normalizeEditorFontVariant(variant);
+  const loadedFamilyByVariant: Record<EditorFontStyle, string> = {
+    normal: 'Montserrat_500Medium',
+    fuerte: 'Montserrat_800ExtraBold',
+    serif: 'PlayfairDisplay_600SemiBold',
+    maquina: 'SpecialElite_400Regular',
+    script: 'GreatVibes_400Regular',
+    romantica: 'DancingScript_600SemiBold',
+  };
+  const fallbackFamilyByVariant: Record<EditorFontStyle, string | undefined> = {
+    normal: Platform.select({ ios: 'System', android: 'sans-serif', default: undefined }),
+    fuerte: Platform.select({ ios: 'System', android: 'sans-serif', default: undefined }),
+    serif: Platform.select({ ios: 'Georgia', android: 'serif', default: undefined }),
+    maquina: Platform.select({ ios: 'Courier New', android: 'monospace', default: undefined }),
+    script: Platform.select({ ios: 'Snell Roundhand', android: 'cursive', default: undefined }),
+    romantica: Platform.select({ ios: 'Snell Roundhand', android: 'cursive', default: undefined }),
+  };
+
+  const fontFamily = fontsLoaded ? loadedFamilyByVariant[normalized] : fallbackFamilyByVariant[normalized];
+
+  if (!fontsLoaded) {
+    switch (normalized) {
+      case 'fuerte':
+        return { fontFamily, fontWeight: '800' as const, letterSpacing: 0.1 };
+      case 'serif':
+        return { fontFamily, fontWeight: '600' as const, letterSpacing: 0.2 };
+      case 'maquina':
+        return { fontFamily, fontWeight: '700' as const, letterSpacing: 0.6 };
+      case 'script':
+        return { fontFamily, fontWeight: '600' as const, fontStyle: 'italic' as const, letterSpacing: 0.2 };
+      case 'romantica':
+        return { fontFamily, fontWeight: '600' as const, fontStyle: 'italic' as const, letterSpacing: 0.3 };
+      case 'normal':
+      default:
+        return { fontFamily, fontWeight: '500' as const, letterSpacing: 0 };
+    }
+  }
+
+  switch (normalized) {
+    case 'fuerte':
+      return { fontFamily, letterSpacing: 0.1 };
+    case 'serif':
+      return { fontFamily, letterSpacing: 0.2 };
+    case 'maquina':
+      return { fontFamily, letterSpacing: 0.55 };
+    case 'script':
+      return { fontFamily, letterSpacing: 0.15 };
+    case 'romantica':
+      return { fontFamily, letterSpacing: 0.25 };
+    case 'normal':
+    default:
+      return { fontFamily, letterSpacing: 0 };
   }
 }
 
@@ -379,6 +473,14 @@ function shouldRetryWithMinimalPayload(message?: string): boolean {
 export default function NotesScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
+  const [fontsLoaded, fontError] = useFonts({
+    DancingScript_600SemiBold,
+    GreatVibes_400Regular,
+    Montserrat_500Medium,
+    Montserrat_800ExtraBold,
+    PlayfairDisplay_600SemiBold,
+    SpecialElite_400Regular,
+  });
   const [noteText, setNoteText] = useState('');
   const [userId, setUserId] = useState<string | null>(null);
   const [coupleId, setCoupleId] = useState<string | null>(null);
@@ -410,7 +512,7 @@ export default function NotesScreen() {
   const [selectedSticker, setSelectedSticker] = useState<string | null>(null);
   const [editorActiveStickerId, setEditorActiveStickerId] = useState<string | null>(null);
   const [editorTextFontSize, setEditorTextFontSize] = useState(22);
-  const [selectedTextStyle, setSelectedTextStyle] = useState<EditorTextElement['fontVariant']>('normal');
+  const [selectedFontStyle, setSelectedFontStyle] = useState<EditorFontStyle>('normal');
   const [editorCanvasSize, setEditorCanvasSize] = useState({ width: 0, height: 0 });
   const [isEditorPhotoSheetOpen, setIsEditorPhotoSheetOpen] = useState(false);
   const [editorDraggingTextId, setEditorDraggingTextId] = useState<string | null>(null);
@@ -428,6 +530,12 @@ export default function NotesScreen() {
   const editorPhotoGestureCountRef = useRef(0);
   const canvasTouchStartedOnPhotoRef = useRef(false);
   const editorTextInputRefs = useRef<Record<string, TextInput | null>>({});
+
+  useEffect(() => {
+    if (fontError) {
+      console.log('[Notas] font load error', fontError);
+    }
+  }, [fontError]);
 
   const fetchNotes = useCallback(async (cid: string) => {
     try {
@@ -702,7 +810,7 @@ export default function NotesScreen() {
         setEditorStrokeWidth(5);
         setEditorOpacity(1);
         setEditorTextFontSize(22);
-        setSelectedTextStyle('normal');
+        setSelectedFontStyle('normal');
         setIsEditorOpen(false);
         await fetchNotes(coupleId);
         Alert.alert('Notas', 'Nota guardada.');
@@ -730,7 +838,7 @@ export default function NotesScreen() {
     setSelectedSticker(null);
     setEditorActiveStickerId(null);
     setEditorTextFontSize(22);
-    setSelectedTextStyle('normal');
+    setSelectedFontStyle('normal');
     setIsEditorOpen(true);
   }, [noteText]);
 
@@ -786,7 +894,7 @@ export default function NotesScreen() {
       setEditorActiveTextId(id);
       const target = editorTextElements.find((item) => item.id === id);
       if (target) {
-        setSelectedTextStyle(target.fontVariant);
+        setSelectedFontStyle(normalizeEditorFontVariant(target.fontVariant));
         setEditorTextFontSize(target.fontSize);
       }
       setEditorEditingTextId(shouldEdit ? id : null);
@@ -810,7 +918,7 @@ export default function NotesScreen() {
         y: point.y,
         color: editorColor || '#5A3A2E',
         fontSize: editorTextFontSize,
-        fontVariant: selectedTextStyle,
+        fontVariant: selectedFontStyle,
         scale: 1,
         rotation: 0,
       };
@@ -824,7 +932,7 @@ export default function NotesScreen() {
       editorEditingTextId,
       editorTextFontSize,
       finalizeEditorTextElement,
-      selectedTextStyle,
+      selectedFontStyle,
     ]
   );
 
@@ -888,10 +996,10 @@ export default function NotesScreen() {
     if (!editorActiveTextId) return;
     setEditorTextElements((prev) =>
       prev.map((item) =>
-        item.id === editorActiveTextId ? { ...item, fontVariant: selectedTextStyle, fontSize: editorTextFontSize } : item
+        item.id === editorActiveTextId ? { ...item, fontSize: editorTextFontSize } : item
       )
     );
-  }, [editorActiveTextId, editorTextFontSize, selectedTextStyle]);
+  }, [editorActiveTextId, editorTextFontSize]);
 
   const editorPanResponder = useMemo(() => {
     const getPoint = (e: any): DrawPoint => ({
@@ -1529,6 +1637,7 @@ export default function NotesScreen() {
                       textItem={item}
                       isActive={editorActiveTextId === item.id}
                       isEditing={editorEditingTextId === item.id}
+                      fontsLoaded={fontsLoaded}
                       onTouchStart={handleEditorTextTouchStart}
                       onBringToFront={bringEditorTextToFront}
                       onInteractionStart={handleEditorTextInteractionStart}
@@ -1741,16 +1850,24 @@ export default function NotesScreen() {
                       >
                         {[
                           { key: 'normal', label: 'Normal' },
-                          { key: 'elegante', label: 'Elegante' },
-                          { key: 'manuscrita', label: 'Manuscrita' },
-                          { key: 'negrita', label: 'Negrita' },
+                          { key: 'script', label: 'Script' },
+                          { key: 'maquina', label: 'Máquina' },
+                          { key: 'serif', label: 'Serif' },
+                          { key: 'romantica', label: 'Romántica' },
+                          { key: 'fuerte', label: 'Fuerte' },
                         ].map((option) => {
-                          const isActive = selectedTextStyle === option.key;
+                          const isActive = selectedFontStyle === option.key;
                           return (
                             <Pressable
                               key={option.key}
                               style={[s.toolChip, s.placeholderChip, isActive && s.toolChipActive]}
-                              onPress={() => setSelectedTextStyle(option.key as EditorTextElement['fontVariant'])}
+                              onPress={() => {
+                                const nextStyle = option.key as EditorFontStyle;
+                                setSelectedFontStyle(nextStyle);
+                                if (editorActiveTextId) {
+                                  updateEditorTextElement(editorActiveTextId, { fontVariant: nextStyle });
+                                }
+                              }}
                               disabled={saving}
                             >
                               <Text style={[s.toolChipText, isActive && s.toolChipTextActive]}>{option.label}</Text>
@@ -1799,6 +1916,31 @@ export default function NotesScreen() {
                             <Text style={s.toolChipText}>Restablecer</Text>
                           </Pressable>
                         </View>
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={s.dynamicToolsScrollRow}
+                        >
+                          {EDITOR_BACKGROUND_COLORS.map((color) => {
+                            const isActive = editorCanvasBackground === color;
+                            return (
+                              <Pressable
+                                key={color}
+                                style={[
+                                  s.bucketColorSwatch,
+                                  { backgroundColor: color },
+                                  color === '#FFFFFF' && s.bucketColorSwatchWhite,
+                                  isActive && s.bucketColorSwatchActive,
+                                ]}
+                                onPress={() => setEditorCanvasBackground(color)}
+                                disabled={saving}
+                                accessibilityRole="button"
+                                accessibilityLabel={`Fondo ${color}`}
+                                accessibilityState={{ selected: isActive }}
+                              />
+                            );
+                          })}
+                        </ScrollView>
                       </>
                     ) : null}
                   </>
@@ -2210,6 +2352,7 @@ function EditorTextItem({
   textItem,
   isActive,
   isEditing,
+  fontsLoaded,
   onTouchStart,
   onBringToFront,
   onInteractionStart,
@@ -2227,6 +2370,7 @@ function EditorTextItem({
   textItem: EditorTextElement;
   isActive: boolean;
   isEditing: boolean;
+  fontsLoaded: boolean;
   onTouchStart: (id: string) => void;
   onBringToFront: (id: string) => void;
   onInteractionStart: (id: string) => void;
@@ -2423,7 +2567,7 @@ function EditorTextItem({
               color: textItem.color,
               fontSize: textItem.fontSize,
               lineHeight: textItem.fontSize + 6,
-              ...getEditorTextVariantStyle(textItem.fontVariant),
+              ...getEditorTextVariantStyle(textItem.fontVariant, fontsLoaded),
             },
           ]}
           value={textItem.text}
@@ -2446,7 +2590,7 @@ function EditorTextItem({
               color: textItem.color,
               fontSize: textItem.fontSize,
               lineHeight: textItem.fontSize + 6,
-              ...getEditorTextVariantStyle(textItem.fontVariant),
+              ...getEditorTextVariantStyle(textItem.fontVariant, fontsLoaded),
             },
           ]}
         >
@@ -3337,6 +3481,27 @@ const s = StyleSheet.create({
     color: TEXT_SOFT,
     fontSize: 11,
     fontWeight: '700',
+  },
+  bucketColorSwatch: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    borderWidth: 1.5,
+    borderColor: 'rgba(76, 42, 61, 0.08)',
+    shadowColor: 'rgba(117, 89, 102, 0.12)',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 1,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  bucketColorSwatchWhite: {
+    borderColor: 'rgba(76, 42, 61, 0.16)',
+  },
+  bucketColorSwatchActive: {
+    borderColor: '#D77FA5',
+    borderWidth: 2.5,
+    shadowColor: 'rgba(215, 127, 165, 0.2)',
+    elevation: 3,
   },
   resetBucketChip: {
     flex: 0,

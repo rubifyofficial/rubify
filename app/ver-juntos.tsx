@@ -62,7 +62,7 @@ type WatchItem = {
   couple_id?: string;
   created_by?: string;
   title: string;
-  type: 'Pel├¡cula' | 'Serie';
+  type: 'Película' | 'Serie';
   status: string;
   created_at?: string;
   updated_at?: string;
@@ -134,7 +134,7 @@ export default function VerJuntosScreen() {
   const [isSelectModalOpen, setIsSelectModalOpen] = useState(false);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
-  const [draftType, setDraftType] = useState<WatchItem['type']>('Pel├¡cula');
+  const [draftType, setDraftType] = useState<WatchItem['type']>('Película');
   const [roomMessageText, setRoomMessageText] = useState('');
   const [roomMessages, setRoomMessages] = useState<WatchRoomMessage[]>([]);
   const [watchItems, setWatchItems] = useState<WatchItem[]>([]);
@@ -388,7 +388,7 @@ export default function VerJuntosScreen() {
               : await ExpoCamera.requestCameraPermissionsAsync();
 
           if (!cameraResult.granted && cameraResult.status !== 'granted') {
-            Alert.alert('Permiso requerido', 'Necesitamos acceso a la c├ímara para iniciar la videollamada.');
+            Alert.alert('Permiso requerido', 'Necesitamos acceso a la cámara para iniciar la videollamada.');
             return false;
           }
         }
@@ -396,7 +396,7 @@ export default function VerJuntosScreen() {
         if (needMicrophone && Platform.OS === 'android') {
           const micResult = await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.RECORD_AUDIO);
           if (micResult !== PermissionsAndroid.RESULTS.GRANTED) {
-            Alert.alert('Permiso requerido', 'Necesitamos acceso al micr├│fono para hablar en la sala.');
+            Alert.alert('Permiso requerido', 'Necesitamos acceso al micrófono para hablar en la sala.');
             return false;
           }
         }
@@ -556,7 +556,7 @@ export default function VerJuntosScreen() {
         needMicrophone: myRoomStatus.mic,
       });
       if (!hasPermissions) {
-        setCallError('No se pudo iniciar la llamada sin permisos de c├ímara o micr├│fono.');
+        setCallError('No se pudo iniciar la llamada sin permisos de cámara o micrófono.');
         return;
       }
 
@@ -934,7 +934,7 @@ export default function VerJuntosScreen() {
               screenShareFallbackShownRef.current = true;
               Alert.alert(
                 'Pantalla',
-                'La compartici├│n de pantalla todav├¡a depende del soporte nativo del dispositivo. Dejamos el bot├│n listo sin bloquear la sala.'
+                'La compartición de pantalla todavía depende del soporte nativo del dispositivo. Dejamos el botón listo sin bloquear la sala.'
               );
             }
           } else {
@@ -971,7 +971,7 @@ export default function VerJuntosScreen() {
       : false;
 
     if (!isCurrentUserParticipant && watchRoom?.active) {
-      Alert.alert('Unirse', '├Ünete a la sala para ver en pantalla completa.', [
+      Alert.alert('Unirse', 'Únete a la sala para ver en pantalla completa.', [
         { text: 'Cancelar', style: 'cancel' },
         { text: 'Unirme', onPress: joinRoom },
       ]);
@@ -984,7 +984,7 @@ export default function VerJuntosScreen() {
   const handleExitPress = useCallback(() => {
     const participantsCount = (watchRoom?.participant_ids ?? []).length;
 
-    Alert.alert('Salir', '┬┐Quieres salir solo t├║ o cerrar la sala para ambos?', [
+    Alert.alert('Salir', '¿Quieres salir solo tú o cerrar la sala para ambos?', [
       { text: 'Cancelar', style: 'cancel' },
       { text: 'Salir solo yo', onPress: leaveRoom },
       ...(participantsCount >= 2 ? [{ text: 'Cerrar para ambos', style: 'destructive' as const, onPress: endRoom }] : [{ text: 'Cerrar para ambos', style: 'destructive' as const, onPress: endRoom }]),
@@ -993,7 +993,7 @@ export default function VerJuntosScreen() {
 
   const openAddModal = () => {
     setDraftTitle('');
-    setDraftType('Pel├¡cula');
+    setDraftType('Película');
     setIsAddModalOpen(true);
   };
 
@@ -1188,7 +1188,7 @@ export default function VerJuntosScreen() {
         </Pressable>
         <Pressable style={[s.controlBtn, myRoomStatus.camera ? s.controlBtnOn : s.controlBtnOff]} onPress={toggleCamera}>
           {myRoomStatus.camera ? <Camera size={18} color="#fff" /> : <CameraOff size={18} color="#fff" />}
-          <Text style={s.controlBtnLabel}>C├ímara</Text>
+          <Text style={s.controlBtnLabel}>Cámara</Text>
         </Pressable>
         <Pressable style={[s.controlBtn, myRoomStatus.screen ? s.controlBtnOn : s.controlBtnOff]} onPress={toggleScreenSharing}>
           <MonitorUp size={18} color="#fff" />
@@ -1285,10 +1285,10 @@ export default function VerJuntosScreen() {
             <>
               <MessageCircle size={36} color="rgba(255,255,255,0.92)" />
               <Text style={roomTitleStyle} numberOfLines={1} adjustsFontSizeToFit>
-                Tu pareja inici├│ una sala
+                Tu pareja inició una sala
               </Text>
               <Text style={s.roomCenterSubtitle} numberOfLines={2}>
-                ├Ünete para ver juntos.
+                Únete para ver juntos.
               </Text>
               <View style={s.roomCtaRow}>
                 <Pressable style={s.roomPrimaryBtn} onPress={joinRoom}>
@@ -1307,7 +1307,7 @@ export default function VerJuntosScreen() {
               {callError ? <Text style={s.callStatusText}>{callError}</Text> : null}
               <View style={participantsRowStyle}>
                 <View style={[s.participantTile, fullscreen && s.participantTileFullscreen]}>
-                  <Text style={s.participantTileName}>T├║</Text>
+                  <Text style={s.participantTileName}>Tú</Text>
                   {myRoomStatus.camera && shouldRenderStreamCall ? (
                     <View style={[StyleSheet.absoluteFill, { zIndex: 0 }]}>
                       <VerJuntosLocalTileVideo
@@ -1394,8 +1394,8 @@ export default function VerJuntosScreen() {
           </View>
         ) : items.length === 0 && title === 'Lista para ver' ? (
           <View style={s.emptyListCard}>
-            <Text style={s.emptyListTitle}>A├║n no agregaron nada</Text>
-            <Text style={s.emptyListSub}>Agreguen una pel├¡cula o serie para verla juntos.</Text>
+            <Text style={s.emptyListTitle}>Aún no agregaron nada</Text>
+            <Text style={s.emptyListSub}>Agreguen una película o serie para verla juntos.</Text>
           </View>
         ) : null}
         {isHorizontal ? (
@@ -1409,7 +1409,7 @@ export default function VerJuntosScreen() {
                 }}
               >
                 <View style={s.hPoster}>
-                  <Text style={s.hPosterText}>{item.type === 'Pel├¡cula' ? 'FILM' : 'SERIE'}</Text>
+                  <Text style={s.hPosterText}>{item.type === 'Película' ? 'FILM' : 'SERIE'}</Text>
                 </View>
                 <Text style={s.hItemTitle} numberOfLines={2}>
                   {item.title}
@@ -1435,7 +1435,7 @@ export default function VerJuntosScreen() {
               }}
             >
               <View style={s.posterPlaceholderSmall}>
-                <Text style={s.posterPlaceholderText}>{item.type === 'Pel├¡cula' ? 'FILM' : 'SERIE'}</Text>
+                <Text style={s.posterPlaceholderText}>{item.type === 'Película' ? 'FILM' : 'SERIE'}</Text>
               </View>
               <View style={s.itemMain}>
                 <Text style={s.itemTitle} numberOfLines={1}>
@@ -1517,10 +1517,10 @@ export default function VerJuntosScreen() {
     return (
       <View style={[s.root, { alignItems: 'center', justifyContent: 'center', paddingHorizontal: 20 }]}>
         <Text style={{ fontWeight: '900', color: COLORS.darkText, fontSize: 16, textAlign: 'center' }}>
-          Ver Juntos no est├í disponible todav├¡a
+          Ver Juntos no está disponible todavía
         </Text>
         <Text style={{ marginTop: 8, fontWeight: '700', color: COLORS.mutedText, textAlign: 'center' }}>
-          Completen la configuraci├│n de pareja para usar esta sala.
+          Completen la configuración de pareja para usar esta sala.
         </Text>
       </View>
     );
@@ -1553,7 +1553,7 @@ export default function VerJuntosScreen() {
             <View style={{ flex: 1 }}>
               <Text style={s.suggCompactTitle}>Para ver hoy</Text>
               <Text style={s.suggCompactValue} numberOfLines={1}>
-                {suggestion?.title || 'Todav├¡a no eligieron nada'}
+                {suggestion?.title || 'Todavía no eligieron nada'}
               </Text>
             </View>
           </View>
@@ -1586,11 +1586,11 @@ export default function VerJuntosScreen() {
           <Pressable style={s.modalSheet} onPress={() => {}}>
             <Text style={s.modalTitle}>Agregar a la lista</Text>
 
-            <Text style={s.modalLabel}>T├¡tulo</Text>
+            <Text style={s.modalLabel}>Título</Text>
             <TextInput
               value={draftTitle}
               onChangeText={setDraftTitle}
-              placeholder="Ej: Nuestra serie favoritaΓÇª"
+              placeholder="Ej: Nuestra serie favorita..."
               placeholderTextColor={COLORS.mutedText}
               style={s.modalInput}
             />
@@ -1598,10 +1598,10 @@ export default function VerJuntosScreen() {
             <Text style={s.modalLabel}>Tipo</Text>
             <View style={s.typeRow}>
               <Pressable
-                style={[s.typeChip, draftType === 'Pel├¡cula' && s.typeChipActive]}
-                onPress={() => setDraftType('Pel├¡cula')}
+                style={[s.typeChip, draftType === 'Película' && s.typeChipActive]}
+                onPress={() => setDraftType('Película')}
               >
-                <Text style={[s.typeChipText, draftType === 'Pel├¡cula' && s.typeChipTextActive]}>Pel├¡cula</Text>
+                <Text style={[s.typeChipText, draftType === 'Película' && s.typeChipTextActive]}>Película</Text>
               </Pressable>
               <Pressable style={[s.typeChip, draftType === 'Serie' && s.typeChipActive]} onPress={() => setDraftType('Serie')}>
                 <Text style={[s.typeChipText, draftType === 'Serie' && s.typeChipTextActive]}>Serie</Text>
@@ -1635,14 +1635,14 @@ export default function VerJuntosScreen() {
                 >
                   <View style={s.selectRowLeft}>
                     <View style={s.selectPosterMini}>
-                      <Text style={s.selectPosterMiniText}>{item.type === 'Pel├¡cula' ? 'FILM' : 'SERIE'}</Text>
+                      <Text style={s.selectPosterMiniText}>{item.type === 'Película' ? 'FILM' : 'SERIE'}</Text>
                     </View>
                     <View style={{ flex: 1 }}>
                       <Text style={s.selectTitle} numberOfLines={1}>
                         {item.title}
                       </Text>
                       <Text style={s.selectMeta}>
-                        {item.type} ΓÇó {item.status}
+                        {item.type} • {item.status}
                       </Text>
                     </View>
                   </View>
@@ -2172,4 +2172,3 @@ const s = StyleSheet.create({
   selectTitle: { fontSize: 14, fontWeight: '900', color: COLORS.darkText },
   selectMeta: { fontSize: 12, fontWeight: '800', color: COLORS.mutedText, marginTop: 4 },
 });
-
