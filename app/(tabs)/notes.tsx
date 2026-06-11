@@ -71,7 +71,7 @@ type DbNote = {
 };
 
 type DrawPoint = { x: number; y: number };
-type EditorToolMode = 'pencil' | 'marker' | 'soft' | 'spray' | 'crayon' | 'eraser';
+type EditorToolMode = 'pencil' | 'marker' | 'pen' | 'spray' | 'crayon' | 'highlighter' | 'eraser' | 'soft';
 type DrawStroke = {
   id: string;
   color: string;
@@ -80,6 +80,7 @@ type DrawStroke = {
   brush: EditorToolMode;
   points: DrawPoint[];
   path: string;
+  stamps?: BrushDot[];
 };
 
 type EditorPhotoElement = {
@@ -242,103 +243,230 @@ type BrushPreset = {
 };
 
 const DRAW_BRUSH_PRESETS: Record<EditorToolMode, BrushPreset> = {
-  pencil: { widthMultiplier: 0.95, opacityMultiplier: 0.82, minPointDistance: 2.6, smoothing: 0.18 },
-  marker: { widthMultiplier: 1.65, opacityMultiplier: 0.95, minPointDistance: 2.2, smoothing: 0.22 },
-  soft: { widthMultiplier: 1.15, opacityMultiplier: 0.75, minPointDistance: 2.0, smoothing: 0.5 },
-  spray: { widthMultiplier: 1.9, opacityMultiplier: 0.65, minPointDistance: 6.5, smoothing: 0.35 },
-  crayon: { widthMultiplier: 1.35, opacityMultiplier: 0.82, minPointDistance: 3.6, smoothing: 0.28 },
-  eraser: { widthMultiplier: 1.65, opacityMultiplier: 1, minPointDistance: 2.8, smoothing: 0.22 },
+  pencil: { widthMultiplier: 0.95, opacityMultiplier: 0.9, minPointDistance: 3.2, smoothing: 0.38 },
+  marker: { widthMultiplier: 1.95, opacityMultiplier: 1, minPointDistance: 5.2, smoothing: 0.26 },
+  pen: { widthMultiplier: 0.65, opacityMultiplier: 0.86, minPointDistance: 3.1, smoothing: 0.62 },
+  soft: { widthMultiplier: 0.78, opacityMultiplier: 0.9, minPointDistance: 2.2, smoothing: 0.55 },
+  spray: { widthMultiplier: 2.1, opacityMultiplier: 0.45, minPointDistance: 8.2, smoothing: 0.52 },
+  crayon: { widthMultiplier: 1.55, opacityMultiplier: 0.62, minPointDistance: 7.2, smoothing: 0.3 },
+  highlighter: { widthMultiplier: 3.1, opacityMultiplier: 0.26, minPointDistance: 5.6, smoothing: 0.44 },
+  eraser: { widthMultiplier: 1.7, opacityMultiplier: 1, minPointDistance: 2.8, smoothing: 0.28 },
 };
 
+function normalizeDrawBrush(brush: EditorToolMode): Exclude<EditorToolMode, 'soft'> {
+  if (brush === 'soft') return 'pen';
+  return brush;
+}
+
 function getBrushStrokeWidth(brush: EditorToolMode, baseWidth: number): number {
-  const preset = DRAW_BRUSH_PRESETS[brush] ?? DRAW_BRUSH_PRESETS.pencil;
+  const preset = DRAW_BRUSH_PRESETS[normalizeDrawBrush(brush)] ?? DRAW_BRUSH_PRESETS.pencil;
   return clampNumber(baseWidth * preset.widthMultiplier, 1, 22);
 }
 
 function getBrushOpacity(brush: EditorToolMode, baseOpacity: number): number {
-  if (brush === 'eraser') return 1;
-  const preset = DRAW_BRUSH_PRESETS[brush] ?? DRAW_BRUSH_PRESETS.pencil;
+  const normalized = normalizeDrawBrush(brush);
+  if (normalized === 'eraser') return 1;
+  const preset = DRAW_BRUSH_PRESETS[normalized] ?? DRAW_BRUSH_PRESETS.pencil;
   return clampNumber(baseOpacity * preset.opacityMultiplier, 0.04, 1);
 }
 
 function buildBrushPath(points: DrawPoint[], brush: EditorToolMode): string {
-  if (brush === 'spray') return '';
-  const preset = DRAW_BRUSH_PRESETS[brush] ?? DRAW_BRUSH_PRESETS.pencil;
+  const normalized = normalizeDrawBrush(brush);
+  if (normalized === 'spray') return '';
+  const preset = DRAW_BRUSH_PRESETS[normalized] ?? DRAW_BRUSH_PRESETS.pencil;
   const smoothed = smoothPoints(points, preset.smoothing);
   return buildSmoothSvgPath(smoothed);
 }
 
 type BrushDot = { cx: number; cy: number; r: number; alpha: number };
 
-function buildSprayDots(points: DrawPoint[], width: number, opacity: number, seed: number): BrushDot[] {
-  if (points.length < 2) return [];
-  const rand = mulberry32(seed);
-  const dots: BrushDot[] = [];
-  const radius = Math.max(6, width * 1.25);
-  const spacing = Math.max(6, width * 0.6);
-  const dotsPerStep = clampNumber(2 + Math.floor(width / 7), 2, 5);
+const MAX_SPRAY_DOTS_PER_STROKE = 900;
+const MAX_SPRAY_DOTS_PER_MOVE = 44;
 
-  for (let i = 1; i < points.length; i += 1) {
-    const a = points[i - 1];
-    const b = points[i];
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const dist = Math.hypot(dx, dy);
-    if (!Number.isFinite(dist) || dist <= 0) continue;
-    const steps = Math.max(1, Math.ceil(dist / spacing));
-    for (let s = 0; s <= steps; s += 1) {
-      const t = s / steps;
-      const baseX = a.x + dx * t;
-      const baseY = a.y + dy * t;
-      for (let k = 0; k < dotsPerStep; k += 1) {
-        const angle = rand() * Math.PI * 2;
-        const rr = Math.sqrt(rand()) * radius;
-        const cx = baseX + Math.cos(angle) * rr;
-        const cy = baseY + Math.sin(angle) * rr;
-        const r = Math.max(0.6, width * (0.07 + rand() * 0.2));
-        const alpha = clampNumber(opacity * (0.06 + rand() * 0.12), 0.01, 0.35);
-        dots.push({ cx, cy, r, alpha });
-      }
+function buildSprayDotsForSegment(
+  a: DrawPoint,
+  b: DrawPoint,
+  width: number,
+  opacity: number,
+  seed: number,
+  currentCount: number
+): BrushDot[] {
+  if (currentCount >= MAX_SPRAY_DOTS_PER_STROKE) return [];
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const dist = Math.hypot(dx, dy);
+  if (!Number.isFinite(dist) || dist <= 0) return [];
+
+  const spacing = clampNumber(width * 0.9, 9, 18);
+  const radius = clampNumber(width * 1.45, 10, 26);
+  const dotsPerStep = clampNumber(1 + Math.floor(width / 9), 1, 3);
+  const steps = clampNumber(Math.ceil(dist / spacing), 1, 6);
+  const rand = mulberry32(seed + currentCount * 1013);
+  const dots: BrushDot[] = [];
+  const maxAllowed = Math.min(MAX_SPRAY_DOTS_PER_MOVE, MAX_SPRAY_DOTS_PER_STROKE - currentCount);
+
+  for (let s = 0; s <= steps; s += 1) {
+    const t = steps === 0 ? 0 : s / steps;
+    const baseX = a.x + dx * t;
+    const baseY = a.y + dy * t;
+    for (let k = 0; k < dotsPerStep; k += 1) {
+      if (dots.length >= maxAllowed) return dots;
+      const angle = rand() * Math.PI * 2;
+      const rr = Math.sqrt(rand()) * radius;
+      const cx = baseX + Math.cos(angle) * rr;
+      const cy = baseY + Math.sin(angle) * rr;
+      const r = clampNumber(width * (0.11 + rand() * 0.22), 0.8, width * 0.5);
+      const alpha = clampNumber(opacity * (0.05 + rand() * 0.08), 0.01, 0.22);
+      dots.push({ cx, cy, r, alpha });
     }
   }
 
   return dots;
 }
 
-function buildCrayonDots(points: DrawPoint[], width: number, opacity: number, seed: number): BrushDot[] {
+function buildSprayDotsFromPoints(points: DrawPoint[], width: number, opacity: number, seed: number): BrushDot[] {
   if (points.length < 2) return [];
-  const rand = mulberry32(seed ^ 0x9e3779b9);
   const dots: BrushDot[] = [];
-  const radius = Math.max(3, width * 0.55);
-  const spacing = Math.max(5, width * 0.55);
-  const dotsPerStep = clampNumber(1 + Math.floor(width / 8), 1, 3);
-
   for (let i = 1; i < points.length; i += 1) {
-    const a = points[i - 1];
-    const b = points[i];
-    const dx = b.x - a.x;
-    const dy = b.y - a.y;
-    const dist = Math.hypot(dx, dy);
-    if (!Number.isFinite(dist) || dist <= 0) continue;
-    const steps = Math.max(1, Math.ceil(dist / spacing));
-    for (let s = 0; s <= steps; s += 1) {
-      const t = s / steps;
-      const baseX = a.x + dx * t;
-      const baseY = a.y + dy * t;
-      for (let k = 0; k < dotsPerStep; k += 1) {
-        const angle = rand() * Math.PI * 2;
-        const rr = Math.sqrt(rand()) * radius;
-        const cx = baseX + Math.cos(angle) * rr;
-        const cy = baseY + Math.sin(angle) * rr;
-        const r = Math.max(0.5, width * (0.04 + rand() * 0.08));
-        const alpha = clampNumber(opacity * (0.08 + rand() * 0.18), 0.02, 0.3);
-        dots.push({ cx, cy, r, alpha });
-      }
-    }
+    const segDots = buildSprayDotsForSegment(points[i - 1], points[i], width, opacity, seed, dots.length);
+    if (segDots.length > 0) dots.push(...segDots);
+    if (dots.length >= MAX_SPRAY_DOTS_PER_STROKE) break;
   }
-
   return dots;
 }
+
+function renderDrawStroke(stroke: DrawStroke, keySuffix: string) {
+  const brush = normalizeDrawBrush(stroke.brush);
+  const seed = fnv1aHash(stroke.id);
+  const baseStrokeColor = brush === 'eraser' ? stroke.color : applyOpacityToColor(stroke.color, stroke.opacity);
+
+  if (brush === 'spray') {
+    const preset = DRAW_BRUSH_PRESETS.spray;
+    const dots =
+      stroke.stamps ??
+      buildSprayDotsFromPoints(smoothPoints(stroke.points, preset.smoothing), stroke.width, stroke.opacity, seed);
+    return (
+      <React.Fragment key={`${stroke.id}-${keySuffix}`}>
+        {dots.map((d, i) => (
+          <Circle
+            key={`${stroke.id}-${keySuffix}-spr-${i}`}
+            cx={d.cx}
+            cy={d.cy}
+            r={d.r}
+            fill={applyOpacityToColor(stroke.color, d.alpha)}
+          />
+        ))}
+      </React.Fragment>
+    );
+  }
+
+  if (brush === 'crayon') {
+    const preset = DRAW_BRUSH_PRESETS.crayon;
+    const points = smoothPoints(stroke.points, preset.smoothing);
+    const rand = mulberry32(seed ^ 0x9e3779b9);
+    const dx1 = (rand() - 0.5) * 2.6;
+    const dy1 = (rand() - 0.5) * 2.6;
+    const dx2 = (rand() - 0.5) * 2.6;
+    const dy2 = (rand() - 0.5) * 2.6;
+    const d = buildSmoothSvgPath(points);
+    const main = applyOpacityToColor(stroke.color, clampNumber(stroke.opacity * 0.78, 0.02, 1));
+    const side = applyOpacityToColor(stroke.color, clampNumber(stroke.opacity * 0.42, 0.02, 1));
+
+    return (
+      <React.Fragment key={`${stroke.id}-${keySuffix}`}>
+        <Path d={d} stroke={main} strokeWidth={stroke.width} strokeLinecap="round" strokeLinejoin="round" fill="none" />
+        <Path
+          d={d}
+          stroke={side}
+          strokeWidth={stroke.width * 0.92}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="none"
+          transform={`translate(${dx1.toFixed(2)} ${dy1.toFixed(2)})`}
+        />
+        <Path
+          d={d}
+          stroke={side}
+          strokeWidth={stroke.width * 0.86}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="none"
+          transform={`translate(${dx2.toFixed(2)} ${dy2.toFixed(2)})`}
+        />
+      </React.Fragment>
+    );
+  }
+
+  if (brush === 'highlighter') {
+    const wide = applyOpacityToColor(stroke.color, clampNumber(stroke.opacity * 0.55, 0.02, 1));
+    const center = applyOpacityToColor(stroke.color, clampNumber(stroke.opacity * 0.28, 0.02, 1));
+    return (
+      <React.Fragment key={`${stroke.id}-${keySuffix}`}>
+        <Path
+          d={stroke.path}
+          stroke={wide}
+          strokeWidth={stroke.width * 1.35}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="none"
+        />
+        <Path
+          d={stroke.path}
+          stroke={center}
+          strokeWidth={stroke.width * 0.78}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="none"
+        />
+      </React.Fragment>
+    );
+  }
+
+  if (brush === 'marker') {
+    const bleed = applyOpacityToColor(stroke.color, clampNumber(stroke.opacity * 0.38, 0.02, 1));
+    return (
+      <React.Fragment key={`${stroke.id}-${keySuffix}`}>
+        <Path
+          d={stroke.path}
+          stroke={bleed}
+          strokeWidth={stroke.width * 1.18}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="none"
+        />
+        <Path
+          d={stroke.path}
+          stroke={baseStrokeColor}
+          strokeWidth={stroke.width}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          fill="none"
+        />
+      </React.Fragment>
+    );
+  }
+
+  return (
+    <Path
+      key={`${stroke.id}-${keySuffix}`}
+      d={stroke.path}
+      stroke={baseStrokeColor}
+      strokeWidth={stroke.width}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      fill="none"
+    />
+  );
+}
+
+const CommittedDrawLayer = React.memo(function CommittedDrawLayer({ strokes }: { strokes: DrawStroke[] }) {
+  return <>{strokes.map((stroke) => renderDrawStroke(stroke, 'c'))}</>;
+});
+
+const CurrentDrawLayer = React.memo(function CurrentDrawLayer({ stroke }: { stroke: DrawStroke | null }) {
+  if (!stroke) return null;
+  return <>{renderDrawStroke(stroke, 'l')}</>;
+});
 
 function clampNumber(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) return min;
@@ -690,6 +818,8 @@ export default function NotesScreen() {
   const editorPhotoGestureCountRef = useRef(0);
   const canvasTouchStartedOnPhotoRef = useRef(false);
   const editorTextInputRefs = useRef<Record<string, TextInput | null>>({});
+  const drawFrameRef = useRef<number | null>(null);
+  const drawStrokeRef = useRef<DrawStroke | null>(null);
 
   useEffect(() => {
     if (fontError) {
@@ -1167,47 +1297,90 @@ export default function NotesScreen() {
       y: Number(e.nativeEvent.locationY ?? 0),
     });
 
+    const scheduleStrokeUpdate = () => {
+      if (drawFrameRef.current !== null) return;
+      drawFrameRef.current = requestAnimationFrame(() => {
+        drawFrameRef.current = null;
+        const stroke = drawStrokeRef.current;
+        if (!stroke) {
+          setEditorCurrentStroke(null);
+          return;
+        }
+        setEditorCurrentStroke({ ...stroke });
+      });
+    };
+
     const startStroke = (p: DrawPoint) => {
       if (isTouchingPhotoRef.current) return;
       const points = [p];
-      const opacity = getBrushOpacity(editorToolMode, editorOpacity);
-      const width = getBrushStrokeWidth(editorToolMode, editorStrokeWidth);
-      const baseColor = editorToolMode === 'eraser' ? editorCanvasBackground : editorColor;
-      const path = buildBrushPath(points, editorToolMode);
-      setEditorCurrentStroke({
+      const brush = normalizeDrawBrush(editorToolMode);
+      const opacity = getBrushOpacity(brush, editorOpacity);
+      const width = getBrushStrokeWidth(brush, editorStrokeWidth);
+      const baseColor = brush === 'eraser' ? editorCanvasBackground : editorColor;
+      const path = buildBrushPath(points, brush);
+      const stroke: DrawStroke = {
         id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
         color: baseColor,
         width,
         opacity,
-        brush: editorToolMode,
+        brush,
         points,
         path,
-      });
+        stamps: brush === 'spray' ? [] : undefined,
+      };
+      drawStrokeRef.current = stroke;
+      setEditorCurrentStroke(stroke);
     };
 
     const addPoint = (p: DrawPoint) => {
       if (isTouchingPhotoRef.current) return;
-      setEditorCurrentStroke((current) => {
-        if (!current) return current;
-        const prev = current.points[current.points.length - 1] ?? null;
-        const preset = DRAW_BRUSH_PRESETS[current.brush] ?? DRAW_BRUSH_PRESETS.pencil;
-        if (!shouldAddDrawPoint(prev, p, preset.minPointDistance)) return current;
-        const nextPoints = [...current.points, p];
-        return {
-          ...current,
-          points: nextPoints,
-          path: buildBrushPath(nextPoints, current.brush),
-        };
-      });
+      const current = drawStrokeRef.current;
+      if (!current) return;
+      const prev = current.points[current.points.length - 1] ?? null;
+      const brush = normalizeDrawBrush(current.brush);
+      const preset = DRAW_BRUSH_PRESETS[brush] ?? DRAW_BRUSH_PRESETS.pencil;
+      if (!shouldAddDrawPoint(prev, p, preset.minPointDistance)) return;
+
+      const lastPoint = current.points[current.points.length - 1] ?? p;
+      current.points.push(p);
+      current.path = buildBrushPath(current.points, brush);
+      current.brush = brush;
+
+      if (brush === 'spray') {
+        const stamps = current.stamps ?? [];
+        const seed = fnv1aHash(current.id);
+        const newDots = buildSprayDotsForSegment(lastPoint, p, current.width, current.opacity, seed, stamps.length);
+        if (newDots.length > 0) {
+          stamps.push(...newDots);
+        }
+        current.stamps = stamps;
+      }
+
+      scheduleStrokeUpdate();
     };
 
     const endStroke = () => {
-      setEditorCurrentStroke((current) => {
-        if (!current) return current;
-        if (current.points.length < 2) return null;
-        setEditorStrokes((prev) => [...prev, current]);
-        return null;
-      });
+      if (drawFrameRef.current !== null) {
+        cancelAnimationFrame(drawFrameRef.current);
+        drawFrameRef.current = null;
+      }
+      const current = drawStrokeRef.current;
+      drawStrokeRef.current = null;
+      if (!current) {
+        setEditorCurrentStroke(null);
+        return;
+      }
+      if (current.points.length < 2) {
+        setEditorCurrentStroke(null);
+        return;
+      }
+      const finalized: DrawStroke = {
+        ...current,
+        points: [...current.points],
+        stamps: current.stamps ? [...current.stamps] : undefined,
+      };
+      setEditorStrokes((prev) => [...prev, finalized]);
+      setEditorCurrentStroke(null);
     };
 
     return PanResponder.create({
@@ -1244,6 +1417,8 @@ export default function NotesScreen() {
       },
     });
   }, [
+    drawFrameRef,
+    drawStrokeRef,
     editorActivePhotoId,
     editorCanvasBackground,
     editorCategory,
@@ -1843,178 +2018,8 @@ export default function NotesScreen() {
                   ))}
 
                   <Svg width="100%" height="100%" style={StyleSheet.absoluteFill} pointerEvents="none">
-                    {editorStrokes.map((stroke) => {
-                      const seed = fnv1aHash(stroke.id);
-                      const baseStrokeColor =
-                        stroke.brush === 'eraser' ? stroke.color : applyOpacityToColor(stroke.color, stroke.opacity);
-
-                      if (stroke.brush === 'spray') {
-                        const preset = DRAW_BRUSH_PRESETS.spray;
-                        const points = smoothPoints(stroke.points, preset.smoothing);
-                        const dots = buildSprayDots(points, stroke.width, stroke.opacity, seed);
-                        return (
-                          <React.Fragment key={stroke.id}>
-                            {dots.map((d, i) => (
-                              <Circle
-                                key={`${stroke.id}-spr-${i}`}
-                                cx={d.cx}
-                                cy={d.cy}
-                                r={d.r}
-                                fill={applyOpacityToColor(stroke.color, d.alpha)}
-                              />
-                            ))}
-                          </React.Fragment>
-                        );
-                      }
-
-                      if (stroke.brush === 'crayon') {
-                        const preset = DRAW_BRUSH_PRESETS.crayon;
-                        const points = smoothPoints(stroke.points, preset.smoothing);
-                        const dots = buildCrayonDots(points, stroke.width, stroke.opacity, seed);
-                        return (
-                          <React.Fragment key={stroke.id}>
-                            <Path
-                              d={stroke.path}
-                              stroke={baseStrokeColor}
-                              strokeWidth={stroke.width}
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              fill="none"
-                            />
-                            {dots.map((d, i) => (
-                              <Circle
-                                key={`${stroke.id}-cry-${i}`}
-                                cx={d.cx}
-                                cy={d.cy}
-                                r={d.r}
-                                fill={applyOpacityToColor(stroke.color, d.alpha)}
-                              />
-                            ))}
-                          </React.Fragment>
-                        );
-                      }
-
-                      if (stroke.brush === 'soft') {
-                        return (
-                          <React.Fragment key={stroke.id}>
-                            <Path
-                              d={stroke.path}
-                              stroke={applyOpacityToColor(stroke.color, Math.min(1, stroke.opacity * 0.22))}
-                              strokeWidth={stroke.width * 2.05}
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              fill="none"
-                            />
-                            <Path
-                              d={stroke.path}
-                              stroke={baseStrokeColor}
-                              strokeWidth={stroke.width}
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              fill="none"
-                            />
-                          </React.Fragment>
-                        );
-                      }
-
-                      return (
-                        <Path
-                          key={stroke.id}
-                          d={stroke.path}
-                          stroke={baseStrokeColor}
-                          strokeWidth={stroke.width}
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          fill="none"
-                        />
-                      );
-                    })}
-                    {editorCurrentStroke ? (() => {
-                      const stroke = editorCurrentStroke;
-                      const seed = fnv1aHash(stroke.id);
-                      const baseStrokeColor =
-                        stroke.brush === 'eraser' ? stroke.color : applyOpacityToColor(stroke.color, stroke.opacity);
-
-                      if (stroke.brush === 'spray') {
-                        const preset = DRAW_BRUSH_PRESETS.spray;
-                        const points = smoothPoints(stroke.points, preset.smoothing);
-                        const dots = buildSprayDots(points, stroke.width, stroke.opacity, seed);
-                        return (
-                          <>
-                            {dots.map((d, i) => (
-                              <Circle
-                                key={`${stroke.id}-spr-live-${i}`}
-                                cx={d.cx}
-                                cy={d.cy}
-                                r={d.r}
-                                fill={applyOpacityToColor(stroke.color, d.alpha)}
-                              />
-                            ))}
-                          </>
-                        );
-                      }
-
-                      if (stroke.brush === 'crayon') {
-                        const preset = DRAW_BRUSH_PRESETS.crayon;
-                        const points = smoothPoints(stroke.points, preset.smoothing);
-                        const dots = buildCrayonDots(points, stroke.width, stroke.opacity, seed);
-                        return (
-                          <>
-                            <Path
-                              d={stroke.path}
-                              stroke={baseStrokeColor}
-                              strokeWidth={stroke.width}
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              fill="none"
-                            />
-                            {dots.map((d, i) => (
-                              <Circle
-                                key={`${stroke.id}-cry-live-${i}`}
-                                cx={d.cx}
-                                cy={d.cy}
-                                r={d.r}
-                                fill={applyOpacityToColor(stroke.color, d.alpha)}
-                              />
-                            ))}
-                          </>
-                        );
-                      }
-
-                      if (stroke.brush === 'soft') {
-                        return (
-                          <>
-                            <Path
-                              d={stroke.path}
-                              stroke={applyOpacityToColor(stroke.color, Math.min(1, stroke.opacity * 0.22))}
-                              strokeWidth={stroke.width * 2.05}
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              fill="none"
-                            />
-                            <Path
-                              d={stroke.path}
-                              stroke={baseStrokeColor}
-                              strokeWidth={stroke.width}
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              fill="none"
-                            />
-                          </>
-                        );
-                      }
-
-                      return (
-                        <Path
-                          d={stroke.path}
-                          stroke={baseStrokeColor}
-                          strokeWidth={stroke.width}
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          fill="none"
-                        />
-                      );
-                    })() : null}
+                    <CommittedDrawLayer strokes={editorStrokes} />
+                    <CurrentDrawLayer stroke={editorCurrentStroke} />
                   </Svg>
                 </View>
 
@@ -2107,14 +2112,14 @@ export default function NotesScreen() {
                             <Text style={[s.toolChipText, editorToolMode === 'marker' && s.toolChipTextActive]}>Marcador</Text>
                           </Pressable>
                           <Pressable
-                            style={[s.toolChip, s.toolSubChip, editorToolMode === 'soft' && s.toolChipActive]}
+                            style={[s.toolChip, s.toolSubChip, editorToolMode === 'pen' && s.toolChipActive]}
                             onPress={() => {
-                              setEditorToolMode('soft');
-                              setEditorOpacity((prev) => (prev > 0.95 ? 0.7 : prev));
+                              setEditorToolMode('pen');
+                              setEditorOpacity((prev) => (prev > 0.95 ? 0.85 : prev));
                             }}
                             disabled={saving}
                           >
-                            <Text style={[s.toolChipText, editorToolMode === 'soft' && s.toolChipTextActive]}>Pluma suave</Text>
+                            <Text style={[s.toolChipText, editorToolMode === 'pen' && s.toolChipTextActive]}>Pluma</Text>
                           </Pressable>
                           <Pressable
                             style={[s.toolChip, s.toolSubChip, editorToolMode === 'spray' && s.toolChipActive]}
@@ -2135,6 +2140,16 @@ export default function NotesScreen() {
                             disabled={saving}
                           >
                             <Text style={[s.toolChipText, editorToolMode === 'crayon' && s.toolChipTextActive]}>Crayón</Text>
+                          </Pressable>
+                          <Pressable
+                            style={[s.toolChip, s.toolSubChip, editorToolMode === 'highlighter' && s.toolChipActive]}
+                            onPress={() => {
+                              setEditorToolMode('highlighter');
+                              setEditorOpacity((prev) => (prev > 0.6 ? 0.35 : prev));
+                            }}
+                            disabled={saving}
+                          >
+                            <Text style={[s.toolChipText, editorToolMode === 'highlighter' && s.toolChipTextActive]}>Resaltador</Text>
                           </Pressable>
                           <Pressable
                             style={[s.toolChip, s.toolSubChip, editorToolMode === 'eraser' && s.toolChipActive]}
@@ -2382,10 +2397,11 @@ export default function NotesScreen() {
                         ? {
                             backgroundColor: editorCanvasBackground,
                             strokes: strokesForSave.map((st) => ({
+                              id: st.id,
+                              brush: normalizeDrawBrush(st.brush),
                               color: st.color,
                               width: st.width,
                               opacity: st.opacity,
-                              brush: st.brush,
                               points: st.points,
                             })),
                             photos: editorPhotos,
