@@ -87,6 +87,27 @@ type DbNote = {
   updated_at: string;
 };
 
+type StoredDrawingData = {
+  version?: number;
+  backgroundColor?: string;
+  photos?: Array<{ uri?: string | null }>;
+  texts?: Array<{ text?: string | null }>;
+  stickers?: Array<{ sticker?: string | null }>;
+  strokes?: Array<unknown>;
+};
+
+type AlbumMemory = {
+  id: string;
+  authorLabel: string;
+  isMine: boolean;
+  dateLabel: string;
+  imageUri: string | null;
+  previewText: string;
+  cardTone: 'pink' | 'cream' | 'lilac';
+  backgroundColor: string;
+  kindLabel: 'Texto' | 'Foto' | 'Dibujo' | 'Mixta';
+};
+
 type DrawPoint = { x: number; y: number; t?: number; pressure?: number };
 type EditorToolMode =
   | 'pencil'
@@ -180,6 +201,69 @@ function fmtDate(iso: string): string {
   } catch {
     return '';
   }
+}
+
+function parseStoredDrawingData(raw: string | null): StoredDrawingData | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as StoredDrawingData;
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function getAlbumMemoryImageUri(note: DbNote, drawing: StoredDrawingData | null): string | null {
+  if (typeof note.image_url === 'string' && note.image_url.trim().length > 0) return note.image_url.trim();
+  const drawingPhoto = drawing?.photos?.find((item) => typeof item?.uri === 'string' && item.uri.trim().length > 0)?.uri?.trim();
+  return drawingPhoto ?? null;
+}
+
+function getAlbumMemoryPreviewText(note: DbNote, drawing: StoredDrawingData | null): string {
+  const content = note.content?.trim();
+  if (content) return content;
+
+  const drawingText = drawing?.texts?.map((item) => item?.text?.trim() ?? '').find((value) => value.length > 0);
+  if (drawingText) return drawingText;
+
+  const parts: string[] = [];
+  if ((drawing?.strokes?.length ?? 0) > 0) parts.push('dibujo');
+  if ((drawing?.photos?.length ?? 0) > 0) parts.push(drawing?.photos?.length === 1 ? 'foto' : 'fotos');
+  if ((drawing?.stickers?.length ?? 0) > 0) parts.push(drawing?.stickers?.length === 1 ? 'sticker' : 'stickers');
+  if ((drawing?.texts?.length ?? 0) > 0) parts.push('texto');
+  if (parts.length > 0) return `Nota con ${parts.join(', ')}.`;
+
+  return note.title?.trim() || 'Recuerdo guardado.';
+}
+
+function getAlbumMemoryKind(note: DbNote, drawing: StoredDrawingData | null, imageUri: string | null): AlbumMemory['kindLabel'] {
+  if (note.note_type === 'photo' || (!!imageUri && !drawing?.strokes?.length && !drawing?.texts?.length && !drawing?.stickers?.length)) {
+    return 'Foto';
+  }
+  if ((drawing?.strokes?.length ?? 0) > 0) return 'Dibujo';
+  if ((drawing?.photos?.length ?? 0) > 0 || (drawing?.texts?.length ?? 0) > 0 || (drawing?.stickers?.length ?? 0) > 0) return 'Mixta';
+  return 'Texto';
+}
+
+function buildAlbumMemories(notes: DbNote[], userId: string | null, partnerName: string): AlbumMemory[] {
+  return notes.map((note, index) => {
+    const drawing = parseStoredDrawingData(note.drawing_data);
+    const imageUri = getAlbumMemoryImageUri(note, drawing);
+    const kindLabel = getAlbumMemoryKind(note, drawing, imageUri);
+    const isMine = !!userId && note.created_by === userId;
+
+    return {
+      id: note.id,
+      authorLabel: isMine ? 'Tú' : partnerName,
+      isMine,
+      dateLabel: fmtDate(note.created_at),
+      imageUri,
+      previewText: getAlbumMemoryPreviewText(note, drawing),
+      cardTone: (['pink', 'cream', 'lilac'] as const)[index % 3],
+      backgroundColor: drawing?.backgroundColor || (index % 2 === 0 ? '#FFF2F7' : '#FFF8EE'),
+      kindLabel,
+    };
+  });
 }
 
 function shouldAddDrawPoint(prev: DrawPoint | null, next: DrawPoint, minDistance: number, maxDistance = 75): boolean {
@@ -1057,6 +1141,8 @@ export default function NotesScreen() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
+  const [albumError, setAlbumError] = useState<string | null>(null);
+  const [albumLoading, setAlbumLoading] = useState(false);
   const [hasCouple, setHasCouple] = useState(true);
   const [showAlbum, setShowAlbum] = useState(false);
   const [mainCardPhotoUri, setMainCardPhotoUri] = useState<string | null>(null);
@@ -1109,7 +1195,7 @@ export default function NotesScreen() {
     }
   }, [fontError]);
 
-  const fetchNotes = useCallback(async (cid: string) => {
+  const fetchNotes = useCallback(async (cid: string, context: 'default' | 'album' = 'default') => {
     try {
       const { data, error } = await supabase
         .from('notes')
@@ -1118,14 +1204,27 @@ export default function NotesScreen() {
         .order('created_at', { ascending: false });
 
       if (error) {
-        setInitError('No se pudieron cargar las notas.');
-        return;
+        if (context === 'album') {
+          setAlbumError('No se pudieron cargar los recuerdos.');
+        } else {
+          setInitError('No se pudieron cargar las notas.');
+        }
+        return false;
       }
 
       setNotes(data ?? []);
+      if (context === 'album') {
+        setAlbumError(null);
+      }
+      return true;
     } catch (error) {
       console.log('[Notas] fetchNotes error', error);
-      setInitError('No se pudieron cargar las notas.');
+      if (context === 'album') {
+        setAlbumError('No se pudieron cargar los recuerdos.');
+      } else {
+        setInitError('No se pudieron cargar las notas.');
+      }
+      return false;
     }
   }, []);
 
@@ -1217,6 +1316,14 @@ export default function NotesScreen() {
   const handleUnavailableTool = useCallback(() => {
     Alert.alert('Notas', 'Muy pronto podrás usar esta opción.');
   }, []);
+
+  const handleOpenAlbum = useCallback(async () => {
+    setShowAlbum(true);
+    if (!coupleId) return;
+    setAlbumLoading(true);
+    await fetchNotes(coupleId, 'album');
+    setAlbumLoading(false);
+  }, [coupleId, fetchNotes]);
 
   const handleClearNote = useCallback(() => {
     setNoteText('');
@@ -2210,8 +2317,9 @@ export default function NotesScreen() {
   const displayedMainPhotoUri = mainCardPhotoUri;
   const hasMainTextDraft = noteText.trim().length > 0;
   const shouldShowMainPhotoPreview = !noteText.trim() && !!displayedMainPhotoUri;
-  const albumNotes = useMemo(() => notes, [notes]);
-  const [leftTopNote, leftBottomNote, rightTopNote, rightMiddleNote, rightBottomNote] = albumNotes.slice(0, 5);
+  const albumMemories = useMemo(() => buildAlbumMemories(notes, userId, partnerName), [notes, partnerName, userId]);
+  const leftPageMemories = useMemo(() => albumMemories.filter((_, index) => index % 2 === 0), [albumMemories]);
+  const rightPageMemories = useMemo(() => albumMemories.filter((_, index) => index % 2 === 1), [albumMemories]);
 
   if (loading) {
     return (
@@ -2312,7 +2420,7 @@ export default function NotesScreen() {
               </View>
             </View>
 
-            <Pressable style={s.albumHeroCard} onPress={() => setShowAlbum(true)}>
+            <Pressable style={s.albumHeroCard} onPress={handleOpenAlbum}>
               <View style={s.albumSpine} />
               <View style={s.albumSpineShadow} />
               <View style={s.albumSpineInner} />
@@ -2343,7 +2451,7 @@ export default function NotesScreen() {
                   <Text style={s.albumHeroTitle}>Álbum</Text>
                   <Text style={s.albumHeroSubtitle}>Tus recuerdos juntos ♡</Text>
                 </View>
-                <Pressable style={s.albumCtaButton} onPress={() => setShowAlbum(true)}>
+                <Pressable style={s.albumCtaButton} onPress={handleOpenAlbum}>
                   <Text style={s.albumCtaText}>Abrir recuerdos  ›</Text>
                 </Pressable>
               </View>
@@ -2931,38 +3039,46 @@ export default function NotesScreen() {
                 <View style={s.openBookShadow} />
                 <View style={s.openBookPageLeft}>
                   <View style={s.openBookPageGlow} />
-                  <View style={[s.scrapPolaroid, s.scrapPolaroidLeft]}>
-                    <View style={s.scrapTapeLeft} />
-                    {leftTopNote?.image_url ? (
-                      <Image source={{ uri: leftTopNote.image_url }} style={s.scrapPolaroidImage} resizeMode="cover" />
-                    ) : (
-                      <View style={s.scrapPolaroidPlaceholder}>
-                        <ImageIcon size={24} color={'#D49AB2'} />
-                      </View>
-                    )}
-                    <Text style={s.scrapPolaroidCaption}>
-                      {leftTopNote ? fmtDate(leftTopNote.created_at) : 'Espacio para foto'}
-                    </Text>
-                  </View>
-
-                  <View style={[s.scrapNoteCard, s.scrapNoteCardLeft]}>
-                    <View style={s.scrapNoteDots}>
-                      <View style={s.scrapDot} />
-                      <View style={s.scrapDot} />
-                      <View style={s.scrapDot} />
-                    </View>
-                    <Text style={s.scrapAuthor}>{leftBottomNote ? (leftBottomNote.created_by === userId ? 'Tú' : partnerName) : 'Recuerdo'}</Text>
-                    <Text style={s.scrapBodyText} numberOfLines={6}>
-                      {leftBottomNote?.content?.trim() || leftBottomNote?.title || 'Guarden aquí sus palabras más bonitas.'}
-                    </Text>
-                    <Text style={s.scrapDateText}>
-                      {leftBottomNote ? fmtDate(leftBottomNote.created_at) : 'Para ustedes dos'}
-                    </Text>
-                  </View>
-
-                  <View style={s.scrapHeartSticker}>
-                    <Heart size={16} color={'#D17399'} strokeWidth={1.8} />
-                  </View>
+                  {albumMemories.length > 0 ? (
+                    <ScrollView style={s.albumPageScroll} contentContainerStyle={s.albumPageContent} showsVerticalScrollIndicator={false}>
+                      {leftPageMemories.map((memory) => (
+                        <View
+                          key={memory.id}
+                          style={[
+                            s.albumCard,
+                            memory.cardTone === 'pink'
+                              ? s.albumCardPink
+                              : memory.cardTone === 'cream'
+                                ? s.albumCardCream
+                                : s.albumCardLilac,
+                          ]}
+                        >
+                          <View style={s.albumCardTop}>
+                            <View style={[s.authorBadge, memory.isMine ? s.authorBadgeMine : s.authorBadgePartner]}>
+                              <Text style={[s.authorBadgeText, memory.isMine ? s.authorBadgeTextMine : s.authorBadgeTextPartner]}>
+                                {memory.authorLabel}
+                              </Text>
+                            </View>
+                            <View style={s.timeRow}>
+                              <Heart size={12} color="#D17399" strokeWidth={1.8} />
+                              <Text style={s.timeText}>{memory.dateLabel}</Text>
+                            </View>
+                          </View>
+                          {memory.imageUri ? (
+                            <Image source={{ uri: memory.imageUri }} style={s.albumMemoryImage} resizeMode="cover" />
+                          ) : (
+                            <View style={[s.albumMemoryPreview, { backgroundColor: memory.backgroundColor }]}>
+                              <Text style={s.albumMemoryPreviewLabel}>{memory.kindLabel}</Text>
+                            </View>
+                          )}
+                          <Text style={s.albumMemoryKind}>{memory.kindLabel}</Text>
+                          <Text style={s.albumCardText} numberOfLines={memory.imageUri ? 5 : 7}>
+                            {memory.previewText}
+                          </Text>
+                        </View>
+                      ))}
+                    </ScrollView>
+                  ) : null}
                 </View>
 
                 <View style={s.openBookBinding}>
@@ -2976,36 +3092,79 @@ export default function NotesScreen() {
 
                 <View style={s.openBookPageRight}>
                   <View style={s.openBookPageGlowRight} />
-                  <View style={[s.scrapPolaroid, s.scrapPolaroidRight]}>
-                    <View style={s.scrapTapeRight} />
-                    {rightTopNote?.image_url ? (
-                      <Image source={{ uri: rightTopNote.image_url }} style={s.scrapPolaroidImage} resizeMode="cover" />
-                    ) : (
-                      <View style={s.scrapPolaroidPlaceholder}>
-                        <Heart size={22} color={'#D49AB2'} strokeWidth={1.8} />
-                      </View>
-                    )}
-                    <Text style={s.scrapPolaroidCaption}>
-                      {rightTopNote ? fmtDate(rightTopNote.created_at) : 'Nuestro momento'}
-                    </Text>
-                  </View>
-
-                  <View style={s.scrapStickyNote}>
-                    <Text style={s.scrapStickyTitle}>
-                      {rightMiddleNote ? (rightMiddleNote.created_by === userId ? 'Tú' : partnerName) : 'Nota dulce'}
-                    </Text>
-                    <Text style={s.scrapStickyBody} numberOfLines={5}>
-                      {rightMiddleNote?.content?.trim() || rightMiddleNote?.title || 'Aquí aparecerán sus recuerdos especiales.'}
-                    </Text>
-                  </View>
-
-                  <View style={[s.scrapNoteCard, s.scrapNoteCardRight]}>
-                    <Text style={s.scrapAuthor}>{rightBottomNote ? fmtDate(rightBottomNote.created_at) : 'Álbum'}</Text>
-                    <Text style={s.scrapBodyText} numberOfLines={4}>
-                      {rightBottomNote?.content?.trim() || rightBottomNote?.title || 'Aún no hay recuerdos guardados en esta página.'}
-                    </Text>
-                  </View>
+                  {albumMemories.length > 0 ? (
+                    <ScrollView style={s.albumPageScroll} contentContainerStyle={s.albumPageContent} showsVerticalScrollIndicator={false}>
+                      {rightPageMemories.map((memory) => (
+                        <View
+                          key={memory.id}
+                          style={[
+                            s.albumCard,
+                            memory.cardTone === 'pink'
+                              ? s.albumCardPink
+                              : memory.cardTone === 'cream'
+                                ? s.albumCardCream
+                                : s.albumCardLilac,
+                          ]}
+                        >
+                          <View style={s.albumCardTop}>
+                            <View style={[s.authorBadge, memory.isMine ? s.authorBadgeMine : s.authorBadgePartner]}>
+                              <Text style={[s.authorBadgeText, memory.isMine ? s.authorBadgeTextMine : s.authorBadgeTextPartner]}>
+                                {memory.authorLabel}
+                              </Text>
+                            </View>
+                            <View style={s.timeRow}>
+                              <Heart size={12} color="#D17399" strokeWidth={1.8} />
+                              <Text style={s.timeText}>{memory.dateLabel}</Text>
+                            </View>
+                          </View>
+                          {memory.imageUri ? (
+                            <Image source={{ uri: memory.imageUri }} style={s.albumMemoryImage} resizeMode="cover" />
+                          ) : (
+                            <View style={[s.albumMemoryPreview, { backgroundColor: memory.backgroundColor }]}>
+                              <Text style={s.albumMemoryPreviewLabel}>{memory.kindLabel}</Text>
+                            </View>
+                          )}
+                          <Text style={s.albumMemoryKind}>{memory.kindLabel}</Text>
+                          <Text style={s.albumCardText} numberOfLines={memory.imageUri ? 5 : 7}>
+                            {memory.previewText}
+                          </Text>
+                        </View>
+                      ))}
+                    </ScrollView>
+                  ) : null}
                 </View>
+
+                {albumLoading ? (
+                  <View style={s.emptyAlbumState}>
+                    <View style={s.emptyAlbumBadge}>
+                      <ActivityIndicator size="small" color={PINK_STRONG} />
+                    </View>
+                    <View style={s.emptyAlbumCard}>
+                      <Text style={s.emptyAlbumTitle}>Cargando recuerdos...</Text>
+                      <Text style={s.emptyAlbumText}>Estamos preparando sus notas guardadas.</Text>
+                    </View>
+                  </View>
+                ) : albumError ? (
+                  <View style={s.emptyAlbumState}>
+                    <View style={s.emptyAlbumBadge}>
+                      <Heart size={22} color={PINK_STRONG} strokeWidth={1.8} />
+                    </View>
+                    <View style={s.emptyAlbumCard}>
+                      <Text style={s.emptyAlbumTitle}>No se pudieron cargar los recuerdos.</Text>
+                      <Text style={s.emptyAlbumText}>Inténtalo de nuevo en unos segundos.</Text>
+                    </View>
+                  </View>
+                ) : albumMemories.length === 0 ? (
+                  <View style={s.emptyAlbumState}>
+                    <View style={s.emptyAlbumBadge}>
+                      <Heart size={22} color={PINK_STRONG} strokeWidth={1.8} />
+                    </View>
+                    <View style={s.emptyAlbumCard}>
+                      <Text style={s.emptyAlbumTitle}>Álbum</Text>
+                      <Text style={s.emptyAlbumText}>Aún no hay recuerdos guardados en esta página.</Text>
+                    </View>
+                  </View>
+                ) : null}
               </View>
             </View>
           </View>
@@ -5015,6 +5174,14 @@ const s = StyleSheet.create({
     marginTop: 16,
     gap: 14,
   },
+  albumPageScroll: {
+    flex: 1,
+  },
+  albumPageContent: {
+    paddingTop: 14,
+    paddingBottom: 48,
+    gap: 14,
+  },
   albumCard: {
     borderRadius: 24,
     padding: 18,
@@ -5071,6 +5238,33 @@ const s = StyleSheet.create({
   timeText: {
     color: TEXT_SOFT,
     fontSize: 12,
+  },
+  albumMemoryImage: {
+    width: '100%',
+    height: 152,
+    borderRadius: 18,
+    marginBottom: 12,
+  },
+  albumMemoryPreview: {
+    width: '100%',
+    minHeight: 92,
+    borderRadius: 18,
+    marginBottom: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 18,
+  },
+  albumMemoryPreviewLabel: {
+    color: '#B2547C',
+    fontSize: 15,
+    fontWeight: '700',
+  },
+  albumMemoryKind: {
+    color: '#B2547C',
+    fontSize: 12,
+    fontWeight: '700',
+    marginBottom: 8,
   },
   albumCardText: {
     color: TEXT,
