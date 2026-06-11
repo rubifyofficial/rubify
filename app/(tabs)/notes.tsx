@@ -388,14 +388,14 @@ function clampMemoryPieceLayout(layout: MemoryPieceLayout, pageWidth: number, pa
 
 function getSpreadPageLayouts(side: 'left' | 'right', pageWidth: number, pageHeight: number): MemoryPieceLayout[] {
   const leftLayouts: MemoryPieceLayout[] = [
-    { x: pageWidth * 0.06, y: pageHeight * 0.11, w: 90, h: 90, rotate: '-4deg' },
-    { x: pageWidth * 0.34, y: pageHeight * 0.13, w: 126, h: 156, rotate: '2.8deg' },
-    { x: pageWidth * 0.08, y: pageHeight * 0.63, w: 118, h: 112, rotate: '-2deg' },
+    { x: pageWidth * 0.07, y: pageHeight * 0.1, w: 88, h: 84, rotate: '-5deg' },
+    { x: pageWidth * 0.36, y: pageHeight * 0.11, w: 122, h: 156, rotate: '3deg' },
+    { x: pageWidth * 0.08, y: pageHeight * 0.58, w: 126, h: 110, rotate: '-2.4deg' },
   ];
   const rightLayouts: MemoryPieceLayout[] = [
-    { x: pageWidth * 0.33, y: pageHeight * 0.1, w: 120, h: 140, rotate: '3deg' },
-    { x: pageWidth * 0.12, y: pageHeight * 0.36, w: 112, h: 128, rotate: '-2.2deg' },
-    { x: pageWidth * 0.11, y: pageHeight * 0.69, w: 124, h: 96, rotate: '1.6deg' },
+    { x: pageWidth * 0.34, y: pageHeight * 0.08, w: 120, h: 145, rotate: '3.2deg' },
+    { x: pageWidth * 0.1, y: pageHeight * 0.34, w: 110, h: 132, rotate: '-2.6deg' },
+    { x: pageWidth * 0.12, y: pageHeight * 0.67, w: 120, h: 92, rotate: '1.8deg' },
   ];
   const source = side === 'left' ? leftLayouts : rightLayouts;
   return source.map((layout) => clampMemoryPieceLayout(layout, pageWidth, pageHeight));
@@ -420,6 +420,20 @@ function getMemoryPaperTone(item: AlbumEntry): string {
   if (item.type === 'text') return item.isMine ? '#FFF7F1' : '#FFF2F7';
   if (item.type === 'drawing') return '#FFF9F1';
   return '#FFFDF8';
+}
+
+type MemoryAttachment = 'tape' | 'double_tape' | 'clip';
+
+function getMemoryAttachment(item: AlbumEntry, seed: number): MemoryAttachment {
+  if (item.type === 'photo') return seed % 2 === 0 ? 'double_tape' : 'tape';
+  if (item.type === 'drawing') return seed % 3 === 0 ? 'tape' : 'clip';
+  return seed % 4 === 0 ? 'clip' : 'tape';
+}
+
+function getSeededRotate(rotate: string, seed: number): string {
+  const base = Number.parseFloat(rotate.replace('deg', ''));
+  const jitter = ((seed % 9) - 4) * 0.35;
+  return `${base + jitter}deg`;
 }
 
 function shouldAddDrawPoint(prev: DrawPoint | null, next: DrawPoint, minDistance: number, maxDistance = 75): boolean {
@@ -3342,7 +3356,30 @@ function getLegacyMemoryPieceLayout(item: AlbumEntry, slot: AlbumSlot): MemoryPi
   };
 }
 
-function TapePiece({ seed }: { seed: number }) {
+function TapePiece({ seed, variant = 'single' }: { seed: number; variant?: 'single' | 'double' }) {
+  if (variant === 'double') {
+    return (
+      <>
+        <View
+          pointerEvents="none"
+          style={[
+            s.tapePieceBase,
+            s.tapePieceTopLeft,
+            { transform: [{ rotate: seed % 2 === 0 ? '-12deg' : '-8deg' }] },
+          ]}
+        />
+        <View
+          pointerEvents="none"
+          style={[
+            s.tapePieceBase,
+            s.tapePieceTopRight,
+            { transform: [{ rotate: seed % 2 === 0 ? '9deg' : '12deg' }] },
+          ]}
+        />
+      </>
+    );
+  }
+
   return (
     <View
       pointerEvents="none"
@@ -3352,6 +3389,14 @@ function TapePiece({ seed }: { seed: number }) {
         { transform: [{ translateX: -22 }, { rotate: seed % 2 === 0 ? '-7deg' : '5deg' }] },
       ]}
     />
+  );
+}
+
+function PaperClip({ side = 'right' }: { side?: 'left' | 'right' }) {
+  return (
+    <View style={[s.paperClip, side === 'left' ? s.paperClipLeft : s.paperClipRight]} pointerEvents="none">
+      <View style={s.paperClipInner} />
+    </View>
   );
 }
 
@@ -3386,18 +3431,20 @@ function PolaroidPiece({
   seed,
   caption,
   fontsLoaded,
+  attachment,
 }: {
   item: AlbumEntry;
   seed: number;
   caption: string;
   fontsLoaded: boolean;
+  attachment: MemoryAttachment;
 }) {
   const [imageFailed, setImageFailed] = useState(false);
   const imageUri = item.previewImage || item.photoUrl || item.drawingUrl;
 
   return (
     <View style={s.polaroidWrap}>
-      <TapePiece seed={seed} />
+      {attachment === 'clip' ? <PaperClip side={seed % 2 === 0 ? 'left' : 'right'} /> : <TapePiece seed={seed} variant={attachment === 'double_tape' ? 'double' : 'single'} />}
       <View style={s.polaroidShadow} pointerEvents="none" />
       <View style={s.polaroidFrame}>
         <View style={s.polaroidPhotoArea}>
@@ -3429,18 +3476,20 @@ function NotePaperPiece({
   caption,
   fontsLoaded,
   seed,
+  attachment,
 }: {
   item: AlbumEntry;
   caption: string;
   fontsLoaded: boolean;
   seed: number;
+  attachment: MemoryAttachment;
 }) {
   const previewText = item.text?.trim() ? truncateText(item.text, 92) : 'Recuerdo';
   const stampLabel = item.createdAt ? caption : '♡';
 
   return (
     <View style={s.notePaperWrap}>
-      <TapePiece seed={seed} />
+      {attachment === 'clip' ? <PaperClip side={seed % 2 === 0 ? 'left' : 'right'} /> : <TapePiece seed={seed} variant={attachment === 'double_tape' ? 'double' : 'single'} />}
       <View style={[s.notePaperCard, { backgroundColor: getMemoryPaperTone(item) }]}>
         <Text style={s.notePaperStamp} numberOfLines={1}>
           ♡
@@ -3471,20 +3520,20 @@ function DrawingPiece({
   caption,
   seed,
   fontsLoaded,
+  attachment,
 }: {
   item: AlbumEntry;
   caption: string;
   seed: number;
   fontsLoaded: boolean;
+  attachment: MemoryAttachment;
 }) {
   const [imageFailed, setImageFailed] = useState(false);
-  const imageUri = item.previewImage || item.drawingUrl;
+  const imageUri = item.previewImage || item.photoUrl || item.drawingUrl;
 
   return (
     <View style={s.drawingWrap}>
-      <View style={s.paperClip} pointerEvents="none">
-        <View style={s.paperClipInner} />
-      </View>
+      {attachment === 'clip' ? <PaperClip side={seed % 2 === 0 ? 'right' : 'left'} /> : <TapePiece seed={seed} variant="single" />}
       <View style={[s.drawingCard, { backgroundColor: getMemoryPaperTone(item) || item.backgroundColor || '#FFF8EE' }]}>
         {imageUri && !imageFailed ? (
           <Image source={{ uri: imageUri }} style={s.drawingImage} resizeMode="cover" onError={() => setImageFailed(true)} />
@@ -3533,6 +3582,8 @@ const MemoryPiece = React.memo(function MemoryPiece(props: MemoryPieceProps) {
   const isTextPiece = item.type === 'text' && !previewImage;
   const caption = getMemoryCaption(item);
   const seed = fnv1aHash(item.id);
+  const attachment = getMemoryAttachment(item, seed);
+  const pieceZIndex = isPhotoPiece ? 4 : isTextPiece ? 2 : 3;
 
   return (
     <TouchableOpacity
@@ -3545,16 +3596,17 @@ const MemoryPiece = React.memo(function MemoryPiece(props: MemoryPieceProps) {
           top: layout.y,
           width: layout.w,
           height: layout.h,
-          transform: [{ rotate: layout.rotate }],
+          zIndex: pieceZIndex,
+          transform: [{ rotate: getSeededRotate(layout.rotate, seed) }],
         },
       ]}
     >
       {isPhotoPiece ? (
-        <PolaroidPiece item={item} seed={seed} caption={caption} fontsLoaded={props.fontsLoaded} />
+        <PolaroidPiece item={item} seed={seed} caption={caption} fontsLoaded={props.fontsLoaded} attachment={attachment} />
       ) : isTextPiece ? (
-        <NotePaperPiece item={item} caption={caption} fontsLoaded={props.fontsLoaded} seed={seed} />
+        <NotePaperPiece item={item} caption={caption} fontsLoaded={props.fontsLoaded} seed={seed} attachment={attachment} />
       ) : (
-        <DrawingPiece item={item} caption={caption} seed={seed} fontsLoaded={props.fontsLoaded} />
+        <DrawingPiece item={item} caption={caption} seed={seed} fontsLoaded={props.fontsLoaded} attachment={attachment} />
       )}
     </TouchableOpacity>
   );
@@ -5660,6 +5712,14 @@ const s = StyleSheet.create({
     top: -7,
     left: '50%',
   },
+  tapePieceTopLeft: {
+    top: -6,
+    left: 10,
+  },
+  tapePieceTopRight: {
+    top: -6,
+    right: 10,
+  },
   tapePieceCorner: {
     top: 8,
     right: 10,
@@ -5711,8 +5771,8 @@ const s = StyleSheet.create({
     backgroundColor: '#F7DCE8',
   },
   polaroidPlaceholderInner: {
-    width: '72%',
-    height: '62%',
+    width: '64%',
+    height: '54%',
     borderRadius: 4,
     borderWidth: 1,
     borderColor: 'rgba(120, 70, 45, 0.08)',
@@ -5745,7 +5805,6 @@ const s = StyleSheet.create({
   paperClip: {
     position: 'absolute',
     top: 2,
-    right: 14,
     width: 15,
     height: 24,
     borderTopLeftRadius: 7,
@@ -5756,6 +5815,12 @@ const s = StyleSheet.create({
     borderColor: 'rgba(129, 108, 118, 0.6)',
     backgroundColor: 'transparent',
     zIndex: 3,
+  },
+  paperClipLeft: {
+    left: 12,
+  },
+  paperClipRight: {
+    right: 14,
   },
   paperClipInner: {
     position: 'absolute',
