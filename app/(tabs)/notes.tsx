@@ -10,6 +10,7 @@ import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import {
   Brush,
+  Check,
   ChevronLeft,
   Eraser,
   Heart,
@@ -1058,6 +1059,8 @@ export default function NotesScreen() {
   const [initError, setInitError] = useState<string | null>(null);
   const [hasCouple, setHasCouple] = useState(true);
   const [showAlbum, setShowAlbum] = useState(false);
+  const [mainCardPhotoUri, setMainCardPhotoUri] = useState<string | null>(null);
+  const [isMainPhotoSheetOpen, setIsMainPhotoSheetOpen] = useState(false);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [editorText, setEditorText] = useState('');
   const [editorCategory, setEditorCategory] = useState<EditorCategory>('pen');
@@ -1217,14 +1220,23 @@ export default function NotesScreen() {
 
   const handleClearNote = useCallback(() => {
     setNoteText('');
+    setMainCardPhotoUri(null);
+  }, []);
+
+  const handleMainNoteTextChange = useCallback((value: string) => {
+    if (value.trim().length > 0) {
+      setMainCardPhotoUri(null);
+    }
+    setNoteText(value);
   }, []);
 
   const uploadNotePhoto = useCallback(async (photo: EditorPhotoElement, cid: string, uid: string) => {
     const response = await fetch(photo.uri);
     const arrayBuffer = await response.arrayBuffer();
-    const filePath = `${cid}/${uid}/note-photo-${Date.now()}-${photo.id}.jpg`;
+    const filePath = `${uid}/${cid}/note-photo-${Date.now()}-${photo.id}.jpg`;
+    const bucketName = 'notes';
 
-    const { error: uploadError } = await supabase.storage.from('notes').upload(filePath, arrayBuffer, {
+    const { error: uploadError } = await supabase.storage.from(bucketName).upload(filePath, arrayBuffer, {
       contentType: 'image/jpeg',
       upsert: true,
     });
@@ -1233,12 +1245,62 @@ export default function NotesScreen() {
       throw uploadError;
     }
 
-    const { data: publicData } = supabase.storage.from('notes').getPublicUrl(filePath);
+    const { data: publicData } = supabase.storage.from(bucketName).getPublicUrl(filePath);
     const publicUrl = publicData?.publicUrl ?? null;
+
     if (!publicUrl) {
       throw new Error('No se pudo obtener la URL pública');
     }
     return publicUrl;
+  }, []);
+
+  const pickSingleImageFromLibrary = useCallback(async (): Promise<string | null> => {
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permiso necesario', 'Permiso necesario para elegir una foto de la galería.');
+        return null;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        quality: 0.9,
+      });
+
+      if (result.canceled) return null;
+      const asset = result.assets?.[0] ?? null;
+      const uri = asset?.uri ?? null;
+      return uri;
+    } catch (e) {
+      console.log('[Notas] pick photo error', e);
+      Alert.alert('Error', 'No se pudo abrir la galería.');
+      return null;
+    }
+  }, []);
+
+  const takeSinglePhotoWithCamera = useCallback(async (): Promise<string | null> => {
+    try {
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permiso necesario', 'Permiso necesario para usar la cámara.');
+        return null;
+      }
+
+      const result = await ImagePicker.launchCameraAsync({
+        allowsEditing: true,
+        quality: 0.9,
+      });
+
+      if (result.canceled) return null;
+      const asset = result.assets?.[0] ?? null;
+      const uri = asset?.uri ?? null;
+      return uri;
+    } catch (e) {
+      console.log('[Notas] camera photo error', e);
+      Alert.alert('Error', 'No se pudo abrir la cámara.');
+      return null;
+    }
   }, []);
 
   const handleSaveNote = useCallback(
@@ -1777,51 +1839,16 @@ export default function NotesScreen() {
   );
 
   const pickEditorPhotoFromLibrary = useCallback(async () => {
-    try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permiso necesario', 'Permiso necesario para elegir una foto de la galería');
-        return;
-      }
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
-        quality: 0.9,
-      });
-
-      if (result.canceled) return;
-      const uri = result.assets?.[0]?.uri ?? null;
-      if (!uri) return;
-      addEditorPhoto(uri);
-    } catch (e) {
-      console.log('[Notas] pick photo error', e);
-      Alert.alert('Error', 'No se pudo abrir la galería');
-    }
-  }, [addEditorPhoto]);
+    const uri = await pickSingleImageFromLibrary();
+    if (!uri) return;
+    addEditorPhoto(uri);
+  }, [addEditorPhoto, pickSingleImageFromLibrary]);
 
   const takeEditorPhotoWithCamera = useCallback(async () => {
-    try {
-      const { status } = await ImagePicker.requestCameraPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permiso necesario', 'Permiso necesario para usar la cámara');
-        return;
-      }
-
-      const result = await ImagePicker.launchCameraAsync({
-        allowsEditing: true,
-        quality: 0.9,
-      });
-
-      if (result.canceled) return;
-      const uri = result.assets?.[0]?.uri ?? null;
-      if (!uri) return;
-      addEditorPhoto(uri);
-    } catch (e) {
-      console.log('[Notas] camera photo error', e);
-      Alert.alert('Error', 'No se pudo abrir la cámara');
-    }
-  }, [addEditorPhoto]);
+    const uri = await takeSinglePhotoWithCamera();
+    if (!uri) return;
+    addEditorPhoto(uri);
+  }, [addEditorPhoto, takeSinglePhotoWithCamera]);
 
   const handleEditorFotoPress = useCallback(() => {
     setIsEditorPhotoSheetOpen(true);
@@ -1834,6 +1861,142 @@ export default function NotesScreen() {
   const handleEditorPhotoSheetPick = useCallback(async () => {
     await pickEditorPhotoFromLibrary();
   }, [pickEditorPhotoFromLibrary]);
+
+  const handleSaveMainPhotoNote = useCallback(
+    async (uri: string) => {
+      if (!userId) {
+        Alert.alert('Error', 'Usuario no encontrado.');
+        return;
+      }
+      if (!coupleId) {
+        Alert.alert('Notas', 'Necesitas estar conectado con tu pareja para guardar fotos.');
+        return;
+      }
+
+      setSaving(true);
+      setMainCardPhotoUri(uri);
+      setNoteText('');
+
+      try {
+        const uploadedUrl = await uploadNotePhoto(
+          {
+            id: `main-photo-${Date.now()}`,
+            uri,
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 0,
+            scale: 1,
+            rotation: 0,
+          },
+          coupleId,
+          userId
+        );
+
+        const payload = {
+          couple_id: coupleId,
+          created_by: userId,
+          title: 'Foto',
+          content: null,
+          note_type: 'photo',
+          is_shared: true,
+          image_url: uploadedUrl,
+          drawing_data: null,
+        };
+
+        const { error: insertError } = await supabase.from('notes').insert(payload);
+
+        if (insertError) {
+          throw insertError;
+        }
+
+        setMainCardPhotoUri(uploadedUrl);
+        await fetchNotes(coupleId);
+      } catch (error) {
+        console.log('[Notas] handleSaveMainPhotoNote error', error);
+        setMainCardPhotoUri(null);
+        Alert.alert('Notas', 'No se pudo guardar la foto. Inténtalo de nuevo.');
+      } finally {
+        setSaving(false);
+      }
+    },
+    [coupleId, fetchNotes, uploadNotePhoto, userId]
+  );
+
+  const handleSaveMainTextNote = useCallback(async () => {
+    const normalizedText = noteText.trim();
+    if (!normalizedText) {
+      handleOpenEditor();
+      return;
+    }
+    if (!userId) {
+      Alert.alert('Error', 'Usuario no encontrado.');
+      return;
+    }
+    if (!coupleId) {
+      Alert.alert('Notas', 'Necesitas estar conectado con tu pareja para guardar notas.');
+      return;
+    }
+
+    Keyboard.dismiss();
+    setSaving(true);
+
+    try {
+      const basePayload = {
+        couple_id: coupleId,
+        created_by: userId,
+        title: buildTitle(normalizedText || 'Mi nota'),
+        content: normalizedText,
+      };
+
+      const richPayload = {
+        ...basePayload,
+        note_type: 'text' as const,
+        is_shared: true,
+        image_url: null,
+        drawing_data: null,
+      };
+
+      let insertError: any = null;
+      const richAttempt = await supabase.from('notes').insert(richPayload).select().single();
+      insertError = richAttempt.error;
+
+      if (insertError && shouldRetryWithMinimalPayload(insertError.message)) {
+        const fallbackAttempt = await supabase.from('notes').insert(basePayload).select().single();
+        insertError = fallbackAttempt.error;
+      }
+
+      if (insertError) {
+        Alert.alert('Notas', 'No se pudo guardar la nota. Intentalo de nuevo.');
+        return;
+      }
+
+      setMainCardPhotoUri(null);
+      setNoteText('');
+      await fetchNotes(coupleId);
+    } catch (error) {
+      console.log('[Notas] handleSaveMainTextNote error', error);
+      Alert.alert('Notas', 'No se pudo guardar la nota. Intentalo de nuevo.');
+    } finally {
+      setSaving(false);
+    }
+  }, [coupleId, fetchNotes, handleOpenEditor, noteText, userId]);
+
+  const handleMainFotoPress = useCallback(() => {
+    setIsMainPhotoSheetOpen(true);
+  }, []);
+
+  const handleMainPhotoSheetPick = useCallback(async () => {
+    const uri = await pickSingleImageFromLibrary();
+    if (!uri) return;
+    await handleSaveMainPhotoNote(uri);
+  }, [handleSaveMainPhotoNote, pickSingleImageFromLibrary]);
+
+  const handleMainPhotoSheetTake = useCallback(async () => {
+    const uri = await takeSinglePhotoWithCamera();
+    if (!uri) return;
+    await handleSaveMainPhotoNote(uri);
+  }, [handleSaveMainPhotoNote, takeSinglePhotoWithCamera]);
 
   const bringEditorTextToFront = useCallback((id: string) => {
     setEditorTextElements((prev) => {
@@ -2044,6 +2207,9 @@ export default function NotesScreen() {
     setEditorActivePhotoId(id);
   }, []);
 
+  const displayedMainPhotoUri = mainCardPhotoUri;
+  const hasMainTextDraft = noteText.trim().length > 0;
+  const shouldShowMainPhotoPreview = !noteText.trim() && !!displayedMainPhotoUri;
   const albumNotes = useMemo(() => notes, [notes]);
   const [leftTopNote, leftBottomNote, rightTopNote, rightMiddleNote, rightBottomNote] = albumNotes.slice(0, 5);
 
@@ -2098,17 +2264,28 @@ export default function NotesScreen() {
               <Text style={s.cardTitle}>Mi nota ♡</Text>
 
               <View style={s.canvasPaper}>
-                <TextInput
-                  style={s.noteInput}
-                  placeholder="Escribe aquí..."
-                  placeholderTextColor="#BEA5B1"
-                  value={noteText}
-                  onChangeText={setNoteText}
-                  multiline
-                  editable={!saving}
-                  textAlignVertical="top"
-                  maxLength={1000}
-                />
+                {shouldShowMainPhotoPreview && displayedMainPhotoUri ? (
+                  <>
+                    <Image source={{ uri: displayedMainPhotoUri }} style={s.mainCardPhotoPreview} resizeMode="cover" />
+                    {saving ? (
+                      <View style={s.mainCardPhotoLoading}>
+                        <ActivityIndicator size="small" color={WHITE} />
+                      </View>
+                    ) : null}
+                  </>
+                ) : (
+                  <TextInput
+                    style={s.noteInput}
+                    placeholder="Escribe aquí..."
+                    placeholderTextColor="#BEA5B1"
+                    value={noteText}
+                    onChangeText={handleMainNoteTextChange}
+                    multiline
+                    editable={!saving}
+                    textAlignVertical="top"
+                    maxLength={1000}
+                  />
+                )}
               </View>
               <View style={s.cardToolRow}>
                 <Pressable style={s.sideToolButton} onPress={handleClearNote}>
@@ -2116,11 +2293,19 @@ export default function NotesScreen() {
                   <Text style={s.sideToolText}>Borrar</Text>
                 </Pressable>
 
-                <Pressable style={[s.plusButton, saving && s.plusButtonDisabled]} onPress={handleOpenEditor} disabled={saving}>
-                  <Plus size={28} color={WHITE} strokeWidth={2.4} />
+                <Pressable
+                  style={[s.plusButton, saving && s.plusButtonDisabled]}
+                  onPress={hasMainTextDraft ? handleSaveMainTextNote : handleOpenEditor}
+                  disabled={saving}
+                >
+                  {hasMainTextDraft ? (
+                    <Check size={24} color={WHITE} strokeWidth={2.9} />
+                  ) : (
+                    <Plus size={28} color={WHITE} strokeWidth={2.4} />
+                  )}
                 </Pressable>
 
-                <Pressable style={s.sideToolButton} onPress={handleUnavailableTool}>
+                <Pressable style={[s.sideToolButton, saving && s.sideToolButtonDisabled]} onPress={handleMainFotoPress} disabled={saving}>
                   <ImageIcon size={16} color={TEXT} />
                   <Text style={s.sideToolText}>Foto</Text>
                 </Pressable>
@@ -2726,6 +2911,12 @@ export default function NotesScreen() {
         onClose={() => setIsEditorPhotoSheetOpen(false)}
         onTake={handleEditorPhotoSheetTake}
         onPick={handleEditorPhotoSheetPick}
+      />
+      <EditorPhotoSourceSheet
+        visible={isMainPhotoSheetOpen && !isEditorOpen}
+        onClose={() => setIsMainPhotoSheetOpen(false)}
+        onTake={handleMainPhotoSheetTake}
+        onPick={handleMainPhotoSheetPick}
       />
       <Modal visible={showAlbum} animationType="fade" transparent onRequestClose={() => setShowAlbum(false)}>
         <View style={s.albumOverlayBackdrop}>
@@ -3681,6 +3872,16 @@ const s = StyleSheet.create({
     fontSize: 15,
     lineHeight: 24,
   },
+  mainCardPhotoPreview: {
+    width: '100%',
+    height: '100%',
+  },
+  mainCardPhotoLoading: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(76, 42, 61, 0.18)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   cardToolRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -3696,6 +3897,9 @@ const s = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     gap: 4,
+  },
+  sideToolButtonDisabled: {
+    opacity: 0.6,
   },
   sideToolText: {
     color: TEXT,
