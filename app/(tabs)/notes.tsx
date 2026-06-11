@@ -29,6 +29,7 @@ import {
   ActivityIndicator,
   Alert,
   Dimensions,
+  FlatList,
   Image,
   Keyboard,
   Modal,
@@ -106,6 +107,27 @@ type AlbumMemory = {
   cardTone: 'pink' | 'cream' | 'lilac';
   backgroundColor: string;
   kindLabel: 'Texto' | 'Foto' | 'Dibujo' | 'Mixta';
+};
+
+type AlbumEntry = {
+  id: string;
+  createdAt: string;
+  dateLabel: string;
+  isMine: boolean;
+  authorLabel: string;
+  type: 'text' | 'photo' | 'drawing' | 'mixed';
+  text: string | null;
+  photoUrl: string | null;
+  drawingUrl: string | null;
+  previewImage: string | null;
+  backgroundColor: string;
+  kindLabel: AlbumMemory['kindLabel'];
+};
+
+type AlbumSpread = {
+  id: string;
+  left: AlbumEntry[];
+  right: AlbumEntry[];
 };
 
 type DrawPoint = { x: number; y: number; t?: number; pressure?: number };
@@ -264,6 +286,79 @@ function buildAlbumMemories(notes: DbNote[], userId: string | null, partnerName:
       kindLabel,
     };
   });
+}
+
+function getAlbumEntryText(note: DbNote, drawing: StoredDrawingData | null): string | null {
+  const content = note.content?.trim();
+  if (content) return content;
+  const textItems = drawing?.texts
+    ?.map((item) => item?.text?.trim() ?? '')
+    .filter((value) => value.length > 0);
+  if (!textItems || textItems.length === 0) return null;
+  return textItems.join('\n');
+}
+
+function normalizeAlbumEntry(note: DbNote, userId: string | null, partnerName: string, index: number): AlbumEntry {
+  const drawing = parseStoredDrawingData(note.drawing_data);
+  const photoUrl = getAlbumMemoryImageUri(note, drawing);
+  const kindLabel = getAlbumMemoryKind(note, drawing, photoUrl);
+  const isMine = !!userId && note.created_by === userId;
+  const text = getAlbumEntryText(note, drawing);
+  const inferredType: AlbumEntry['type'] =
+    note.note_type === 'photo'
+      ? 'photo'
+      : note.note_type === 'drawing'
+        ? 'drawing'
+        : note.note_type === 'mixed'
+          ? 'mixed'
+          : note.note_type === 'text'
+            ? 'text'
+            : kindLabel === 'Foto'
+              ? 'photo'
+              : kindLabel === 'Dibujo'
+                ? 'drawing'
+                : kindLabel === 'Mixta'
+                  ? 'mixed'
+                  : 'text';
+
+  const previewImage = photoUrl;
+  return {
+    id: note.id,
+    createdAt: note.created_at,
+    dateLabel: fmtDate(note.created_at),
+    isMine,
+    authorLabel: isMine ? 'Tú' : partnerName,
+    type: inferredType,
+    text,
+    photoUrl,
+    drawingUrl: null,
+    previewImage,
+    backgroundColor: drawing?.backgroundColor || (index % 2 === 0 ? '#FFF2F7' : '#FFF8EE'),
+    kindLabel,
+  };
+}
+
+function buildAlbumEntries(notes: DbNote[], userId: string | null, partnerName: string): AlbumEntry[] {
+  return notes.map((note, index) => normalizeAlbumEntry(note, userId, partnerName, index));
+}
+
+function chunkIntoSpreads(items: AlbumEntry[], perSpread = 6): AlbumSpread[] {
+  const spreads: AlbumSpread[] = [];
+  for (let i = 0; i < items.length; i += perSpread) {
+    const slice = items.slice(i, i + perSpread);
+    spreads.push({
+      id: `spread-${i}`,
+      left: slice.slice(0, 3),
+      right: slice.slice(3, 6),
+    });
+  }
+  return spreads;
+}
+
+function truncateText(value: string, maxChars: number): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  return `${trimmed.slice(0, maxChars).trimEnd()}…`;
 }
 
 function shouldAddDrawPoint(prev: DrawPoint | null, next: DrawPoint, minDistance: number, maxDistance = 75): boolean {
@@ -2317,14 +2412,9 @@ export default function NotesScreen() {
   const displayedMainPhotoUri = mainCardPhotoUri;
   const hasMainTextDraft = noteText.trim().length > 0;
   const shouldShowMainPhotoPreview = !noteText.trim() && !!displayedMainPhotoUri;
-  const albumMemories = useMemo(() => buildAlbumMemories(notes, userId, partnerName), [notes, partnerName, userId]);
-  const albumMemoryClusters = useMemo(() => {
-    const clusters: AlbumMemory[][] = [];
-    for (let i = 0; i < albumMemories.length; i += 3) {
-      clusters.push(albumMemories.slice(i, i + 3));
-    }
-    return clusters;
-  }, [albumMemories]);
+  const albumEntries = useMemo(() => buildAlbumEntries(notes, userId, partnerName), [notes, partnerName, userId]);
+  const albumSpreads = useMemo(() => chunkIntoSpreads(albumEntries, 6), [albumEntries]);
+  const [selectedAlbumEntry, setSelectedAlbumEntry] = useState<AlbumEntry | null>(null);
 
   if (loading) {
     return (
@@ -3042,120 +3132,27 @@ export default function NotesScreen() {
 
               <View style={s.openBookSpread}>
                 <View style={s.openBookShadow} />
-                <View style={s.scrapbookCanvas}>
-                  <View style={s.scrapbookCanvasGlowTop} pointerEvents="none" />
-                  <View style={s.scrapbookCanvasGlowBottom} pointerEvents="none" />
-                  <View style={s.scrapbookCanvasDotCluster} pointerEvents="none">
-                    <View style={s.scrapbookCanvasDot} />
-                    <View style={s.scrapbookCanvasDot} />
-                    <View style={s.scrapbookCanvasDot} />
-                  </View>
-                  {albumMemories.length > 0 ? (
-                    <ScrollView style={s.albumPageScroll} contentContainerStyle={s.albumScrapbookContent} showsVerticalScrollIndicator={false}>
-                      <View style={s.scrapbookHeaderCard}>
-                        <Text style={s.scrapbookHeaderTitle}>Recuerdos juntos</Text>
-                        <Text style={s.scrapbookHeaderSubtitle}>pequenos momentos guardados con amor</Text>
-                      </View>
-                      <View style={s.albumScrapbookFlow}>
-                        {albumMemoryClusters.map((cluster, clusterIndex) => (
-                          <View
-                            key={`cluster-${clusterIndex}`}
-                            style={[s.scrapbookCluster, clusterIndex % 2 === 1 && s.scrapbookClusterAlt]}
-                          >
-                            {cluster.map((memory, memoryIndex) => {
-                              const seed = fnv1aHash(memory.id);
-                              const variant = memory.imageUri ? 'photo' : memory.kindLabel === 'Texto' ? 'text' : 'mixed';
-                              const rotation = ((seed % 9) - 4) * 0.7;
-                              const slotStyle =
-                                clusterIndex % 2 === 0
-                                  ? memoryIndex === 0
-                                    ? s.scrapbookSlotEvenPrimary
-                                    : memoryIndex === 1
-                                      ? s.scrapbookSlotEvenSecondary
-                                      : s.scrapbookSlotEvenTertiary
-                                  : memoryIndex === 0
-                                    ? s.scrapbookSlotOddPrimary
-                                    : memoryIndex === 1
-                                      ? s.scrapbookSlotOddSecondary
-                                      : s.scrapbookSlotOddTertiary;
-
-                              return (
-                                <Pressable
-                                  key={memory.id}
-                                  style={[
-                                    s.scrapbookItem,
-                                    slotStyle,
-                                    variant === 'photo'
-                                      ? s.scrapbookPolaroid
-                                      : variant === 'text'
-                                        ? s.scrapbookNote
-                                        : s.scrapbookMixed,
-                                    { transform: [{ rotate: `${rotation}deg` }] },
-                                  ]}
-                                  onPress={() => {}}
-                                >
-                                  <View
-                                    style={[
-                                      s.scrapbookTape,
-                                      seed % 2 === 0 ? s.scrapbookTapeLeft : s.scrapbookTapeRight,
-                                      seed % 3 === 0 ? s.scrapbookTapeSoft : s.scrapbookTapeWarm,
-                                    ]}
-                                    pointerEvents="none"
-                                  />
-                                  <Text style={s.scrapbookDateText}>{memory.dateLabel}</Text>
-
-                                  {variant === 'photo' && memory.imageUri ? (
-                                    <>
-                                      <Image source={{ uri: memory.imageUri }} style={s.scrapbookPhoto} resizeMode="cover" />
-                                      <Text style={s.scrapbookTinyMeta}>{memory.authorLabel}</Text>
-                                      <Text style={s.scrapbookPhotoCaption} numberOfLines={2}>
-                                        {memory.previewText}
-                                      </Text>
-                                    </>
-                                  ) : variant === 'text' ? (
-                                    <>
-                                      <View style={s.scrapbookNotePin} pointerEvents="none" />
-                                      <Text style={s.scrapbookTinyMeta}>{memory.authorLabel}</Text>
-                                      <View style={s.scrapbookRuledLines} pointerEvents="none">
-                                        <View style={s.scrapbookLine} />
-                                        <View style={s.scrapbookLine} />
-                                        <View style={s.scrapbookLine} />
-                                      </View>
-                                      <Text
-                                        style={[
-                                          s.scrapbookNoteText,
-                                          fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null,
-                                        ]}
-                                        numberOfLines={4}
-                                      >
-                                        {memory.previewText}
-                                      </Text>
-                                    </>
-                                  ) : (
-                                    <>
-                                      <View style={[s.scrapbookSketchPreview, { backgroundColor: memory.backgroundColor }]}>
-                                        <View style={s.scrapbookSketchStroke} />
-                                        <View style={[s.scrapbookSketchStroke, s.scrapbookSketchStrokeShort]} />
-                                        <View style={s.scrapbookMiniSticker} />
-                                      </View>
-                                      <Text style={s.scrapbookTinyMeta}>{memory.authorLabel}</Text>
-                                      <Text style={s.scrapbookMixedLabel}>
-                                        {memory.kindLabel === 'Dibujo' ? 'Nota con dibujo' : memory.kindLabel}
-                                      </Text>
-                                      <Text style={s.scrapbookMixedText} numberOfLines={3}>
-                                        {memory.previewText}
-                                      </Text>
-                                    </>
-                                  )}
-                                </Pressable>
-                              );
-                            })}
-                          </View>
-                        ))}
-                      </View>
-                    </ScrollView>
-                  ) : null}
-                </View>
+                {albumSpreads.length > 0 ? (
+                  <FlatList
+                    data={albumSpreads}
+                    horizontal
+                    pagingEnabled
+                    showsHorizontalScrollIndicator={false}
+                    keyExtractor={(item) => item.id}
+                    style={s.albumPager}
+                    contentContainerStyle={s.albumPagerContent}
+                    initialNumToRender={1}
+                    windowSize={3}
+                    maxToRenderPerBatch={2}
+                    renderItem={({ item }) => (
+                      <AlbumSpreadView
+                        spread={item}
+                        fontsLoaded={fontsLoaded}
+                        onSelect={(entry) => setSelectedAlbumEntry(entry)}
+                      />
+                    )}
+                  />
+                ) : null}
 
                 {albumLoading ? (
                   <View style={s.emptyAlbumState}>
@@ -3177,7 +3174,7 @@ export default function NotesScreen() {
                       <Text style={s.emptyAlbumText}>Inténtalo de nuevo en unos segundos.</Text>
                     </View>
                   </View>
-                ) : albumMemories.length === 0 ? (
+                ) : albumEntries.length === 0 ? (
                   <View style={s.emptyAlbumState}>
                     <View style={s.emptyAlbumBadge}>
                       <Heart size={22} color={PINK_STRONG} strokeWidth={1.8} />
@@ -3193,9 +3190,174 @@ export default function NotesScreen() {
           </View>
         </View>
       </Modal>
+      <Modal
+        visible={!!selectedAlbumEntry && showAlbum}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setSelectedAlbumEntry(null)}
+      >
+        <View style={s.albumDetailBackdrop}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setSelectedAlbumEntry(null)} />
+          {selectedAlbumEntry ? (
+            <View style={s.albumDetailCard}>
+              <Pressable style={s.albumDetailClose} onPress={() => setSelectedAlbumEntry(null)}>
+                <X size={18} color={TEXT} />
+              </Pressable>
+              <Text style={s.albumDetailDate}>{selectedAlbumEntry.dateLabel}</Text>
+              <Text style={s.albumDetailAuthor}>{selectedAlbumEntry.authorLabel}</Text>
+              {selectedAlbumEntry.previewImage ? (
+                <Image source={{ uri: selectedAlbumEntry.previewImage }} style={s.albumDetailImage} resizeMode="cover" />
+              ) : null}
+              <Text style={s.albumDetailBody}>
+                {selectedAlbumEntry.text?.trim()?.length ? selectedAlbumEntry.text : 'Recuerdo guardado.'}
+              </Text>
+            </View>
+          ) : null}
+        </View>
+      </Modal>
     </View>
   );
 }
+
+const AlbumSpreadView = React.memo(function AlbumSpreadView({
+  spread,
+  fontsLoaded,
+  onSelect,
+}: {
+  spread: AlbumSpread;
+  fontsLoaded: boolean;
+  onSelect: (entry: AlbumEntry) => void;
+}) {
+  return (
+    <View style={s.albumSpread}>
+      <View style={s.openBookPageLeft}>
+        <View style={s.openBookPageGlow} pointerEvents="none" />
+        <AlbumPageView side="left" items={spread.left} fontsLoaded={fontsLoaded} onSelect={onSelect} />
+      </View>
+      <View style={s.openBookBindingSoft} pointerEvents="none">
+        <View style={s.openBookBindingLineSoft} />
+      </View>
+      <View style={s.openBookPageRight}>
+        <View style={s.openBookPageGlowRight} pointerEvents="none" />
+        <AlbumPageView side="right" items={spread.right} fontsLoaded={fontsLoaded} onSelect={onSelect} />
+      </View>
+    </View>
+  );
+});
+
+function AlbumPageView({
+  side,
+  items,
+  fontsLoaded,
+  onSelect,
+}: {
+  side: 'left' | 'right';
+  items: AlbumEntry[];
+  fontsLoaded: boolean;
+  onSelect: (entry: AlbumEntry) => void;
+}) {
+  const slots = useMemo(() => getAlbumPageSlots(items.length, side), [items.length, side]);
+  return (
+    <View style={s.albumPageCanvas}>
+      {items.map((entry, index) => (
+        <MemoryPiece
+          key={entry.id}
+          entry={entry}
+          fontsLoaded={fontsLoaded}
+          slot={slots[index] ?? slots[0]}
+          onPress={() => onSelect(entry)}
+        />
+      ))}
+    </View>
+  );
+}
+
+type AlbumSlot = { left: string; top: string; width: string; rotate: number };
+
+function getAlbumPageSlots(count: number, side: 'left' | 'right'): AlbumSlot[] {
+  const left3: AlbumSlot[] = [
+    { left: '6%', top: '8%', width: '46%', rotate: -3.2 },
+    { left: '52%', top: '14%', width: '40%', rotate: 2.2 },
+    { left: '18%', top: '54%', width: '56%', rotate: -1.1 },
+  ];
+  const right3: AlbumSlot[] = [
+    { left: '50%', top: '10%', width: '44%', rotate: 2.8 },
+    { left: '6%', top: '18%', width: '42%', rotate: -2.2 },
+    { left: '22%', top: '56%', width: '54%', rotate: 1.2 },
+  ];
+  const left2: AlbumSlot[] = [
+    { left: '8%', top: '10%', width: '52%', rotate: -2.6 },
+    { left: '36%', top: '54%', width: '56%', rotate: 1.4 },
+  ];
+  const right2: AlbumSlot[] = [
+    { left: '40%', top: '10%', width: '52%', rotate: 2.4 },
+    { left: '6%', top: '52%', width: '56%', rotate: -1.2 },
+  ];
+  const left1: AlbumSlot[] = [{ left: '18%', top: '20%', width: '64%', rotate: -1.4 }];
+  const right1: AlbumSlot[] = [{ left: '18%', top: '20%', width: '64%', rotate: 1.4 }];
+  if (count <= 1) return side === 'left' ? left1 : right1;
+  if (count === 2) return side === 'left' ? left2 : right2;
+  return side === 'left' ? left3 : right3;
+}
+
+const MemoryPiece = React.memo(function MemoryPiece({
+  entry,
+  fontsLoaded,
+  slot,
+  onPress,
+}: {
+  entry: AlbumEntry;
+  fontsLoaded: boolean;
+  slot: AlbumSlot;
+  onPress: () => void;
+}) {
+  const seed = fnv1aHash(entry.id);
+  const rotate = slot.rotate + ((seed % 7) - 3) * 0.25;
+  const hasPhoto = !!entry.previewImage;
+  const kind = hasPhoto ? 'photo' : entry.type === 'text' ? 'text' : 'drawing';
+  const captionBase = entry.text?.trim() || '';
+  const caption = captionBase.length ? truncateText(captionBase, kind === 'photo' ? 46 : 62) : entry.kindLabel === 'Dibujo' ? 'Un dibujo ♡' : 'Un recuerdo ♡';
+
+  return (
+    <Pressable
+      style={[s.memoryPieceBase, { left: slot.left, top: slot.top, width: slot.width, transform: [{ rotate: `${rotate}deg` }] }]}
+      onPress={onPress}
+    >
+      {kind === 'photo' ? (
+        <View style={s.polaroidPiece}>
+          <View style={[s.tapePiece, seed % 2 === 0 ? s.tapePieceLeft : s.tapePieceRight]} pointerEvents="none" />
+          <View style={s.polaroidFrame}>
+            <Image source={{ uri: entry.previewImage! }} style={s.polaroidImg} resizeMode="cover" />
+          </View>
+          <Text style={s.polaroidCaptionSmall} numberOfLines={2}>
+            {caption}
+          </Text>
+        </View>
+      ) : kind === 'text' ? (
+        <View style={s.notePiece}>
+          <View style={s.notePiecePin} pointerEvents="none" />
+          <Text style={[s.notePieceText, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]} numberOfLines={5}>
+            {caption}
+          </Text>
+          <Text style={s.notePieceMeta}>{entry.authorLabel}</Text>
+        </View>
+      ) : (
+        <View style={[s.drawingPiece, { backgroundColor: entry.backgroundColor }]}>
+          <View style={[s.tapePiece, seed % 2 === 0 ? s.tapePieceRight : s.tapePieceLeft]} pointerEvents="none" />
+          <View style={s.drawingPreview}>
+            <View style={s.drawingPreviewLine} />
+            <View style={[s.drawingPreviewLine, s.drawingPreviewLineShort]} />
+            <View style={[s.drawingPreviewLine, s.drawingPreviewLineTiny]} />
+          </View>
+          <Text style={s.drawingPieceLabel}>{entry.kindLabel === 'Dibujo' ? 'Dibujo' : 'Nota'}</Text>
+          <Text style={s.drawingPieceCaption} numberOfLines={2}>
+            {caption}
+          </Text>
+        </View>
+      )}
+    </Pressable>
+  );
+});
 
 function EditorPhotoItem({
   photo,
