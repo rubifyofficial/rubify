@@ -388,14 +388,14 @@ function clampMemoryPieceLayout(layout: MemoryPieceLayout, pageWidth: number, pa
 
 function getSpreadPageLayouts(side: 'left' | 'right', pageWidth: number, pageHeight: number): MemoryPieceLayout[] {
   const leftLayouts: MemoryPieceLayout[] = [
-    { x: pageWidth * 0.08, y: pageHeight * 0.1, w: 120, h: 150, rotate: '-3deg' },
-    { x: pageWidth * 0.38, y: pageHeight * 0.38, w: 115, h: 105, rotate: '2deg' },
-    { x: pageWidth * 0.1, y: pageHeight * 0.68, w: 130, h: 100, rotate: '-1deg' },
+    { x: pageWidth * 0.06, y: pageHeight * 0.11, w: 90, h: 90, rotate: '-4deg' },
+    { x: pageWidth * 0.34, y: pageHeight * 0.13, w: 126, h: 156, rotate: '2.8deg' },
+    { x: pageWidth * 0.08, y: pageHeight * 0.63, w: 118, h: 112, rotate: '-2deg' },
   ];
   const rightLayouts: MemoryPieceLayout[] = [
-    { x: pageWidth * 0.14, y: pageHeight * 0.12, w: 120, h: 100, rotate: '2deg' },
-    { x: pageWidth * 0.38, y: pageHeight * 0.36, w: 125, h: 150, rotate: '-2deg' },
-    { x: pageWidth * 0.12, y: pageHeight * 0.68, w: 130, h: 100, rotate: '1deg' },
+    { x: pageWidth * 0.33, y: pageHeight * 0.1, w: 120, h: 140, rotate: '3deg' },
+    { x: pageWidth * 0.12, y: pageHeight * 0.36, w: 112, h: 128, rotate: '-2.2deg' },
+    { x: pageWidth * 0.11, y: pageHeight * 0.69, w: 124, h: 96, rotate: '1.6deg' },
   ];
   const source = side === 'left' ? leftLayouts : rightLayouts;
   return source.map((layout) => clampMemoryPieceLayout(layout, pageWidth, pageHeight));
@@ -414,6 +414,12 @@ function getMemoryCaption(item: AlbumEntry): string {
     if (formatted) return formatted;
   }
   return getMemoryPreviewLabel(item);
+}
+
+function getMemoryPaperTone(item: AlbumEntry): string {
+  if (item.type === 'text') return item.isMine ? '#FFF7F1' : '#FFF2F7';
+  if (item.type === 'drawing') return '#FFF9F1';
+  return '#FFFDF8';
 }
 
 function shouldAddDrawPoint(prev: DrawPoint | null, next: DrawPoint, minDistance: number, maxDistance = 75): boolean {
@@ -3201,6 +3207,7 @@ export default function NotesScreen() {
                 <Text style={s.albumBookTitle}>Recuerdos juntos</Text>
                 <View style={[s.albumStaticPageLeft, { width: pageWidth, height: bookHeight }]}>
                   <View style={s.albumStaticPageCanvas}>
+                    <PageDecoration side="left" />
                     {leftItems.map((item, index) => (
                       <MemoryPiece
                         key={item.id}
@@ -3214,6 +3221,7 @@ export default function NotesScreen() {
                 <View style={[s.albumStaticFold, { width: foldWidth, height: bookHeight }]} />
                 <View style={[s.albumStaticPageRight, { width: pageWidth, height: bookHeight }]}>
                   <View style={s.albumStaticPageCanvas}>
+                    <PageDecoration side="right" />
                     {rightItems.map((item, index) => (
                       <MemoryPiece
                         key={item.id}
@@ -3341,30 +3349,74 @@ function TapePiece({ seed }: { seed: number }) {
       style={[
         s.tapePieceBase,
         s.tapePieceTop,
-        { transform: [{ translateX: -22 }, { rotate: seed % 2 === 0 ? '-7deg' : '6deg' }] },
+        { transform: [{ translateX: -22 }, { rotate: seed % 2 === 0 ? '-7deg' : '5deg' }] },
       ]}
     />
   );
 }
 
-function PolaroidPiece({ item, seed, caption }: { item: AlbumEntry; seed: number; caption: string }) {
+function PageDecoration({ side }: { side: 'left' | 'right' }) {
+  return (
+    <>
+      <Text
+        pointerEvents="none"
+        style={[
+          s.pageDecoration,
+          side === 'left' ? s.pageDecorationLeftTop : s.pageDecorationRightTop,
+        ]}
+      >
+        ♡
+      </Text>
+      <Text
+        pointerEvents="none"
+        style={[
+          s.pageDecoration,
+          s.pageDecorationTiny,
+          side === 'left' ? s.pageDecorationLeftBottom : s.pageDecorationRightBottom,
+        ]}
+      >
+        ✦
+      </Text>
+    </>
+  );
+}
+
+function PolaroidPiece({
+  item,
+  seed,
+  caption,
+  fontsLoaded,
+}: {
+  item: AlbumEntry;
+  seed: number;
+  caption: string;
+  fontsLoaded: boolean;
+}) {
   const [imageFailed, setImageFailed] = useState(false);
   const imageUri = item.previewImage || item.photoUrl || item.drawingUrl;
 
   return (
     <View style={s.polaroidWrap}>
       <TapePiece seed={seed} />
+      <View style={s.polaroidShadow} pointerEvents="none" />
       <View style={s.polaroidFrame}>
         <View style={s.polaroidPhotoArea}>
           {imageUri && !imageFailed ? (
             <Image source={{ uri: imageUri }} style={s.polaroidImage} resizeMode="cover" onError={() => setImageFailed(true)} />
           ) : (
             <View style={s.polaroidPlaceholder}>
-              <Text style={s.drawingFallbackText}>Foto</Text>
+              <View style={s.polaroidPlaceholderInner}>
+                <Text style={s.polaroidPlaceholderIcon}>✦</Text>
+                <Text style={s.polaroidPlaceholderText}>Foto</Text>
+              </View>
             </View>
           )}
         </View>
-        <Text style={s.polaroidCaption} numberOfLines={2} ellipsizeMode="tail">
+        <Text
+          style={[s.polaroidCaption, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]}
+          numberOfLines={2}
+          ellipsizeMode="tail"
+        >
           {caption}
         </Text>
       </View>
@@ -3389,14 +3441,15 @@ function NotePaperPiece({
   return (
     <View style={s.notePaperWrap}>
       <TapePiece seed={seed} />
-      <View style={s.notePaperCard}>
+      <View style={[s.notePaperCard, { backgroundColor: getMemoryPaperTone(item) }]}>
         <Text style={s.notePaperStamp} numberOfLines={1}>
-          {stampLabel}
+          ♡
         </Text>
         <View style={s.notePaperLines} pointerEvents="none">
           <View style={s.notePaperLine} />
           <View style={s.notePaperLine} />
           <View style={s.notePaperLine} />
+          <View style={[s.notePaperLine, s.notePaperLineShort]} />
         </View>
         <Text
           style={[s.notePaperText, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]}
@@ -3405,27 +3458,51 @@ function NotePaperPiece({
         >
           {previewText}
         </Text>
+        <Text style={s.notePaperMeta} numberOfLines={1}>
+          {stampLabel}
+        </Text>
       </View>
     </View>
   );
 }
 
-function DrawingPiece({ item, caption, seed }: { item: AlbumEntry; caption: string; seed: number }) {
+function DrawingPiece({
+  item,
+  caption,
+  seed,
+  fontsLoaded,
+}: {
+  item: AlbumEntry;
+  caption: string;
+  seed: number;
+  fontsLoaded: boolean;
+}) {
   const [imageFailed, setImageFailed] = useState(false);
   const imageUri = item.previewImage || item.drawingUrl;
 
   return (
     <View style={s.drawingWrap}>
-      <TapePiece seed={seed} />
-      <View style={[s.drawingCard, { backgroundColor: item.backgroundColor || '#FFF8EE' }]}>
+      <View style={s.paperClip} pointerEvents="none">
+        <View style={s.paperClipInner} />
+      </View>
+      <View style={[s.drawingCard, { backgroundColor: getMemoryPaperTone(item) || item.backgroundColor || '#FFF8EE' }]}>
         {imageUri && !imageFailed ? (
           <Image source={{ uri: imageUri }} style={s.drawingImage} resizeMode="cover" onError={() => setImageFailed(true)} />
         ) : (
           <View style={s.drawingFallback}>
+            <Text style={s.drawingFallbackIcon}>✦</Text>
+            <View style={s.drawingFallbackDoodle}>
+              <View style={s.drawingFallbackLine} />
+              <View style={[s.drawingFallbackLine, s.drawingFallbackLineShort]} />
+            </View>
             <Text style={s.drawingFallbackText}>Nota con dibujo</Text>
           </View>
         )}
-        <Text style={s.drawingCaption} numberOfLines={2} ellipsizeMode="tail">
+        <Text
+          style={[s.drawingCaption, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]}
+          numberOfLines={2}
+          ellipsizeMode="tail"
+        >
           {caption}
         </Text>
       </View>
@@ -3473,11 +3550,11 @@ const MemoryPiece = React.memo(function MemoryPiece(props: MemoryPieceProps) {
       ]}
     >
       {isPhotoPiece ? (
-        <PolaroidPiece item={item} seed={seed} caption={caption} />
+        <PolaroidPiece item={item} seed={seed} caption={caption} fontsLoaded={props.fontsLoaded} />
       ) : isTextPiece ? (
         <NotePaperPiece item={item} caption={caption} fontsLoaded={props.fontsLoaded} seed={seed} />
       ) : (
-        <DrawingPiece item={item} caption={caption} seed={seed} />
+        <DrawingPiece item={item} caption={caption} seed={seed} fontsLoaded={props.fontsLoaded} />
       )}
     </TouchableOpacity>
   );
@@ -5249,6 +5326,32 @@ const s = StyleSheet.create({
     flex: 1,
     position: 'relative',
   },
+  pageDecoration: {
+    position: 'absolute',
+    color: 'rgba(180, 117, 145, 0.32)',
+    fontSize: 16,
+    zIndex: 0,
+  },
+  pageDecorationTiny: {
+    color: 'rgba(154, 128, 118, 0.24)',
+    fontSize: 12,
+  },
+  pageDecorationLeftTop: {
+    top: 34,
+    left: 18,
+  },
+  pageDecorationLeftBottom: {
+    bottom: 58,
+    right: 30,
+  },
+  pageDecorationRightTop: {
+    top: 42,
+    right: 18,
+  },
+  pageDecorationRightBottom: {
+    bottom: 42,
+    left: 26,
+  },
   albumEmptyOverlay: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
@@ -5535,11 +5638,11 @@ const s = StyleSheet.create({
   memoryPiece: {
     position: 'absolute',
     borderRadius: 18,
-    overflow: 'hidden',
+    overflow: 'visible',
     shadowColor: SHADOW,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.22,
-    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.16,
+    shadowRadius: 10,
     elevation: 2,
   },
   tapePieceBase: {
@@ -5547,10 +5650,11 @@ const s = StyleSheet.create({
     width: 44,
     height: 16,
     borderRadius: 5,
-    backgroundColor: 'rgba(245, 223, 214, 0.94)',
+    backgroundColor: 'rgba(246, 220, 208, 0.82)',
     borderWidth: 1,
-    borderColor: 'rgba(222, 182, 170, 0.35)',
+    borderColor: 'rgba(222, 182, 170, 0.24)',
     zIndex: 2,
+    opacity: 0.95,
   },
   tapePieceTop: {
     top: -7,
@@ -5566,22 +5670,35 @@ const s = StyleSheet.create({
     height: '100%',
     paddingTop: 10,
   },
+  polaroidShadow: {
+    position: 'absolute',
+    top: 16,
+    left: 7,
+    right: 7,
+    bottom: 3,
+    borderRadius: 14,
+    backgroundColor: 'rgba(107, 52, 76, 0.06)',
+  },
   polaroidFrame: {
     flex: 1,
-    borderRadius: 16,
-    backgroundColor: WHITE,
-    padding: 8,
+    borderRadius: 8,
+    backgroundColor: '#FFFDF8',
+    paddingTop: 8,
+    paddingHorizontal: 8,
+    paddingBottom: 11,
+    borderWidth: 1,
+    borderColor: 'rgba(120, 70, 45, 0.10)',
     shadowColor: SHADOW,
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.2,
-    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 7 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
     elevation: 2,
   },
   polaroidPhotoArea: {
     flex: 1,
-    borderRadius: 12,
+    borderRadius: 3,
     overflow: 'hidden',
-    backgroundColor: '#FBE7EF',
+    backgroundColor: '#F8EEE9',
   },
   polaroidImage: {
     width: '100%',
@@ -5591,11 +5708,31 @@ const s = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#FBE7EF',
+    backgroundColor: '#F7DCE8',
+  },
+  polaroidPlaceholderInner: {
+    width: '72%',
+    height: '62%',
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: 'rgba(120, 70, 45, 0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255, 253, 248, 0.48)',
+  },
+  polaroidPlaceholderIcon: {
+    color: 'rgba(107, 52, 76, 0.45)',
+    fontSize: 12,
+    marginBottom: 3,
+  },
+  polaroidPlaceholderText: {
+    color: '#6B344C',
+    fontSize: 10,
+    fontWeight: '600',
   },
   polaroidCaption: {
-    marginTop: 8,
-    color: TEXT_SOFT,
+    marginTop: 7,
+    color: '#6B344C',
     fontSize: 11,
     lineHeight: 14,
     textAlign: 'center',
@@ -5605,40 +5742,95 @@ const s = StyleSheet.create({
     height: '100%',
     paddingTop: 10,
   },
+  paperClip: {
+    position: 'absolute',
+    top: 2,
+    right: 14,
+    width: 15,
+    height: 24,
+    borderTopLeftRadius: 7,
+    borderTopRightRadius: 7,
+    borderBottomLeftRadius: 5,
+    borderBottomRightRadius: 5,
+    borderWidth: 2,
+    borderColor: 'rgba(129, 108, 118, 0.6)',
+    backgroundColor: 'transparent',
+    zIndex: 3,
+  },
+  paperClipInner: {
+    position: 'absolute',
+    top: 3,
+    left: 2,
+    right: 2,
+    bottom: 7,
+    borderTopLeftRadius: 5,
+    borderTopRightRadius: 5,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255,255,255,0.7)',
+  },
   drawingCard: {
     flex: 1,
-    borderRadius: 16,
+    borderRadius: 10,
     backgroundColor: '#FFF8EE',
-    padding: 8,
+    paddingTop: 10,
+    paddingHorizontal: 9,
+    paddingBottom: 9,
     borderWidth: 1,
-    borderColor: 'rgba(230, 187, 205, 0.46)',
+    borderColor: 'rgba(120, 70, 45, 0.10)',
+    shadowColor: SHADOW,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.1,
+    shadowRadius: 8,
   },
   drawingImage: {
     width: '100%',
     flex: 1,
     minHeight: 62,
-    borderRadius: 12,
+    borderRadius: 4,
     marginBottom: 8,
   },
   drawingFallback: {
     flex: 1,
     minHeight: 62,
-    borderRadius: 12,
-    backgroundColor: '#F7D8E5',
+    borderRadius: 4,
+    backgroundColor: 'rgba(247, 220, 232, 0.52)',
     alignItems: 'center',
     justifyContent: 'center',
     marginBottom: 8,
+    borderWidth: 1,
+    borderColor: 'rgba(120, 70, 45, 0.08)',
+  },
+  drawingFallbackIcon: {
+    color: 'rgba(107, 52, 76, 0.48)',
+    fontSize: 12,
+    marginBottom: 4,
+  },
+  drawingFallbackDoodle: {
+    width: '60%',
+    marginBottom: 6,
+  },
+  drawingFallbackLine: {
+    height: 2,
+    borderRadius: 999,
+    backgroundColor: 'rgba(107, 52, 76, 0.22)',
+    marginBottom: 6,
+  },
+  drawingFallbackLineShort: {
+    width: '68%',
+    alignSelf: 'center',
+    marginBottom: 0,
   },
   drawingFallbackText: {
-    color: TEXT_SOFT,
-    fontSize: 12,
-    fontWeight: '700',
+    color: '#6B344C',
+    fontSize: 10,
+    fontWeight: '600',
     textAlign: 'center',
   },
   drawingCaption: {
-    color: TEXT,
+    color: '#6B344C',
     fontSize: 11,
     lineHeight: 14,
+    textAlign: 'center',
   },
   notePaperWrap: {
     width: '100%',
@@ -5647,26 +5839,36 @@ const s = StyleSheet.create({
   },
   notePaperCard: {
     flex: 1,
-    borderRadius: 16,
+    borderTopLeftRadius: 9,
+    borderTopRightRadius: 13,
+    borderBottomLeftRadius: 15,
+    borderBottomRightRadius: 8,
     backgroundColor: '#FFF0F5',
     borderWidth: 1,
-    borderColor: 'rgba(235, 193, 210, 0.9)',
+    borderColor: 'rgba(120, 70, 45, 0.08)',
     paddingHorizontal: 12,
     paddingTop: 12,
     paddingBottom: 10,
+    shadowColor: SHADOW,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.09,
+    shadowRadius: 8,
   },
   notePaperLines: {
     marginBottom: 10,
   },
   notePaperLine: {
     height: 1,
-    backgroundColor: 'rgba(220, 178, 197, 0.35)',
+    backgroundColor: 'rgba(214, 173, 189, 0.28)',
     marginBottom: 7,
+  },
+  notePaperLineShort: {
+    width: '72%',
   },
   notePaperText: {
     color: TEXT,
-    fontSize: 13,
-    lineHeight: 18,
+    fontSize: 15,
+    lineHeight: 19,
     paddingRight: 30,
   },
   notePaperStamp: {
@@ -5674,8 +5876,14 @@ const s = StyleSheet.create({
     top: 8,
     right: 10,
     color: '#C16D93',
-    fontSize: 10,
+    fontSize: 12,
     fontWeight: '700',
+  },
+  notePaperMeta: {
+    marginTop: 8,
+    color: '#9B7080',
+    fontSize: 10,
+    textAlign: 'right',
   },
   emptyBookState: {
     alignItems: 'center',
