@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   SafeAreaView,
   ScrollView,
@@ -9,7 +9,8 @@ import {
   Pressable,
   TouchableOpacity,
   Dimensions,
-  TextInput,
+  Animated,
+  PanResponder,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -17,13 +18,17 @@ import MapView from 'react-native-maps';
 import {
   MapPin, BookHeart, Heart,
   MessageCircle, Image as ImageIcon,
-  Calendar, Clapperboard, Sparkles, Clock, Eye,
+  Calendar, Clapperboard, Sparkles, Clock,
 } from 'lucide-react-native';
 import { StatusBar } from 'expo-status-bar';
 import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
 import { supabase } from '../../lib/supabase';
 
 const { width } = Dimensions.get('window');
+const HORIZONTAL_PADDING = 20;
+const HIGHLIGHT_WIDTH = width - HORIZONTAL_PADDING * 2;
+const HIGHLIGHT_SWIPE_DISTANCE_THRESHOLD = 35;
+const HIGHLIGHT_SWIPE_VELOCITY_THRESHOLD = 0.25;
 
 // --- Premium Light / Pastel Theme Palette ---
 const PAGE_BG = '#FFFFFF';
@@ -42,15 +47,24 @@ const MOODS = [
   { emoji: '😊', label: 'Feliz' },
   { emoji: '😌', label: 'Tranquilo' },
   { emoji: '😴', label: 'Cansado' },
-  { emoji: '🥰', label: 'Enamorado' },
-  { emoji: '💭', label: 'Extrañando' },
-  { emoji: '😕', label: 'Ansioso' },
-  { emoji: 'Γ£¿', label: 'Motivado' },
+  { emoji: '🤩', label: 'Emocionado' },
+  { emoji: '🤍', label: 'Pensativo' },
+  { emoji: '🥺', label: 'Extrañando' },
 ];
 
 const AVATAR_SIZE = 42;
 const AVATAR_INNER = 38;
 const AVATAR_PADDING = 10;
+
+type HomeHighlight = {
+  id: string;
+  sectionTitle: string;
+  title: string;
+  subtitle: string;
+  badge: string;
+  buttonLabel: string;
+  onPress: () => void;
+};
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
 
@@ -268,10 +282,161 @@ export default function HomeScreen() {
   }, [myPreviewPoint, partnerPreviewPoint, homeMapSize]);
 
   // Local UI states
-  const [myMood, setMyMood] = useState<{ emoji: string; label: string } | null>({ emoji: '≡ƒÿè', label: 'Feliz' });
-  const [partnerMood, setPartnerMood] = useState<{ emoji: string; label: string } | null>({ emoji: '≡ƒÆ¡', label: 'Extra├▒ando' });
-  const [myAnswer, setMyAnswer] = useState<string>('');
-  const [challengeCompleted, setChallengeCompleted] = useState<boolean>(false);
+  const [myMood, setMyMood] = useState<{ emoji: string; label: string } | null>(MOODS[0]);
+  const [partnerMood] = useState<{ emoji: string; label: string } | null>(MOODS[5]);
+  const handleCycleMood = useCallback(() => {
+    setMyMood((prev) => {
+      if (!prev) return MOODS[0];
+      const currentIndex = MOODS.findIndex((item) => item.label === prev.label);
+      const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % MOODS.length : 0;
+      return MOODS[nextIndex];
+    });
+  }, []);
+
+  const homeHighlights = useMemo<HomeHighlight[]>(
+    () => [
+      {
+        id: 'date',
+        sectionTitle: 'Próxima fecha especial',
+        title: 'Nuestro aniversario',
+        subtitle: '12 de junio',
+        badge: 'Faltan 25 días',
+        buttonLabel: 'Ver calendario',
+        onPress: () => router.push('/(tabs)/calendario'),
+      },
+      {
+        id: 'memory',
+        sectionTitle: 'Recuerdo bonito',
+        title: 'Guardaron un momento especial juntos',
+        subtitle: '“Ese día fue muy bonito ✨”',
+        badge: 'HACE 3 DÍAS',
+        buttonLabel: 'Ver momentos',
+        onPress: () => router.push('/(tabs)/moments'),
+      },
+    ],
+    [router]
+  );
+
+  const [activeHighlightIndex, setActiveHighlightIndex] = useState(0);
+  const activeHighlightIndexRef = useRef(0);
+  useEffect(() => {
+    activeHighlightIndexRef.current = activeHighlightIndex;
+  }, [activeHighlightIndex]);
+
+  const highlightTranslateX = useRef(new Animated.Value(0)).current;
+
+  const snapToHighlight = useCallback(
+    (nextIndex: number) => {
+      const maxIndex = Math.max(homeHighlights.length - 1, 0);
+      const safeIndex = Math.max(0, Math.min(nextIndex, maxIndex));
+      activeHighlightIndexRef.current = safeIndex;
+      setActiveHighlightIndex(safeIndex);
+      Animated.spring(highlightTranslateX, {
+        toValue: -safeIndex * HIGHLIGHT_WIDTH,
+        useNativeDriver: true,
+        speed: 18,
+        bounciness: 4,
+      }).start();
+    },
+    [highlightTranslateX, homeHighlights.length]
+  );
+
+  const highlightPanResponder = useMemo(
+    () =>
+      PanResponder.create({
+        onMoveShouldSetPanResponder: (_evt, gestureState) => {
+          return Math.abs(gestureState.dx) > 8 && Math.abs(gestureState.dx) > Math.abs(gestureState.dy);
+        },
+        onPanResponderGrant: () => {
+          highlightTranslateX.stopAnimation();
+        },
+        onPanResponderMove: (_evt, gestureState) => {
+          const currentIndex = activeHighlightIndexRef.current;
+          const baseOffset = -currentIndex * HIGHLIGHT_WIDTH;
+          let nextTranslate = baseOffset + gestureState.dx;
+
+          const minTranslate = -(homeHighlights.length - 1) * HIGHLIGHT_WIDTH;
+          const maxTranslate = 0;
+
+          if (nextTranslate > maxTranslate) {
+            nextTranslate = maxTranslate + (nextTranslate - maxTranslate) * 0.25;
+          }
+
+          if (nextTranslate < minTranslate) {
+            nextTranslate = minTranslate + (nextTranslate - minTranslate) * 0.25;
+          }
+
+          highlightTranslateX.setValue(nextTranslate);
+        },
+        onPanResponderRelease: (_evt, gestureState) => {
+          const currentIndex = activeHighlightIndexRef.current;
+          let nextIndex = currentIndex;
+
+          if (gestureState.dx < -HIGHLIGHT_SWIPE_DISTANCE_THRESHOLD || gestureState.vx < -HIGHLIGHT_SWIPE_VELOCITY_THRESHOLD) {
+            nextIndex = currentIndex + 1;
+          } else if (
+            gestureState.dx > HIGHLIGHT_SWIPE_DISTANCE_THRESHOLD ||
+            gestureState.vx > HIGHLIGHT_SWIPE_VELOCITY_THRESHOLD
+          ) {
+            nextIndex = currentIndex - 1;
+          }
+
+          snapToHighlight(nextIndex);
+        },
+        onPanResponderTerminate: () => {
+          snapToHighlight(activeHighlightIndexRef.current);
+        },
+      }),
+    [highlightTranslateX, homeHighlights.length, snapToHighlight]
+  );
+
+  useEffect(() => {
+    snapToHighlight(activeHighlightIndexRef.current);
+  }, [snapToHighlight]);
+
+  const renderHighlightSlideContent = useCallback(
+    (item: HomeHighlight) => {
+      return (
+        <View style={s.highlightSlideContent}>
+          <View style={s.highlightCardTopRow}>
+            <View style={s.highlightTextContent}>
+              <Text style={s.highlightSectionLabel}>{item.sectionTitle}</Text>
+              {item.id === 'date' ? (
+                <>
+                  <Text style={s.highlightDateTitle}>{item.title}</Text>
+                  <Text style={s.highlightDateSubtitle}>{item.subtitle}</Text>
+                  <View style={s.highlightDateBadge}>
+                    <Text style={s.highlightDateBadgeText}>{item.badge}</Text>
+                  </View>
+                </>
+              ) : (
+                <>
+                  <View style={s.highlightMemoryBadge}>
+                    <Text style={s.highlightMemoryBadgeText}>{item.badge}</Text>
+                  </View>
+                  <Text style={s.highlightMemoryTitle}>{item.title}</Text>
+                  <Text style={s.highlightMemoryQuote}>{item.subtitle}</Text>
+                </>
+              )}
+            </View>
+
+            <View style={item.id === 'date' ? s.highlightDateVisual : s.highlightMemoryVisual}>
+              {item.id === 'date' ? (
+                <Calendar size={24} color={ACCENT_RED} />
+              ) : (
+                <ImageIcon size={24} color={ACCENT_RED} />
+              )}
+            </View>
+          </View>
+
+          <Pressable style={s.highlightLinkButton} onPress={item.onPress}>
+            <Text style={s.highlightLinkButtonText}>{item.buttonLabel}</Text>
+          </Pressable>
+        </View>
+      );
+    },
+    []
+  );
 
   const getDaysTogether = () => {
     if (!couple?.created_at) return 0;
@@ -413,10 +578,10 @@ export default function HomeScreen() {
           />
         </ScrollView>
         <Pressable
-          style={[s.memoryLinkButton, { alignSelf: 'flex-start', marginTop: 6, marginBottom: 6 }]}
+          style={[s.highlightLinkButton, { marginTop: 6, marginBottom: 6 }]}
           onPress={() => router.push('/drawing-engine-test')}
         >
-          <Text style={s.memoryLinkButtonText}>Abrir test de dibujo</Text>
+          <Text style={s.highlightLinkButtonText}>Abrir test de dibujo</Text>
         </Pressable>
 
         {/* --- 5. Mood check-in section --- */}
@@ -424,164 +589,73 @@ export default function HomeScreen() {
         <Text style={s.sectionSubtitle}>Elige cómo te sientes y comparte tu ánimo con tu pareja.</Text>
         
         <View style={s.moodCard}>
-          <View style={s.moodHeaderRow}>
-            {/* My Side */}
-            <View style={s.moodHalf}>
-              <Text style={s.moodHalfLabel}>Tú</Text>
-              <View style={s.moodStatusRow}>
-                <AvatarSource uri={myAvatar} initial={getInitial(myName)} size={32} />
-                <View style={s.moodStatusTextContainer}>
-                  <Text style={s.moodEmojiText}>{myMood ? myMood.emoji : '❓'}</Text>
-                  <Text style={s.moodLabelText}>{myMood ? myMood.label : 'Sin responder'}</Text>
-                </View>
+          <View style={s.moodVisualRow}>
+            <View style={s.moodSideColumn}>
+              <View style={s.moodAvatarMeta}>
+                <AvatarSource uri={myAvatar} initial={getInitial(myName)} size={34} />
+                <Text style={s.moodAvatarMetaLabel}>Tú</Text>
               </View>
-            </View>
-
-            {/* Divider line */}
-            <View style={s.moodDivider} />
-
-            {/* Partner Side */}
-            <View style={s.moodHalf}>
-              <Text style={s.moodHalfLabel}>{partnerName}</Text>
-              <View style={s.moodStatusRow}>
-                <AvatarSource uri={partnerAvatar} initial={getInitial(partnerName)} size={32} />
-                <View style={s.moodStatusTextContainer}>
-                  <Text style={s.moodEmojiText}>{partnerMood ? partnerMood.emoji : '💭'}</Text>
-                  <Text style={s.moodLabelText}>{partnerMood ? partnerMood.label : 'Aún no respondió'}</Text>
-                </View>
-              </View>
-            </View>
-          </View>
-
-          {/* Selector Title */}
-          <Text style={s.moodSelectTitle}>¿Cómo te sientes en este momento?</Text>
-          
-          {/* Selector list */}
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={s.moodSelectorRow}>
-            {MOODS.map((m) => {
-              const isSelected = myMood?.label === m.label;
-              return (
-                <Pressable 
-                  key={m.label} 
-                  style={[s.moodOptionButton, isSelected && s.moodOptionButtonActive]}
-                  onPress={() => setMyMood(m)}
-                >
-                  <Text style={s.moodOptionEmoji}>{m.emoji}</Text>
-                  <Text style={s.moodOptionLabel}>{m.label}</Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
-
-          <Text style={s.moodFooterText}>Un pequeño check-in para sentirse más cerca.</Text>
-        </View>
-
-        {/* --- 6. Pensamiento del día section --- */}
-        <Text style={s.sectionTitle}>Pensamiento del día</Text>
-        <Text style={s.sectionSubtitle}>Una pequeña pregunta para sentirse más cerca.</Text>
-        
-        <View style={s.thoughtCard}>
-          <Text style={s.thoughtQuestion}>“¿Qué fue lo más bonito que pensaste de nosotros hoy?”</Text>
-          
-          {/* My Answer area */}
-          <View style={s.answerSection}>
-            <View style={s.answerHeader}>
-              <AvatarSource uri={myAvatar} initial={getInitial(myName)} size={24} />
-              <Text style={s.answerLabel}>Tu respuesta</Text>
-            </View>
-            <TextInput
-              style={s.answerInput}
-              placeholder="Escribe algo bonito..."
-              placeholderTextColor={TEXT_MUTED}
-              value={myAnswer}
-              onChangeText={setMyAnswer}
-              multiline
-            />
-          </View>
-
-          {/* Partner Answer area */}
-          <View style={s.answerSection}>
-            <View style={s.answerHeader}>
-              <AvatarSource uri={partnerAvatar} initial={getInitial(partnerName)} size={24} />
-              <Text style={s.answerLabel}>Respuesta de {partnerName}</Text>
-            </View>
-            <View style={s.partnerAnswerBox}>
-              <Text style={s.partnerAnswerText}>Aún no respondió</Text>
-            </View>
-          </View>
-        </View>
-
-        {/* --- 7. Reto de hoy section --- */}
-        <Text style={s.sectionTitle}>Reto de hoy</Text>
-        <Text style={s.sectionSubtitle}>Un pequeño gesto para hacer sonreír a tu pareja.</Text>
-        
-        <View style={s.challengeCard}>
-          {challengeCompleted ? (
-            <View style={s.completedContainer}>
-              <Text style={s.completedEmoji}>✨</Text>
-              <Text style={s.completedTitle}>Reto completado</Text>
-              <Text style={s.completedSubtitle}>¡Qué lindo detalle de tu parte!</Text>
-            </View>
-          ) : (
-            <>
-              <Text style={s.challengeText}>“Envíale un mensaje bonito sin avisar 💌”</Text>
-              
-              <Pressable 
-                style={s.challengeButton}
-                onPress={() => setChallengeCompleted(true)}
-              >
-                <Text style={s.challengeButtonText}>Lo hice</Text>
+              <Pressable style={s.moodEmojiBubble} onPress={handleCycleMood} accessibilityRole="button" accessibilityLabel="Cambiar ánimo">
+                <Text style={s.moodEmojiBubbleText}>{myMood ? myMood.emoji : '❓'}</Text>
               </Pressable>
+              <Text style={s.moodBubbleLabel}>{myMood ? myMood.label : 'Sin responder'}</Text>
+            </View>
 
-              <Text style={s.challengeFooterText}>
-                Cuando lo completes, tu pareja sabrá que pensaste en ella.
-              </Text>
-            </>
-          )}
+            <View style={s.moodCenterBadgeWrap}>
+              <View style={s.moodHeartBadge}>
+                <Heart size={16} color={ACCENT_RED} fill={ACCENT_RED} />
+              </View>
+            </View>
+
+            <View style={s.moodSideColumn}>
+              <View style={s.moodAvatarMeta}>
+                <AvatarSource uri={partnerAvatar} initial={getInitial(partnerName)} size={34} />
+                <Text style={s.moodAvatarMetaLabel} numberOfLines={1}>{partnerName}</Text>
+              </View>
+              <View style={[s.moodEmojiBubble, s.moodEmojiBubblePartner]}>
+                <Text style={s.moodEmojiBubbleText}>{partnerMood ? partnerMood.emoji : '💭'}</Text>
+              </View>
+              <Text style={s.moodBubbleLabel}>{partnerMood ? partnerMood.label : 'Aún no respondió'}</Text>
+            </View>
+          </View>
         </View>
 
-        {/* --- 8. Próxima fecha especial section --- */}
-        <Text style={s.sectionTitle}>Próxima fecha especial</Text>
-        <Text style={s.sectionSubtitle}>No olviden los momentos importantes.</Text>
-        
-        <View style={s.specialDateCard}>
-          <View style={s.dateLeftContainer}>
-            <Text style={s.dateTitle}>Nuestro aniversario</Text>
-            <Text style={s.dateSubtitle}>12 de junio</Text>
-            <View style={s.daysCountdownBadge}>
-              <Text style={s.daysCountdownText}>Faltan 25 días</Text>
+        <Text style={s.sectionTitle}>Para ustedes</Text>
+        <Text style={s.sectionSubtitle}>Detalles y recuerdos importantes.</Text>
+
+        <View style={s.highlightsSection}>
+          <View style={s.highlightCarouselShadow}>
+            <View style={s.highlightCarouselClip}>
+              <View {...highlightPanResponder.panHandlers}>
+                <Animated.View
+                  style={[
+                    s.highlightTrack,
+                    {
+                      width: HIGHLIGHT_WIDTH * homeHighlights.length,
+                      transform: [{ translateX: highlightTranslateX }],
+                    },
+                  ]}
+                >
+                  {homeHighlights.map((item) => (
+                    <View key={item.id} style={s.highlightSlide}>
+                      {renderHighlightSlideContent(item)}
+                    </View>
+                  ))}
+                </Animated.View>
+              </View>
             </View>
           </View>
 
-          <Pressable 
-            style={s.calendarLinkButton}
-            onPress={() => router.push('/(tabs)/calendario')}
-          >
-            <Text style={s.calendarLinkButtonText}>Ver calendario</Text>
-          </Pressable>
-        </View>
-
-        {/* --- 9. Recuerdo bonito section --- */}
-        <Text style={s.sectionTitle}>Recuerdo bonito</Text>
-        <Text style={s.sectionSubtitle}>Un momento para volver a sonreír.</Text>
-        
-        <View style={s.memoryCard}>
-          <View style={s.memoryImagePlaceholder}>
-            <ImageIcon size={24} color={ACCENT_RED} />
-          </View>
-          <View style={s.memoryRightContainer}>
-            <View style={s.memoryDaysBadge}>
-              <Text style={s.memoryDaysText}>Hace 3 días</Text>
-            </View>
-            <Text style={s.memoryTitle}>Guardaron un momento especial juntos</Text>
-            <Text style={s.memoryQuote}>“Ese día fue muy bonito ✨”</Text>
-            
-            <Pressable 
-              style={s.memoryLinkButton}
-              onPress={() => router.push('/(tabs)/moments')}
-            >
-              <Text style={s.memoryLinkButtonText}>Ver momentos</Text>
-            </Pressable>
+          <View style={s.highlightsDotsRow}>
+            {homeHighlights.map((item, index) => (
+              <View
+                key={item.id}
+                style={[
+                  s.highlightsDot,
+                  index === activeHighlightIndex ? s.highlightsDotActive : s.highlightsDotInactive,
+                ]}
+              />
+            ))}
           </View>
         </View>
 
@@ -633,33 +707,6 @@ export default function HomeScreen() {
           </View>
         </View>
 
-        {/* --- 11. Última actividad section --- */}
-        <Text style={s.sectionTitle}>Última actividad</Text>
-        <Text style={s.sectionSubtitle}>Lo último que pasó entre ustedes.</Text>
-        
-        <View style={s.activityCard}>
-          <View style={s.activityItemRow}>
-            <View style={[s.activityIconWrapper, { backgroundColor: SOFT_PINK }]}>
-              <Eye size={16} color={ACCENT_RED} />
-            </View>
-            <View style={s.activityTextWrapper}>
-              <Text style={s.activityText}>{partnerName} vio tu nota hace poco</Text>
-              <Text style={s.activityTime}>Hace unos momentos</Text>
-            </View>
-          </View>
-
-          <View style={s.activityDivider} />
-
-          <View style={s.activityItemRow}>
-            <View style={[s.activityIconWrapper, { backgroundColor: '#F0FDF4' }]}>
-              <ImageIcon size={16} color="#4ADE80" />
-            </View>
-            <View style={s.activityTextWrapper}>
-              <Text style={s.activityText}>{myName} agregó un recuerdo bonito</Text>
-              <Text style={s.activityTime}>Hace 3 horas</Text>
-            </View>
-          </View>
-        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -906,259 +953,140 @@ const s = StyleSheet.create({
     elevation: 4,
     marginBottom: 24,
   },
-  moodHeaderRow: {
+  moodVisualRow: {
     flexDirection: 'row',
-    justifyContent: 'space-between',
     alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: 20,
   },
-  moodHalf: {
+  moodSideColumn: {
     flex: 1,
     alignItems: 'center',
   },
-  moodHalfLabel: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: TEXT_MUTED,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    marginBottom: 10,
-  },
-  moodStatusRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-  },
-  moodStatusTextContainer: {
-    alignItems: 'flex-start',
-  },
-  moodEmojiText: {
-    fontSize: 22,
-    marginBottom: 2,
-  },
-  moodLabelText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: TEXT_PRIMARY,
-  },
-  moodDivider: {
-    width: 1,
-    height: 50,
-    backgroundColor: BORDER,
-  },
-  moodSelectTitle: {
-    fontSize: 13,
-    fontWeight: '800',
-    color: TEXT_MUTED,
-    textTransform: 'uppercase',
-    letterSpacing: 1,
-    textAlign: 'center',
-    marginBottom: 12,
-  },
-  moodSelectorRow: {
-    flexDirection: 'row',
-    marginBottom: 16,
-  },
-  moodOptionButton: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: BORDER,
-    marginRight: 8,
-    backgroundColor: '#FAFAFA',
-    minWidth: 80,
-  },
-  moodOptionButtonActive: {
-    backgroundColor: SOFT_PINK,
-    borderColor: ACCENT_RED,
-  },
-  moodOptionEmoji: {
-    fontSize: 20,
-    marginBottom: 4,
-  },
-  moodOptionLabel: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: TEXT_PRIMARY,
-  },
-  moodFooterText: {
-    fontSize: 12,
-    color: TEXT_SECONDARY,
-    fontStyle: 'italic',
-    textAlign: 'center',
-    marginTop: 4,
-  },
-
-  // Thought styles
-  thoughtCard: {
-    backgroundColor: CARD_BG,
-    borderRadius: 32,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: BORDER,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.05,
-    shadowRadius: 20,
-    elevation: 4,
-    marginBottom: 24,
-  },
-  thoughtQuestion: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: TEXT_PRIMARY,
-    textAlign: 'center',
-    fontStyle: 'italic',
-    lineHeight: 24,
-    marginBottom: 20,
-    paddingHorizontal: 10,
-  },
-  answerSection: {
-    marginBottom: 16,
-  },
-  answerHeader: {
-    flexDirection: 'row',
+  moodAvatarMeta: {
     alignItems: 'center',
     gap: 8,
-    marginBottom: 8,
+    marginBottom: 10,
   },
-  answerLabel: {
+  moodAvatarMetaLabel: {
+    maxWidth: 88,
+    fontSize: 12,
+    fontWeight: '700',
+    color: TEXT_MUTED,
+    textAlign: 'center',
+  },
+  moodCenterBadgeWrap: {
+    width: 44,
+    alignItems: 'center',
+  },
+  moodHeartBadge: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    backgroundColor: '#FFF',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: BORDER,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 2,
+  },
+  moodEmojiBubble: {
+    width: 96,
+    height: 96,
+    borderRadius: 48,
+    backgroundColor: SOFT_PINK,
+    borderWidth: 1,
+    borderColor: BORDER,
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.05,
+    shadowRadius: 18,
+    elevation: 3,
+  },
+  moodEmojiBubblePartner: {
+    backgroundColor: '#FFF7FA',
+  },
+  moodEmojiBubbleText: {
+    fontSize: 42,
+  },
+  moodBubbleLabel: {
+    marginTop: 10,
+    fontSize: 14,
+    fontWeight: '800',
+    color: TEXT_PRIMARY,
+    textAlign: 'center',
+  },
+  // Shared highlights carousel
+  highlightsSection: {
+    marginBottom: 24,
+  },
+  highlightCarouselShadow: {
+    width: HIGHLIGHT_WIDTH,
+    alignSelf: 'center',
+    borderRadius: 28,
+    backgroundColor: CARD_BG,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.08,
+    shadowRadius: 14,
+    elevation: 4,
+  },
+  highlightCarouselClip: {
+    width: HIGHLIGHT_WIDTH,
+    borderRadius: 28,
+    overflow: 'hidden',
+    backgroundColor: CARD_BG,
+    borderWidth: 1,
+    borderColor: '#F3DDE5',
+  },
+  highlightTrack: {
+    flexDirection: 'row',
+  },
+  highlightSlide: {
+    width: HIGHLIGHT_WIDTH,
+    backgroundColor: CARD_BG,
+  },
+  highlightSlideContent: {
+    padding: 22,
+    minHeight: 190,
+    justifyContent: 'space-between',
+  },
+  highlightCardTopRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    gap: 14,
+  },
+  highlightTextContent: {
+    flex: 1,
+    alignItems: 'flex-start',
+  },
+  highlightSectionLabel: {
     fontSize: 12,
     fontWeight: '800',
     color: TEXT_MUTED,
     textTransform: 'uppercase',
-    letterSpacing: 1,
+    letterSpacing: 0.8,
+    marginBottom: 10,
   },
-  answerInput: {
-    backgroundColor: '#FAFAFA',
-    borderWidth: 1,
-    borderColor: BORDER,
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    fontSize: 14,
-    color: TEXT_PRIMARY,
-    minHeight: 60,
-    textAlignVertical: 'top',
-  },
-  partnerAnswerBox: {
-    backgroundColor: '#FAFAFA',
-    borderWidth: 1,
-    borderColor: BORDER,
-    borderRadius: 16,
-    paddingHorizontal: 14,
-    paddingVertical: 14,
-    minHeight: 48,
-    justifyContent: 'center',
-  },
-  partnerAnswerText: {
-    fontSize: 13,
-    fontStyle: 'italic',
-    color: TEXT_SECONDARY,
-  },
-
-  // Challenge styles
-  challengeCard: {
-    backgroundColor: CARD_BG,
-    borderRadius: 32,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: BORDER,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.05,
-    shadowRadius: 20,
-    elevation: 4,
-    marginBottom: 24,
-    alignItems: 'center',
-  },
-  challengeText: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: TEXT_PRIMARY,
-    textAlign: 'center',
-    lineHeight: 24,
-    marginBottom: 16,
-    paddingHorizontal: 10,
-  },
-  challengeButton: {
-    backgroundColor: SOFT_PINK,
-    borderWidth: 1,
-    borderColor: ACCENT_RED,
-    borderRadius: 20,
-    paddingHorizontal: 24,
-    paddingVertical: 10,
-    marginBottom: 12,
-  },
-  challengeButtonText: {
-    fontSize: 14,
+  highlightDateTitle: {
+    fontSize: 18,
     fontWeight: '800',
-    color: ACCENT_RED,
-  },
-  challengeFooterText: {
-    fontSize: 12,
-    color: TEXT_SECONDARY,
-    textAlign: 'center',
-    lineHeight: 18,
-    paddingHorizontal: 10,
-  },
-  completedContainer: {
-    alignItems: 'center',
-    paddingVertical: 10,
-  },
-  completedEmoji: {
-    fontSize: 28,
-    marginBottom: 8,
-  },
-  completedTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: ACCENT_RED,
+    color: TEXT_PRIMARY,
     marginBottom: 4,
   },
-  completedSubtitle: {
-    fontSize: 13,
+  highlightDateSubtitle: {
+    fontSize: 14,
     color: TEXT_SECONDARY,
-    fontStyle: 'italic',
+    marginBottom: 10,
   },
-
-  // Special Date styles
-  specialDateCard: {
-    backgroundColor: CARD_BG,
-    borderRadius: 32,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: BORDER,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.05,
-    shadowRadius: 20,
-    elevation: 4,
-    marginBottom: 24,
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: 12,
-  },
-  dateLeftContainer: {
-    flex: 1,
-    alignItems: 'flex-start',
-  },
-  dateTitle: {
-    fontSize: 16,
-    fontWeight: '800',
-    color: TEXT_PRIMARY,
-    marginBottom: 2,
-  },
-  dateSubtitle: {
-    fontSize: 13,
-    color: TEXT_SECONDARY,
-    marginBottom: 8,
-  },
-  daysCountdownBadge: {
+  highlightDateBadge: {
     backgroundColor: SOFT_PINK,
     borderWidth: 1,
     borderColor: '#FEE2E2',
@@ -1166,12 +1094,61 @@ const s = StyleSheet.create({
     paddingHorizontal: 10,
     paddingVertical: 4,
   },
-  daysCountdownText: {
+  highlightDateBadgeText: {
     fontSize: 11,
     fontWeight: '800',
     color: ACCENT_RED,
   },
-  calendarLinkButton: {
+  highlightDateVisual: {
+    width: 64,
+    height: 64,
+    borderRadius: 18,
+    backgroundColor: SOFT_PINK,
+    borderWidth: 1,
+    borderColor: BORDER,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  highlightMemoryVisual: {
+    width: 64,
+    height: 64,
+    borderRadius: 18,
+    backgroundColor: SOFT_PINK,
+    borderWidth: 1,
+    borderColor: BORDER,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  highlightMemoryBadge: {
+    backgroundColor: '#FAFAFA',
+    borderWidth: 1,
+    borderColor: BORDER,
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    marginBottom: 8,
+  },
+  highlightMemoryBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+    color: TEXT_MUTED,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  highlightMemoryTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: TEXT_PRIMARY,
+    marginBottom: 6,
+  },
+  highlightMemoryQuote: {
+    fontSize: 13,
+    fontStyle: 'italic',
+    color: TEXT_SECONDARY,
+  },
+  highlightLinkButton: {
+    alignSelf: 'flex-start',
+    marginTop: 16,
     backgroundColor: SOFT_PINK,
     borderWidth: 1,
     borderColor: ACCENT_RED,
@@ -1179,83 +1156,28 @@ const s = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 10,
   },
-  calendarLinkButtonText: {
+  highlightLinkButtonText: {
     fontSize: 13,
     fontWeight: '800',
     color: ACCENT_RED,
   },
-
-  // Memory styles
-  memoryCard: {
-    backgroundColor: CARD_BG,
-    borderRadius: 32,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: BORDER,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.05,
-    shadowRadius: 20,
-    elevation: 4,
-    marginBottom: 24,
+  highlightsDotsRow: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 16,
-  },
-  memoryImagePlaceholder: {
-    width: 64,
-    height: 64,
-    borderRadius: 16,
-    backgroundColor: SOFT_PINK,
-    borderWidth: 1,
-    borderColor: BORDER,
     justifyContent: 'center',
     alignItems: 'center',
+    gap: 8,
+    marginTop: 14,
   },
-  memoryRightContainer: {
-    flex: 1,
-    alignItems: 'flex-start',
+  highlightsDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
   },
-  memoryDaysBadge: {
-    backgroundColor: '#FAFAFA',
-    borderWidth: 1,
-    borderColor: BORDER,
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    marginBottom: 6,
+  highlightsDotActive: {
+    backgroundColor: ACCENT_RED,
   },
-  memoryDaysText: {
-    fontSize: 10,
-    fontWeight: '800',
-    color: TEXT_MUTED,
-    textTransform: 'uppercase',
-    letterSpacing: 0.5,
-  },
-  memoryTitle: {
-    fontSize: 14,
-    fontWeight: '800',
-    color: TEXT_PRIMARY,
-    marginBottom: 4,
-  },
-  memoryQuote: {
-    fontSize: 13,
-    fontStyle: 'italic',
-    color: TEXT_SECONDARY,
-    marginBottom: 12,
-  },
-  memoryLinkButton: {
-    backgroundColor: SOFT_PINK,
-    borderWidth: 1,
-    borderColor: ACCENT_RED,
-    borderRadius: 16,
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-  },
-  memoryLinkButtonText: {
-    fontSize: 12,
-    fontWeight: '800',
-    color: ACCENT_RED,
+  highlightsDotInactive: {
+    backgroundColor: '#E9D5D9',
   },
 
   // History styles
@@ -1311,50 +1233,4 @@ const s = StyleSheet.create({
     color: TEXT_SECONDARY,
   },
 
-  // Activity styles
-  activityCard: {
-    backgroundColor: CARD_BG,
-    borderRadius: 32,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: BORDER,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.05,
-    shadowRadius: 20,
-    elevation: 4,
-    marginBottom: 24,
-  },
-  activityItemRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  activityIconWrapper: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-  activityTextWrapper: {
-    flex: 1,
-  },
-  activityText: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: TEXT_PRIMARY,
-  },
-  activityTime: {
-    fontSize: 11,
-    color: TEXT_SECONDARY,
-    marginTop: 2,
-  },
-  activityDivider: {
-    height: 1,
-    backgroundColor: BORDER,
-    marginVertical: 12,
-  },
 });

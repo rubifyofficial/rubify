@@ -1,254 +1,576 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import {
-  View, Text, StyleSheet, Pressable, ScrollView, Alert,
-  Dimensions, ActivityIndicator, Image,
-} from 'react-native';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
+import { Dimensions, Modal, Pressable, ScrollView, StyleSheet, Text, View, ViewStyle } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import {
-  Flame, CheckCircle2, Plus, ArrowLeft,
-  Sparkles, Coffee, Utensils, Tent, Map,
-} from 'lucide-react-native';
-import { supabase } from '../lib/supabase';
-import { useProfileAndCouple } from '../lib/useProfileAndCouple';
+import { ArrowLeft, Check, Heart, HelpCircle, MessageCircle, Plus, RotateCw, Sparkles, X } from 'lucide-react-native';
 
-const { width: SW } = Dimensions.get('window');
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 const COLORS = {
-  bg: '#FFFFFF',
-  card: '#F7F7F5',
-  ink: '#222222',
+  bg: '#FFFDFE',
+  card: '#FFF7FA',
+  ink: '#241D22',
+  muted: '#9D8F98',
   white: '#FFFFFF',
-  muted: '#9CA3AF',
-  red: '#F4A6A6',
-  border: '#F1DCDC',
-  chip: '#FFF7F7',
-  gray: '#6B6B6B',
+  pink: '#E88BA1',
+  pinkSoft: '#F49CAF',
+  border: 'rgba(232, 139, 161, 0.18)',
+  chip: '#FFF5F9',
+  chipActive: '#FCE1EA',
+  shadow: 'rgba(232, 139, 161, 0.16)',
+  overlay: 'rgba(24, 16, 20, 0.35)',
 };
 
-type Activity = {
+type ActivityCategory = 'game' | 'challenge' | 'date' | 'home';
+type CategoryChip = 'all' | ActivityCategory;
+
+type ActivityItem = {
   id: string;
-  couple_id: string;
-  created_by: string;
   title: string;
-  description: string | null;
-  category: string;
-  status: 'idea' | 'done';
-  completed_at: string | null;
-  created_at: string;
+  description: string;
+  tag: string;
+  category: ActivityCategory;
+  section: 'games' | 'challenges' | 'dates';
+  icon: 'heart' | 'message' | 'sparkles' | 'rotate' | 'help';
 };
+
+function getIcon(name: ActivityItem['icon']) {
+  switch (name) {
+    case 'heart':
+      return Heart;
+    case 'message':
+      return MessageCircle;
+    case 'rotate':
+      return RotateCw;
+    case 'help':
+      return HelpCircle;
+    case 'sparkles':
+    default:
+      return Sparkles;
+  }
+}
 
 export default function ActividadesScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const { profile, couple, loading: dataLoading } = useProfileAndCouple();
 
-  const [activities, setActivities] = useState<Activity[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [selectedChip, setSelectedChip] = useState<CategoryChip>('all');
+  const [selectedActivity, setSelectedActivity] = useState<ActivityItem | null>(null);
+  const [completedIds, setCompletedIds] = useState<Record<string, true>>({});
+  const addIndexRef = useRef(0);
+  const [extraActivities, setExtraActivities] = useState<ActivityItem[]>([]);
 
-  const partnerName = couple?.partner_name || 'Pareja';
+  const baseActivities = useMemo<ActivityItem[]>(
+    () => [
+      {
+        id: 'game-love-questions',
+        title: 'Preguntas de amor',
+        description: 'Respondan preguntas dulces para conocerse mejor.',
+        tag: 'JUEGO',
+        category: 'game',
+        section: 'games',
+        icon: 'message',
+      },
+      {
+        id: 'game-plan-wheel',
+        title: 'Ruleta de planes',
+        description: 'Dejen que Usfully elija qué harán hoy.',
+        tag: 'SORPRESA',
+        category: 'game',
+        section: 'games',
+        icon: 'rotate',
+      },
+      {
+        id: 'game-would-you-rather',
+        title: '¿Qué prefieres?',
+        description: 'Elijan entre dos opciones y descubran coincidencias.',
+        tag: 'JUEGO',
+        category: 'game',
+        section: 'games',
+        icon: 'help',
+      },
+      {
+        id: 'challenge-20s-hug',
+        title: 'Abrazo de 20 segundos',
+        description: 'Un reto pequeño para sentirse más cerca.',
+        tag: 'RETO',
+        category: 'challenge',
+        section: 'challenges',
+        icon: 'heart',
+      },
+      {
+        id: 'challenge-sweet-message',
+        title: 'Mensaje bonito',
+        description: 'Escriban algo que aman del otro.',
+        tag: 'AMOR',
+        category: 'challenge',
+        section: 'challenges',
+        icon: 'message',
+      },
+      {
+        id: 'challenge-moment-photo',
+        title: 'Foto del momento',
+        description: 'Tomen una foto y guárdenla como recuerdo.',
+        tag: 'RECUERDO',
+        category: 'challenge',
+        section: 'challenges',
+        icon: 'sparkles',
+      },
+      {
+        id: 'date-romantic-dinner',
+        title: 'Cena romántica',
+        description: 'Un momento especial para compartir sin prisas.',
+        tag: 'CITA',
+        category: 'date',
+        section: 'dates',
+        icon: 'heart',
+      },
+      {
+        id: 'date-movie-night',
+        title: 'Noche de película',
+        description: 'Elijan una película y preparen algo rico.',
+        tag: 'EN CASA',
+        category: 'home',
+        section: 'dates',
+        icon: 'sparkles',
+      },
+      {
+        id: 'date-walk-no-plan',
+        title: 'Paseo sin plan',
+        description: 'Salgan a caminar y descubran un lugar nuevo.',
+        tag: 'CITA',
+        category: 'date',
+        section: 'dates',
+        icon: 'rotate',
+      },
+      {
+        id: 'date-cook-together',
+        title: 'Cocinar juntos',
+        description: 'Preparen una receta sencilla en pareja.',
+        tag: 'PLAN',
+        category: 'home',
+        section: 'dates',
+        icon: 'message',
+      },
+    ],
+    []
+  );
 
-  useEffect(() => {
-    if (couple?.couple_id) {
-      fetchActivities(couple.couple_id);
-    }
-  }, [couple]);
+  const addPool = useMemo<ActivityItem[]>(
+    () => [
+      {
+        id: 'add-01',
+        title: 'Desayuno sorpresa',
+        description: 'Pequeños detalles que cambian el día.',
+        tag: 'AMOR',
+        category: 'home',
+        section: 'dates',
+        icon: 'sparkles',
+      },
+      {
+        id: 'add-02',
+        title: 'Playlist juntos',
+        description: 'Armen una lista con canciones de ustedes.',
+        tag: 'EN CASA',
+        category: 'home',
+        section: 'dates',
+        icon: 'message',
+      },
+      {
+        id: 'add-03',
+        title: 'Mini reto: cumplido',
+        description: 'Digan un cumplido sincero ahora mismo.',
+        tag: 'RETO',
+        category: 'challenge',
+        section: 'challenges',
+        icon: 'heart',
+      },
+    ],
+    []
+  );
 
-  const fetchActivities = async (cid: string) => {
-    const { data, error } = await supabase
-      .from('activities')
-      .select('*')
-      .eq('couple_id', cid)
-      .order('created_at', { ascending: false });
+  const allActivities = useMemo(() => [...baseActivities, ...extraActivities], [baseActivities, extraActivities]);
+  const isCompleted = useCallback((id: string) => !!completedIds[id], [completedIds]);
 
-    if (error) {
-      console.log('[Actividades] fetch error:', error.message);
-    } else {
-      setActivities(data ?? []);
-    }
-    setLoading(false);
-  };
+  const filteredActivities = useMemo(() => {
+    const visible = allActivities.filter((item) => !isCompleted(item.id));
+    if (selectedChip === 'all') return visible;
+    return visible.filter((item) => item.category === selectedChip);
+  }, [allActivities, isCompleted, selectedChip]);
 
-  const handleAddActivity = async () => {
-    if (!couple?.couple_id || !profile?.id || actionLoading) return;
-    setActionLoading('add');
-    try {
-      const { error } = await supabase.from('activities').insert({
-        couple_id: couple.couple_id,
-        created_by: profile.id,
-        title: "Cena romántica",
-        description: "Un momento especial para compartir.",
-        category: "Cena",
-        status: "idea"
-      });
+  const completedActivities = useMemo(() => allActivities.filter((item) => isCompleted(item.id)), [allActivities, isCompleted]);
 
-      if (error) throw error;
-      Alert.alert('¡Listo!', 'Actividad guardada');
-      fetchActivities(couple.couple_id);
-    } catch (e) {
-      Alert.alert('Error', 'No se pudo guardar');
-    } finally {
-      setActionLoading(null);
-    }
-  };
+  const heroActivity = useMemo(() => {
+    const preferred = filteredActivities.find((item) => item.id === 'date-romantic-dinner') ?? null;
+    return preferred || filteredActivities[0] || null;
+  }, [filteredActivities]);
 
-  const handleMarkAsDone = async (activityId: string) => {
-    if (!couple?.couple_id || actionLoading) return;
-    setActionLoading(activityId);
-    try {
-      const { error } = await supabase
-        .from('activities')
-        .update({
-          status: 'done',
-          completed_at: new Date().toISOString()
-        })
-        .eq('id', activityId);
+  const handleAddQuickIdea = useCallback(() => {
+    const idx = addIndexRef.current % addPool.length;
+    addIndexRef.current += 1;
+    const pick = addPool[idx];
+    const next: ActivityItem = { ...pick, id: `${pick.id}-${Date.now()}` };
+    setExtraActivities((prev) => [next, ...prev]);
+  }, [addPool]);
 
-      if (error) throw error;
-      Alert.alert('¡Felicidades!', 'Actividad completada');
-      fetchActivities(couple.couple_id);
-    } catch (e) {
-      Alert.alert('Error', 'No se pudo completar');
-    } finally {
-      setActionLoading(null);
-    }
-  };
+  const handleOpenActivity = useCallback((activity: ActivityItem) => {
+    setSelectedActivity(activity);
+  }, []);
 
-  const ideas = activities.filter(x => x.status === 'idea');
-  const completed = activities.filter(x => x.status === 'done');
-  const mainSuggestion = ideas.length > 0 ? ideas[0] : null;
+  const handleCloseModal = useCallback(() => {
+    setSelectedActivity(null);
+  }, []);
 
-  if (dataLoading || loading) {
-    return (
-      <View style={[s.root, { justifyContent: 'center', alignItems: 'center' }]}>
-        <ActivityIndicator size="large" color={COLORS.red} />
-      </View>
-    );
-  }
+  const handleMarkAsDone = useCallback(() => {
+    if (!selectedActivity) return;
+    const id = selectedActivity.id;
+    setCompletedIds((prev) => ({ ...prev, [id]: true }));
+    setSelectedActivity(null);
+  }, [selectedActivity]);
+
+  const headerRightStyle: ViewStyle = useMemo(
+    () => ({
+      paddingRight: 18,
+    }),
+    []
+  );
 
   return (
     <View style={[s.root, { paddingTop: insets.top }]}>
       <View style={s.header}>
-        <Pressable onPress={() => router.back()} style={s.backBtn}>
-          <ArrowLeft size={24} color={COLORS.ink} />
+        <Pressable onPress={() => router.back()} style={s.backBtn} accessibilityRole="button" accessibilityLabel="Volver">
+          <ArrowLeft size={22} color={COLORS.ink} />
         </Pressable>
         <View style={s.headerTitleWrap}>
           <Text style={s.headerTitle}>Actividades</Text>
-          <Text style={s.headerSub}>Planes para hacer juntos</Text>
+          <Text style={s.headerSub}>Planes, juegos y retos para ustedes</Text>
         </View>
-        <Pressable 
-          style={[s.addIconBtn, actionLoading === 'add' && { opacity: 0.6 }]} 
-          onPress={handleAddActivity}
-          disabled={actionLoading === 'add'}
-        >
-          {actionLoading === 'add' ? <ActivityIndicator size="small" color={COLORS.white} /> : <Plus size={22} color={COLORS.white} />}
-        </Pressable>
+        <View style={headerRightStyle}>
+          <Pressable style={s.addIconBtn} onPress={handleAddQuickIdea} accessibilityRole="button" accessibilityLabel="Agregar idea">
+            <Plus size={22} color={COLORS.white} strokeWidth={2.6} />
+          </Pressable>
+        </View>
       </View>
 
       <ScrollView contentContainerStyle={[s.content, { paddingBottom: insets.bottom + 40 }]} showsVerticalScrollIndicator={false}>
-        <View style={s.suggestionCard}>
-          <View style={s.suggLabelRow}>
-            <Sparkles size={14} color={COLORS.red} />
-            <Text style={s.suggLabelText}>Plan sugerido</Text>
-          </View>
-          {mainSuggestion ? (
-            <>
-              <Text style={s.suggTitle}>{mainSuggestion.title}</Text>
-              <Text style={s.suggDesc}>{mainSuggestion.description}</Text>
-              <Pressable 
-                style={[s.suggBtn, actionLoading === mainSuggestion.id && { opacity: 0.7 }]}
-                onPress={() => handleMarkAsDone(mainSuggestion.id)}
-                disabled={!!actionLoading}
-              >
-                <CheckCircle2 size={18} color={COLORS.white} />
-                <Text style={s.suggBtnText}>Marcar como hecho</Text>
-              </Pressable>
-            </>
-          ) : (
-            <View style={s.emptySugg}>
-              <Text style={s.emptySuggTxt}>Elijan una actividad para hacer juntos</Text>
-              <Pressable style={s.emptySuggBtn} onPress={handleAddActivity}>
-                <Text style={s.emptySuggBtnTxt}>Elegir idea</Text>
-              </Pressable>
+        <View style={s.heroCard}>
+          <View style={s.heroTopRow}>
+            <View style={s.heroLabelPill}>
+              <Sparkles size={14} color={COLORS.pink} />
+              <Text style={s.heroLabelText}>Plan de hoy</Text>
             </View>
-          )}
+          </View>
+          <Text style={s.heroTitle}>{heroActivity?.title ?? 'Plan de hoy'}</Text>
+          <Text style={s.heroDesc}>{heroActivity?.description ?? 'Elijan algo bonito para compartir.'}</Text>
+          <Pressable
+            style={[s.heroButton, !heroActivity && { opacity: 0.6 }]}
+            disabled={!heroActivity}
+            onPress={() => {
+              if (heroActivity) handleOpenActivity(heroActivity);
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Empezar plan"
+          >
+            <Text style={s.heroButtonText}>Empezar plan</Text>
+          </Pressable>
         </View>
 
-        {ideas.length > 0 && (
-          <>
-            <Text style={s.sectionTitle}>Ideas pendientes</Text>
-            {ideas.map(item => (
-              <View key={item.id} style={s.itemRow}>
-                <View style={s.itemIconWrap}>
-                  <Coffee size={20} color={COLORS.red} />
-                </View>
-                <View style={s.itemMain}>
-                  <Text style={s.itemTitle}>{item.title}</Text>
-                  <Text style={s.itemDesc} numberOfLines={1}>{item.description}</Text>
-                  <View style={s.itemMeta}>
-                    <Text style={s.itemCategory}>{item.category}</Text>
-                    <View style={s.dot} />
-                    <Text style={s.itemAuthor}>{item.created_by === profile?.id ? 'De mí' : `De ${partnerName}`}</Text>
-                  </View>
-                </View>
-                <Pressable onPress={() => handleMarkAsDone(item.id)} disabled={!!actionLoading}>
-                  <CheckCircle2 size={24} color={COLORS.border} />
-                </Pressable>
-              </View>
-            ))}
-          </>
-        )}
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={s.chipsRow}>
+          {(
+            [
+              { key: 'all', label: 'Todos' },
+              { key: 'game', label: 'Juegos' },
+              { key: 'challenge', label: 'Retos' },
+              { key: 'date', label: 'Citas' },
+              { key: 'home', label: 'En casa' },
+            ] as const
+          ).map((chip) => {
+            const active = selectedChip === chip.key;
+            return (
+              <Pressable
+                key={chip.key}
+                onPress={() => setSelectedChip(chip.key)}
+                style={[s.chip, active && s.chipActive]}
+                accessibilityRole="button"
+                accessibilityState={{ selected: active }}
+              >
+                <Text style={[s.chipText, active && s.chipTextActive]}>{chip.label}</Text>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
 
-        {completed.length > 0 && (
-          <>
-            <Text style={[s.sectionTitle, { marginTop: 20 }]}>Completadas</Text>
-            {completed.map(item => (
-              <View key={item.id} style={[s.itemRow, { opacity: 0.5 }]}>
-                <View style={[s.itemIconWrap, { backgroundColor: '#F1F1F1' }]}>
-                  <CheckCircle2 size={20} color={COLORS.muted} />
-                </View>
-                <View style={s.itemMain}>
-                  <Text style={[s.itemTitle, { textDecorationLine: 'line-through' }]}>{item.title}</Text>
-                  <Text style={s.itemDesc}>Hecho el {new Date(item.completed_at!).toLocaleDateString('es')}</Text>
-                </View>
+        <Text style={s.sectionTitle}>Juegos para dos</Text>
+        <View style={s.cardsGrid}>
+          {filteredActivities
+            .filter((a) => a.section === 'games')
+            .map((item) => {
+              const Icon = getIcon(item.icon);
+              return (
+                <Pressable key={item.id} style={s.activityCard} onPress={() => handleOpenActivity(item)} accessibilityRole="button">
+                  <View style={s.cardTopRow}>
+                    <View style={s.cardIcon}>
+                      <Icon size={18} color={COLORS.pink} strokeWidth={2.2} />
+                    </View>
+                    <View style={s.cardTagPill}>
+                      <Text style={s.cardTagText}>{item.tag}</Text>
+                    </View>
+                  </View>
+                  <Text style={s.cardTitle}>{item.title}</Text>
+                  <Text style={s.cardDesc} numberOfLines={2}>
+                    {item.description}
+                  </Text>
+                </Pressable>
+              );
+            })}
+        </View>
+
+        <Text style={[s.sectionTitle, { marginTop: 18 }]}>Retos dulces</Text>
+        <View style={s.cardsGrid}>
+          {filteredActivities
+            .filter((a) => a.section === 'challenges')
+            .map((item) => {
+              const Icon = getIcon(item.icon);
+              return (
+                <Pressable key={item.id} style={s.activityCard} onPress={() => handleOpenActivity(item)} accessibilityRole="button">
+                  <View style={s.cardTopRow}>
+                    <View style={s.cardIcon}>
+                      <Icon size={18} color={COLORS.pink} strokeWidth={2.2} />
+                    </View>
+                    <View style={s.cardTagPill}>
+                      <Text style={s.cardTagText}>{item.tag}</Text>
+                    </View>
+                  </View>
+                  <Text style={s.cardTitle}>{item.title}</Text>
+                  <Text style={s.cardDesc} numberOfLines={2}>
+                    {item.description}
+                  </Text>
+                </Pressable>
+              );
+            })}
+        </View>
+
+        <Text style={[s.sectionTitle, { marginTop: 18 }]}>Ideas para cita</Text>
+        <View style={s.cardsGrid}>
+          {filteredActivities
+            .filter((a) => a.section === 'dates')
+            .map((item) => {
+              const Icon = getIcon(item.icon);
+              return (
+                <Pressable key={item.id} style={s.activityCard} onPress={() => handleOpenActivity(item)} accessibilityRole="button">
+                  <View style={s.cardTopRow}>
+                    <View style={s.cardIcon}>
+                      <Icon size={18} color={COLORS.pink} strokeWidth={2.2} />
+                    </View>
+                    <View style={s.cardTagPill}>
+                      <Text style={s.cardTagText}>{item.tag}</Text>
+                    </View>
+                  </View>
+                  <Text style={s.cardTitle}>{item.title}</Text>
+                  <Text style={s.cardDesc} numberOfLines={2}>
+                    {item.description}
+                  </Text>
+                </Pressable>
+              );
+            })}
+        </View>
+
+        <Text style={[s.sectionTitle, { marginTop: 20 }]}>Recuerdos completados</Text>
+        {completedActivities.length === 0 ? (
+          <Text style={s.completedEmpty}>Cuando terminen una actividad, aparecerá aquí.</Text>
+        ) : (
+          <View style={s.completedRow}>
+            {completedActivities.map((item) => (
+              <View key={item.id} style={s.completedPill}>
+                <Text style={s.completedTitle} numberOfLines={1}>
+                  {item.title}
+                </Text>
+                <Text style={s.completedTag}>{item.tag}</Text>
               </View>
             ))}
-          </>
+          </View>
         )}
       </ScrollView>
+
+      <Modal visible={!!selectedActivity} transparent animationType="fade" onRequestClose={handleCloseModal}>
+        <View style={s.modalBackdrop}>
+          <Pressable style={s.modalDismiss} onPress={handleCloseModal} />
+          <View style={s.modalSheet}>
+            <View style={s.modalHeaderRow}>
+              <View style={s.modalTitleWrap}>
+                <Text style={s.modalTitle}>{selectedActivity?.title ?? ''}</Text>
+                <View style={s.modalTagPill}>
+                  <Text style={s.modalTagText}>{selectedActivity?.tag ?? ''}</Text>
+                </View>
+              </View>
+              <Pressable style={s.modalClose} onPress={handleCloseModal} accessibilityRole="button" accessibilityLabel="Cerrar">
+                <X size={18} color={COLORS.muted} />
+              </Pressable>
+            </View>
+            <Text style={s.modalDesc}>{selectedActivity?.description ?? ''}</Text>
+
+            <Pressable style={s.modalPrimaryBtn} onPress={handleMarkAsDone} accessibilityRole="button" accessibilityLabel="Marcar como hecho">
+              <Check size={18} color={COLORS.white} strokeWidth={2.6} />
+              <Text style={s.modalPrimaryText}>Marcar como hecho</Text>
+            </Pressable>
+
+            <Pressable style={s.modalSecondaryBtn} onPress={handleCloseModal} accessibilityRole="button" accessibilityLabel="Cerrar">
+              <Text style={s.modalSecondaryText}>Cerrar</Text>
+            </Pressable>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
 const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: COLORS.bg },
-  content: { paddingHorizontal: 20, paddingTop: 10 },
-  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, height: 60, marginBottom: 10 },
-  backBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: COLORS.chip, justifyContent: 'center', alignItems: 'center' },
-  headerTitleWrap: { flex: 1, marginLeft: 16 },
+  header: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, height: 66, marginBottom: 8 },
+  backBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: COLORS.white,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    shadowColor: COLORS.shadow,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 1,
+    shadowRadius: 18,
+    elevation: 5,
+  },
+  headerTitleWrap: { flex: 1, paddingHorizontal: 12, alignItems: 'center' },
   headerTitle: { fontSize: 24, fontWeight: '800', color: COLORS.ink },
-  headerSub: { fontSize: 13, color: COLORS.muted, marginTop: 2 },
-  addIconBtn: { width: 40, height: 40, borderRadius: 20, backgroundColor: COLORS.red, justifyContent: 'center', alignItems: 'center' },
-  suggestionCard: { backgroundColor: COLORS.card, borderRadius: 28, padding: 22, marginBottom: 28, borderWidth: 1, borderColor: COLORS.border },
-  suggLabelRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 14 },
-  suggLabelText: { fontSize: 12, fontWeight: '800', color: COLORS.red, textTransform: 'uppercase' },
-  suggTitle: { fontSize: 22, fontWeight: '800', color: COLORS.ink, marginBottom: 8 },
-  suggDesc: { fontSize: 14, color: COLORS.gray, lineHeight: 20, marginBottom: 20 },
-  suggBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: COLORS.ink, paddingVertical: 14, borderRadius: 16 },
-  suggBtnText: { color: COLORS.white, fontSize: 15, fontWeight: '700' },
-  emptySugg: { alignItems: 'center', paddingVertical: 10 },
-  emptySuggTxt: { fontSize: 16, color: COLORS.gray, marginBottom: 16 },
-  emptySuggBtn: { backgroundColor: COLORS.red, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20 },
-  emptySuggBtnTxt: { color: COLORS.white, fontSize: 14, fontWeight: '700' },
-  sectionTitle: { fontSize: 18, fontWeight: '800', color: COLORS.ink, marginBottom: 16 },
-  itemRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#FFF', padding: 14, borderRadius: 24, marginBottom: 12, borderWidth: 1, borderColor: COLORS.border },
-  itemIconWrap: { width: 44, height: 44, borderRadius: 14, backgroundColor: COLORS.chip, justifyContent: 'center', alignItems: 'center', marginRight: 14 },
-  itemMain: { flex: 1 },
-  itemTitle: { fontSize: 16, fontWeight: '700', color: COLORS.ink, marginBottom: 2 },
-  itemDesc: { fontSize: 12, color: COLORS.muted, marginBottom: 4 },
-  itemMeta: { flexDirection: 'row', alignItems: 'center' },
-  itemCategory: { fontSize: 10, fontWeight: '700', color: COLORS.red, textTransform: 'uppercase' },
-  dot: { width: 3, height: 3, borderRadius: 1.5, backgroundColor: COLORS.border, marginHorizontal: 6 },
-  itemAuthor: { fontSize: 10, fontWeight: '600', color: COLORS.muted },
+  headerSub: { fontSize: 12.5, color: COLORS.muted, marginTop: 3 },
+  addIconBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: COLORS.pink,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: COLORS.shadow,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 1,
+    shadowRadius: 20,
+    elevation: 6,
+  },
+  content: { paddingHorizontal: 18, paddingTop: 8 },
+  heroCard: {
+    backgroundColor: COLORS.card,
+    borderRadius: 22,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    shadowColor: COLORS.shadow,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 1,
+    shadowRadius: 20,
+    elevation: 6,
+  },
+  heroTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  heroLabelPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: COLORS.white,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  heroLabelText: { fontSize: 12, fontWeight: '800', color: COLORS.ink, letterSpacing: 0.3 },
+  heroTitle: { fontSize: 20, fontWeight: '800', color: COLORS.ink, marginBottom: 6 },
+  heroDesc: { fontSize: 13.5, lineHeight: 20, color: COLORS.muted, marginBottom: 14 },
+  heroButton: { height: 44, borderRadius: 14, backgroundColor: COLORS.pink, alignItems: 'center', justifyContent: 'center' },
+  heroButtonText: { color: COLORS.white, fontWeight: '800', fontSize: 14 },
+  chipsRow: { paddingTop: 14, paddingBottom: 6, gap: 10, paddingHorizontal: 2 },
+  chip: { backgroundColor: COLORS.chip, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 999, borderWidth: 1, borderColor: COLORS.border },
+  chipActive: { backgroundColor: COLORS.chipActive, borderColor: 'rgba(232, 139, 161, 0.35)' },
+  chipText: { color: COLORS.muted, fontWeight: '700', fontSize: 13 },
+  chipTextActive: { color: COLORS.ink },
+  sectionTitle: { fontSize: 16, fontWeight: '800', color: COLORS.ink, marginBottom: 10, marginTop: 18 },
+  cardsGrid: { gap: 12 },
+  activityCard: {
+    backgroundColor: COLORS.white,
+    borderRadius: 18,
+    padding: 14,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    shadowColor: COLORS.shadow,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 1,
+    shadowRadius: 18,
+    elevation: 4,
+  },
+  cardTopRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
+  cardIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 14,
+    backgroundColor: COLORS.chip,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  cardTagPill: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.border },
+  cardTagText: { fontSize: 11, fontWeight: '900', color: COLORS.pink, letterSpacing: 0.3 },
+  cardTitle: { fontSize: 15, fontWeight: '800', color: COLORS.ink, marginBottom: 4 },
+  cardDesc: { fontSize: 12.5, lineHeight: 18, color: COLORS.muted },
+  completedEmpty: { color: COLORS.muted, fontSize: 13, lineHeight: 19, paddingHorizontal: 2 },
+  completedRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+  completedPill: {
+    width: (SCREEN_WIDTH - 18 * 2 - 10) / 2,
+    borderRadius: 16,
+    backgroundColor: COLORS.card,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    padding: 12,
+  },
+  completedTitle: { color: COLORS.ink, fontSize: 13, fontWeight: '800', marginBottom: 4 },
+  completedTag: { color: COLORS.muted, fontSize: 11, fontWeight: '700' },
+  modalBackdrop: { flex: 1, backgroundColor: COLORS.overlay, justifyContent: 'flex-end' },
+  modalDismiss: { flex: 1 },
+  modalSheet: {
+    backgroundColor: COLORS.white,
+    borderTopLeftRadius: 22,
+    borderTopRightRadius: 22,
+    padding: 18,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  modalHeaderRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 10 },
+  modalTitleWrap: { flex: 1, paddingRight: 10 },
+  modalTitle: { fontSize: 18, fontWeight: '900', color: COLORS.ink, marginBottom: 8 },
+  modalTagPill: { alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.border },
+  modalTagText: { fontSize: 11, fontWeight: '900', color: COLORS.pink, letterSpacing: 0.3 },
+  modalClose: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: '#FFF8FB',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  modalDesc: { color: COLORS.muted, fontSize: 13.5, lineHeight: 20, marginBottom: 14 },
+  modalPrimaryBtn: {
+    height: 48,
+    borderRadius: 16,
+    backgroundColor: COLORS.pink,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    marginBottom: 10,
+  },
+  modalPrimaryText: { color: COLORS.white, fontSize: 14, fontWeight: '900' },
+  modalSecondaryBtn: { height: 46, borderRadius: 16, backgroundColor: COLORS.card, borderWidth: 1, borderColor: COLORS.border, alignItems: 'center', justifyContent: 'center' },
+  modalSecondaryText: { color: COLORS.ink, fontSize: 14, fontWeight: '800' },
 });

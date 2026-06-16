@@ -9,61 +9,62 @@ import { useFonts } from 'expo-font';
 import * as ImagePicker from 'expo-image-picker';
 import { useRouter } from 'expo-router';
 import {
-    Brush,
-    Check,
-    ChevronLeft,
-    Eraser,
-    Heart,
-    Image as ImageIcon,
-    PaintBucket,
-    Palette,
-    Plus,
-    Sparkles,
-    Trash2,
-    Type,
-    X
+  Brush,
+  Check,
+  ChevronLeft,
+  Eraser,
+  Heart,
+  Image as ImageIcon,
+  PaintBucket,
+  Palette,
+  Plus,
+  Sparkles,
+  Trash2,
+  Type,
+  X
 } from 'lucide-react-native';
 import getStroke from 'perfect-freehand';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-    ActivityIndicator,
-    Alert,
-    Dimensions,
-    Image,
-    Keyboard,
-    Modal,
-    PanResponder,
-    Platform,
-    Pressable,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View
+  ActivityIndicator,
+  Alert,
+  Dimensions,
+  FlatList,
+  Image,
+  Keyboard,
+  Modal,
+  NativeScrollEvent,
+  NativeSyntheticEvent,
+  Platform,
+  Pressable,
+  ScrollView,
+  StyleProp,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
+  ViewStyle
 } from 'react-native';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import FastDrawingSurface from '../../components/FastDrawingSurface';
 import {
-    DrawingBrushPreview as SharedDrawingBrushPreview,
-    DrawingBrushType as SharedDrawingBrushType,
-    DrawingPoint as SharedDrawingPoint,
-    DrawingStroke as SharedDrawingStroke,
-    DrawingStrokeLayer as SharedDrawingStrokeLayer,
-    buildGrainDotsForSegment as buildSharedGrainDotsForSegment,
-    buildStrokePaths as buildSharedStrokePaths,
-    getBrushMinDistance as getSharedBrushMinDistance,
-    getBrushOpacityMultiplier as getSharedBrushOpacityMultiplier,
-    getBrushWidthMultiplier as getSharedBrushWidthMultiplier,
-    getMinVisibleOpacity as getSharedMinVisibleOpacity,
-    fnv1aHash as sharedFnv1aHash,
-    shouldAddPoint as shouldAddSharedPoint
+  DrawingBrushPreview as SharedDrawingBrushPreview,
+  DrawingBrushType as SharedDrawingBrushType,
+  DrawingPoint as SharedDrawingPoint,
+  DrawingStroke as SharedDrawingStroke,
+  DrawingStrokeLayer as SharedDrawingStrokeLayer,
+  buildStrokePaths as buildSharedStrokePaths,
+  getBrushOpacityMultiplier as getSharedBrushOpacityMultiplier,
+  getBrushWidthMultiplier as getSharedBrushWidthMultiplier
 } from '../../lib/drawing-engine';
 import { supabase } from '../../lib/supabase';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const NOTES_BUCKET = 'notes';
+const DETAIL_CARD_SIZE = Math.min(SCREEN_WIDTH * 0.86, SCREEN_HEIGHT * 0.62);
 const BG = '#FFF7FB';
 const TEXT = '#4C2A3D';
 const TEXT_SOFT = '#8E6D7D';
@@ -95,6 +96,10 @@ type StoredDrawingData = {
   backgroundColor?: string;
   previewImageUrl?: string | null;
   preview_image_url?: string | null;
+  snapshotUrl?: string | null;
+  snapshot_url?: string | null;
+  thumbnailUrl?: string | null;
+  thumbnail_url?: string | null;
   photos?: Array<{ uri?: string | null }>;
   texts?: Array<{ text?: string | null }>;
   stickers?: Array<{ sticker?: string | null }>;
@@ -207,14 +212,13 @@ const EDITOR_BACKGROUND_COLORS = [
   '#EFEAE4',
 ] as const;
 
-function fmtDate(iso: string): string {
+function fmtSpreadDate(iso: string): string {
   try {
     const date = new Date(iso);
-    return date.toLocaleString('es-ES', {
+    return date.toLocaleDateString('es-ES', {
       day: 'numeric',
       month: 'short',
-      hour: '2-digit',
-      minute: '2-digit',
+      year: 'numeric',
     });
   } catch {
     return '';
@@ -241,6 +245,23 @@ function getPreviewText(value: unknown, fallback = 'Recuerdo'): string {
   return text.length > 80 ? `${text.slice(0, 80)}...` : text;
 }
 
+function getAlbumCardPreview(text: string, maxLength = 55): string {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (!clean) return '';
+  if (clean.length <= maxLength) return clean;
+  return `${clean.slice(0, maxLength).trimEnd()}...`;
+}
+
+function getAlbumCardSourceText(item: AlbumMemory, fallback = 'Recuerdo'): string {
+  const fullText = typeof item.text === 'string' ? item.text.replace(/\s+/g, ' ').trim() : '';
+  if (fullText) return fullText;
+
+  const previewText = typeof item.previewText === 'string' ? item.previewText.replace(/\s+/g, ' ').trim() : '';
+  if (previewText) return previewText;
+
+  return fallback;
+}
+
 function normalizeNoteToAlbumMemory(note: DbNote, currentUserId?: string | null): AlbumMemory | null {
   if (!note?.id) return null;
 
@@ -255,6 +276,10 @@ function normalizeNoteToAlbumMemory(note: DbNote, currentUserId?: string | null)
     (typeof note.drawing_preview_url === 'string' && note.drawing_preview_url.trim() ? note.drawing_preview_url.trim() : null) ||
     (typeof drawingData?.previewImageUrl === 'string' && drawingData.previewImageUrl.trim() ? drawingData.previewImageUrl.trim() : null) ||
     (typeof drawingData?.preview_image_url === 'string' && drawingData.preview_image_url.trim() ? drawingData.preview_image_url.trim() : null) ||
+    (typeof drawingData?.snapshotUrl === 'string' && drawingData.snapshotUrl.trim() ? drawingData.snapshotUrl.trim() : null) ||
+    (typeof drawingData?.snapshot_url === 'string' && drawingData.snapshot_url.trim() ? drawingData.snapshot_url.trim() : null) ||
+    (typeof drawingData?.thumbnailUrl === 'string' && drawingData.thumbnailUrl.trim() ? drawingData.thumbnailUrl.trim() : null) ||
+    (typeof drawingData?.thumbnail_url === 'string' && drawingData.thumbnail_url.trim() ? drawingData.thumbnail_url.trim() : null) ||
     null;
   const previewImageUrl = drawingPreviewUrl || imageUrl || firstDrawingPhoto || null;
 
@@ -382,6 +407,25 @@ type MemoryPieceLayout = {
   rotate: string;
 };
 
+type PageAnchorKind = 'hero' | 'side' | 'medium' | 'note';
+
+type AlbumPageAnchor = {
+  x: number;
+  y: number;
+  rotate: string;
+  kind: PageAnchorKind;
+};
+
+type AlbumPlacedMemory = {
+  item: AlbumMemory;
+  layout: MemoryPieceLayout;
+};
+
+type AlbumSpreadData = {
+  left: AlbumPlacedMemory[];
+  right: AlbumPlacedMemory[];
+};
+
 function clampMemoryPieceLayout(layout: MemoryPieceLayout, pageWidth: number, pageHeight: number): MemoryPieceLayout {
   const margin = 10;
   const maxWidth = Math.max(96, pageWidth - margin * 2);
@@ -399,40 +443,215 @@ function clampMemoryPieceLayout(layout: MemoryPieceLayout, pageWidth: number, pa
   };
 }
 
-function getSpreadPageLayouts(side: 'left' | 'right', pageWidth: number, pageHeight: number): MemoryPieceLayout[] {
-  const leftLayouts: MemoryPieceLayout[] = [
-    { x: pageWidth * 0.07, y: pageHeight * 0.1, w: 88, h: 84, rotate: '-5deg' },
-    { x: pageWidth * 0.36, y: pageHeight * 0.11, w: 122, h: 156, rotate: '3deg' },
-    { x: pageWidth * 0.08, y: pageHeight * 0.58, w: 126, h: 110, rotate: '-2.4deg' },
+function hasMemoryVisualPreview(item: AlbumMemory): boolean {
+  return Boolean(item.previewImageUrl || item.drawingPreviewUrl || item.imageUrl);
+}
+
+function getAlbumPageAnchors(side: 'left' | 'right', pageWidth: number, pageHeight: number): AlbumPageAnchor[] {
+  const leftAnchors: AlbumPageAnchor[] = [
+    {
+      x: pageWidth * 0.10,
+      y: pageHeight * 0.11,
+      rotate: '-2.2deg',
+      kind: 'hero',
+    },
+    {
+      x: pageWidth * 0.50,
+      y: pageHeight * 0.35,
+      rotate: '1.5deg',
+      kind: 'side',
+    },
+    {
+      x: pageWidth * 0.08,
+      y: pageHeight * 0.53,
+      rotate: '-1.1deg',
+      kind: 'medium',
+    },
+    {
+      x: pageWidth * 0.48,
+      y: pageHeight * 0.76,
+      rotate: '1deg',
+      kind: 'note',
+    },
   ];
-  const rightLayouts: MemoryPieceLayout[] = [
-    { x: pageWidth * 0.34, y: pageHeight * 0.08, w: 120, h: 145, rotate: '3.2deg' },
-    { x: pageWidth * 0.1, y: pageHeight * 0.34, w: 110, h: 132, rotate: '-2.6deg' },
-    { x: pageWidth * 0.12, y: pageHeight * 0.67, w: 120, h: 92, rotate: '1.8deg' },
+
+  const rightAnchors: AlbumPageAnchor[] = [
+    {
+      x: pageWidth * 0.19,
+      y: pageHeight * 0.11,
+      rotate: '2.1deg',
+      kind: 'hero',
+    },
+    {
+      x: pageWidth * 0.11,
+      y: pageHeight * 0.35,
+      rotate: '-1.6deg',
+      kind: 'side',
+    },
+    {
+      x: pageWidth * 0.23,
+      y: pageHeight * 0.54,
+      rotate: '1.2deg',
+      kind: 'medium',
+    },
+    {
+      x: pageWidth * 0.12,
+      y: pageHeight * 0.76,
+      rotate: '-1deg',
+      kind: 'note',
+    },
   ];
-  const source = side === 'left' ? leftLayouts : rightLayouts;
-  return source.map((layout) => clampMemoryPieceLayout(layout, pageWidth, pageHeight));
+
+  return side === 'left' ? leftAnchors : rightAnchors;
+}
+
+function canUseAnchorKind(item: AlbumMemory, anchorKind: PageAnchorKind): boolean {
+  if (anchorKind === 'note') {
+    return item.kind === 'text' || (item.kind === 'mixed' && !hasMemoryVisualPreview(item));
+  }
+  if (anchorKind === 'side') {
+    return item.kind !== 'drawing' || hasMemoryVisualPreview(item);
+  }
+  return true;
+}
+
+function getLayoutSizeForMemory(item: AlbumMemory, anchorKind: PageAnchorKind, pageWidth: number, pageHeight: number) {
+  const hasPreview = hasMemoryVisualPreview(item);
+  const previewLength = getPreviewText(item.previewText, 'Recuerdo').length;
+
+  if (item.kind === 'photo') {
+    if (anchorKind === 'side') return { w: pageWidth * 0.50, h: pageHeight * 0.17 };
+    if (anchorKind === 'medium') return { w: pageWidth * 0.60, h: pageHeight * 0.19 };
+    return { w: pageWidth * 0.64, h: pageHeight * 0.21 };
+  }
+
+  if (item.kind === 'drawing') {
+    if (anchorKind === 'side') return { w: pageWidth * 0.52, h: pageHeight * 0.18 };
+    if (anchorKind === 'medium') return { w: pageWidth * 0.64, h: pageHeight * 0.20 };
+    return { w: pageWidth * 0.70, h: pageHeight * 0.24 };
+  }
+
+  if (item.kind === 'mixed') {
+    if (!hasPreview) {
+      if (anchorKind === 'note') return { w: pageWidth * 0.50, h: pageHeight * 0.145 };
+      if (anchorKind === 'side') return { w: pageWidth * 0.54, h: pageHeight * 0.16 };
+      return { w: pageWidth * 0.60, h: pageHeight * 0.18 };
+    }
+    if (anchorKind === 'side') return { w: pageWidth * 0.54, h: pageHeight * 0.19 };
+    if (anchorKind === 'medium') return { w: pageWidth * 0.63, h: pageHeight * 0.20 };
+    return { w: pageWidth * 0.68, h: pageHeight * 0.22 };
+  }
+
+  if (anchorKind === 'note') {
+    return previewLength > 42
+      ? { w: pageWidth * 0.52, h: pageHeight * 0.15 }
+      : { w: pageWidth * 0.48, h: pageHeight * 0.135 };
+  }
+  if (anchorKind === 'side') {
+    return { w: pageWidth * 0.54, h: pageHeight * 0.15 };
+  }
+  if (anchorKind === 'medium') {
+    return { w: pageWidth * 0.58, h: pageHeight * 0.17 };
+  }
+  return { w: pageWidth * 0.61, h: pageHeight * 0.18 };
+}
+
+function buildMemoryLayoutForAnchor(
+  item: AlbumMemory,
+  anchor: AlbumPageAnchor,
+  pageWidth: number,
+  pageHeight: number
+): MemoryPieceLayout {
+  const size = getLayoutSizeForMemory(item, anchor.kind, pageWidth, pageHeight);
+  return clampMemoryPieceLayout(
+    {
+      x: anchor.x,
+      y: anchor.y,
+      w: size.w,
+      h: size.h,
+      rotate: anchor.rotate,
+    },
+    pageWidth,
+    pageHeight
+  );
+}
+
+function buildAlbumPage(
+  memories: AlbumMemory[],
+  startIndex: number,
+  side: 'left' | 'right',
+  pageWidth: number,
+  pageHeight: number
+): { placements: AlbumPlacedMemory[]; nextIndex: number } {
+  const anchors = getAlbumPageAnchors(side, pageWidth, pageHeight);
+  const placements: AlbumPlacedMemory[] = [];
+  let index = startIndex;
+
+  for (const anchor of anchors) {
+    if (index >= memories.length) break;
+    const item = memories[index];
+    if (!canUseAnchorKind(item, anchor.kind)) {
+      continue;
+    }
+
+    placements.push({
+      item,
+      layout: buildMemoryLayoutForAnchor(item, anchor, pageWidth, pageHeight),
+    });
+    index += 1;
+  }
+
+  return { placements, nextIndex: index };
+}
+
+function chunkMemoriesIntoSpreads(memories: AlbumMemory[], pageWidth: number, pageHeight: number): AlbumSpreadData[] {
+  const spreads: AlbumSpreadData[] = [];
+  let index = 0;
+
+  while (index < memories.length) {
+    const leftPage = buildAlbumPage(memories, index, 'left', pageWidth, pageHeight);
+    index = leftPage.nextIndex;
+
+    const rightPage = buildAlbumPage(memories, index, 'right', pageWidth, pageHeight);
+    index = rightPage.nextIndex;
+
+    spreads.push({
+      left: leftPage.placements,
+      right: rightPage.placements,
+    });
+  }
+
+  return spreads;
 }
 
 function getMemoryPreviewLabel(item: AlbumMemory): string {
   return getPreviewText(item.previewText, 'Recuerdo');
 }
 
-function getMemoryCaption(item: AlbumMemory): string {
-  if (item.createdAt) {
-    const formatted = fmtDate(item.createdAt);
+function getAlbumSpreadTitle(spread: AlbumSpreadData): string {
+  const firstItem = spread.left[0]?.item ?? spread.right[0]?.item ?? null;
+  if (firstItem?.createdAt) {
+    const formatted = fmtSpreadDate(firstItem.createdAt);
     if (formatted) return formatted;
   }
-  return getMemoryPreviewLabel(item);
+  return 'Recuerdos juntos';
 }
 
 function getMemoryPaperTone(item: AlbumMemory): string {
   if (item.kind === 'text') return item.isMine ? '#FFF7F1' : '#FFF2F7';
   if (item.kind === 'drawing') return '#FFF9F1';
+  if (item.kind === 'mixed') return '#FFF8F3';
   return '#FFFDF8';
 }
 
+function getMemoryDetailText(item: AlbumMemory): string {
+  if (typeof item.text === 'string' && item.text.trim()) return item.text.trim();
+  if (typeof item.previewText === 'string' && item.previewText.trim()) return item.previewText.trim();
+  return '';
+}
+
 type MemoryAttachment = 'tape' | 'double_tape' | 'clip';
+type CardVariant = 'small' | 'detail';
 
 function getMemoryAttachment(item: AlbumMemory, seed: number): MemoryAttachment {
   if (item.kind === 'photo') return seed % 2 === 0 ? 'double_tape' : 'tape';
@@ -1336,6 +1555,8 @@ export default function NotesScreen() {
   const [albumLoading, setAlbumLoading] = useState(false);
   const [hasCouple, setHasCouple] = useState(true);
   const [showAlbum, setShowAlbum] = useState(false);
+  const [selectedMemory, setSelectedMemory] = useState<AlbumMemory | null>(null);
+  const [isHeaderHeartActive, setIsHeaderHeartActive] = useState(false);
   const [mainCardPhotoUri, setMainCardPhotoUri] = useState<string | null>(null);
   const [isMainPhotoSheetOpen, setIsMainPhotoSheetOpen] = useState(false);
   const [isEditorOpen, setIsEditorOpen] = useState(false);
@@ -1349,7 +1570,6 @@ export default function NotesScreen() {
   const [editorStrokeWidth, setEditorStrokeWidth] = useState(5);
   const [editorOpacity, setEditorOpacity] = useState(1);
   const [editorStrokes, setEditorStrokes] = useState<DrawStroke[]>([]);
-  const [editorCurrentStroke, setEditorCurrentStroke] = useState<DrawStroke | null>(null);
   const [editorPhotos, setEditorPhotos] = useState<EditorPhotoElement[]>([]);
   const [editorActivePhotoId, setEditorActivePhotoId] = useState<string | null>(null);
   const [editorTextElements, setEditorTextElements] = useState<EditorTextElement[]>([]);
@@ -1371,21 +1591,33 @@ export default function NotesScreen() {
     width: number;
     height: number;
   } | null>(null);
+  const [isDrawingActive, setIsDrawingActive] = useState(false);
+  const [currentAlbumSpreadIndex, setCurrentAlbumSpreadIndex] = useState(0);
   const signedUrlCacheRef = useRef<Record<string, string>>({});
+  const albumPagerRef = useRef<FlatList<AlbumSpreadData> | null>(null);
+  const notesHasDrawingPreviewUrlColumnRef = useRef(false);
+  const mainPhotoResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTouchingPhotoRef = useRef(false);
   const isTouchingTextRef = useRef(false);
   const isTouchingStickerRef = useRef(false);
   const editorPhotoGestureCountRef = useRef(0);
   const canvasTouchStartedOnPhotoRef = useRef(false);
   const editorTextInputRefs = useRef<Record<string, TextInput | null>>({});
-  const drawFrameRef = useRef<number | null>(null);
-  const drawStrokeRef = useRef<DrawStroke | null>(null);
 
   useEffect(() => {
     if (fontError) {
       console.log('[Notas] font load error', fontError);
     }
   }, [fontError]);
+
+  useEffect(() => {
+    return () => {
+      if (mainPhotoResetTimeoutRef.current) {
+        clearTimeout(mainPhotoResetTimeoutRef.current);
+        mainPhotoResetTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   const fetchNotes = useCallback(async (cid: string, context: 'default' | 'album' = 'default') => {
     try {
@@ -1406,6 +1638,28 @@ export default function NotesScreen() {
 
       console.log('[ALBUM_DATA] raw notes count', data?.length);
       console.log('[ALBUM_DATA] first raw note keys', data?.[0] ? Object.keys(data[0]) : []);
+      notesHasDrawingPreviewUrlColumnRef.current = !!data?.[0] && Object.prototype.hasOwnProperty.call(data[0] as any, 'drawing_preview_url');
+
+      const latestDrawing = (data ?? []).find((note) => note?.note_type === 'drawing') ?? null;
+      const parsedDrawingData = latestDrawing ? safeParseDrawingData((latestDrawing as any).drawing_data) : null;
+      console.log('[DRAWING_PREVIEW_DEBUG] latest drawing note', {
+        id: latestDrawing?.id,
+        note_type: latestDrawing?.note_type,
+        hasImageUrl: !!latestDrawing?.image_url,
+        hasDrawingData: !!latestDrawing?.drawing_data,
+        hasDrawingPreviewUrl: !!(latestDrawing as any)?.drawing_preview_url,
+        drawingDataKeys: parsedDrawingData ? Object.keys(parsedDrawingData as any) : [],
+        hasPreviewImageUrlInDrawingData: !!(
+          (parsedDrawingData as any)?.previewImageUrl ||
+          (parsedDrawingData as any)?.preview_image_url ||
+          (parsedDrawingData as any)?.snapshotUrl ||
+          (parsedDrawingData as any)?.snapshot_url
+        ),
+        strokesCount: Array.isArray((parsedDrawingData as any)?.strokes) ? (parsedDrawingData as any).strokes.length : 0,
+        textsCount: Array.isArray((parsedDrawingData as any)?.texts) ? (parsedDrawingData as any).texts.length : 0,
+        photosCount: Array.isArray((parsedDrawingData as any)?.photos) ? (parsedDrawingData as any).photos.length : 0,
+        stickersCount: Array.isArray((parsedDrawingData as any)?.stickers) ? (parsedDrawingData as any).stickers.length : 0,
+      });
       setNotes(data ?? []);
       if (context === 'album') {
         setAlbumError(null);
@@ -1507,8 +1761,30 @@ export default function NotesScreen() {
     };
   }, [coupleId]);
 
-  const handleUnavailableTool = useCallback(() => {
-    Alert.alert('Notas', 'Muy pronto podrás usar esta opción.');
+  const clearMainPhotoResetTimeout = useCallback(() => {
+    if (mainPhotoResetTimeoutRef.current) {
+      clearTimeout(mainPhotoResetTimeoutRef.current);
+      mainPhotoResetTimeoutRef.current = null;
+    }
+  }, []);
+
+  const resetMainNoteCard = useCallback(() => {
+    clearMainPhotoResetTimeout();
+    setMainCardPhotoUri(null);
+    setNoteText('');
+  }, [clearMainPhotoResetTimeout]);
+
+  const scheduleMainPhotoReset = useCallback(() => {
+    clearMainPhotoResetTimeout();
+    mainPhotoResetTimeoutRef.current = setTimeout(() => {
+      mainPhotoResetTimeoutRef.current = null;
+      setMainCardPhotoUri(null);
+      setNoteText('');
+    }, 1500);
+  }, [clearMainPhotoResetTimeout]);
+
+  const handleHeaderHeartPress = useCallback(() => {
+    setIsHeaderHeartActive((prev) => !prev);
   }, []);
 
   const handleOpenAlbum = useCallback(() => {
@@ -1516,16 +1792,16 @@ export default function NotesScreen() {
   }, []);
 
   const handleClearNote = useCallback(() => {
-    setNoteText('');
-    setMainCardPhotoUri(null);
-  }, []);
+    resetMainNoteCard();
+  }, [resetMainNoteCard]);
 
   const handleMainNoteTextChange = useCallback((value: string) => {
+    clearMainPhotoResetTimeout();
     if (value.trim().length > 0) {
       setMainCardPhotoUri(null);
     }
     setNoteText(value);
-  }, []);
+  }, [clearMainPhotoResetTimeout]);
 
   const uploadNotePhoto = useCallback(async (photo: EditorPhotoElement, cid: string, uid: string): Promise<UploadNotePhotoResult> => {
     const localUri = photo.uri;
@@ -1753,7 +2029,6 @@ export default function NotesScreen() {
 
         setNoteText('');
         setEditorText('');
-        setEditorCurrentStroke(null);
         setEditorStrokes([]);
         setEditorPhotos([]);
         setEditorActivePhotoId(null);
@@ -1770,6 +2045,7 @@ export default function NotesScreen() {
         setEditorToolMode('pencil');
         setEditorTextFontSize(22);
         setSelectedFontStyle('normal');
+        setIsDrawingActive(false);
         setIsEditorOpen(false);
         await fetchNotes(coupleId);
         Alert.alert('Notas', 'Nota guardada.');
@@ -1960,180 +2236,35 @@ export default function NotesScreen() {
     );
   }, [editorActiveTextId, editorTextFontSize]);
 
-  const editorPanResponder = useMemo(() => {
-    const getPoint = (e: any): DrawPoint => ({
-      x: Number(e.nativeEvent.locationX ?? 0),
-      y: Number(e.nativeEvent.locationY ?? 0),
-    });
+  const handleFastDrawingStart = useCallback(() => {
+    canvasTouchStartedOnPhotoRef.current = false;
+    setIsDrawingActive(true);
+    setEditorActivePhotoId(null);
+  }, []);
 
-    const scheduleStrokeUpdate = () => {
-      if (drawFrameRef.current !== null) return;
-      drawFrameRef.current = requestAnimationFrame(() => {
-        drawFrameRef.current = null;
-        const stroke = drawStrokeRef.current;
-        if (!stroke) {
-          setEditorCurrentStroke(null);
-          return;
-        }
-        const brush = normalizeDrawBrush(stroke.brush);
-        stroke.brush = brush;
-        const nextPaths = buildSharedStrokePaths(stroke.points, brush, stroke.width);
-        stroke.d = nextPaths.d;
-        stroke.fillD = nextPaths.fillD;
-        setEditorCurrentStroke({
-          ...stroke,
-          points: [...stroke.points],
-          grain: stroke.grain ? [...stroke.grain] : undefined,
-        });
-      });
-    };
+  const handleFastDrawingEnd = useCallback(() => {
+    canvasTouchStartedOnPhotoRef.current = false;
+    setIsDrawingActive(false);
+  }, []);
 
-    const startStroke = (p: DrawPoint) => {
-      if (isTouchingPhotoRef.current) return;
-      const startedAt = Date.now();
-      const startPoint: SharedDrawingPoint = { x: p.x, y: p.y, t: startedAt, pressure: 0.5 };
-      const points: SharedDrawingPoint[] = [startPoint];
-      const brush = normalizeDrawBrush(editorToolMode);
-      const opacity =
-        brush === 'eraser'
-          ? 1
-          : clampNumber(
-              Math.max(getSharedMinVisibleOpacity(brush, editorColor), editorOpacity * getSharedBrushOpacityMultiplier(brush)),
-              0.04,
-              1
-            );
-      const width = getBrushStrokeWidth(brush, editorStrokeWidth);
-      const baseColor = brush === 'eraser' ? editorCanvasBackground : editorColor;
-      const nextPaths = buildSharedStrokePaths(points, brush, width);
-      const stroke: DrawStroke = {
-        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        color: baseColor,
-        width,
-        opacity,
-        brush,
-        points,
-        d: nextPaths.d,
-        fillD: nextPaths.fillD,
-        grain: brush === 'pencil' ? [] : undefined,
-      };
-      drawStrokeRef.current = stroke;
-      setEditorCurrentStroke(stroke);
-    };
+  const handleFastAddStroke = useCallback((stroke: DrawStroke) => {
+    setEditorStrokes((prev) => [...prev, stroke]);
+  }, []);
 
-    const addPoint = (p: DrawPoint) => {
-      if (isTouchingPhotoRef.current) return;
-      const current = drawStrokeRef.current;
-      if (!current) return;
-      const prev = current.points[current.points.length - 1] ?? null;
-      const brush = normalizeDrawBrush(current.brush);
-      const now = Date.now();
-      const dt = Math.max(16, now - (prev?.t ?? now));
-      const dist = prev ? Math.hypot(p.x - prev.x, p.y - prev.y) : 0;
-      const speed = dist / dt;
-      const nextPressure = clampNumber(1 - speed * 2.2, 0.14, 1);
-      const nextPoint: SharedDrawingPoint = {
-        x: p.x,
-        y: p.y,
-        t: now,
-        pressure: brush === 'pen' ? nextPressure : 0.5,
-      };
-      const minDistance = getSharedBrushMinDistance(brush, current.width);
-      if (!shouldAddSharedPoint(prev, nextPoint, minDistance)) return;
-
-      current.points.push(nextPoint);
-      if (brush === 'pencil') {
-        const grain = current.grain ?? [];
-        const newDots = buildSharedGrainDotsForSegment(
-          prev ?? nextPoint,
-          nextPoint,
-          current.width,
-          current.opacity,
-          sharedFnv1aHash(current.id),
-          grain.length,
-          220
-        );
-        if (newDots.length > 0) grain.push(...newDots);
-        current.grain = grain;
-      }
-      scheduleStrokeUpdate();
-    };
-
-    const endStroke = () => {
-      if (drawFrameRef.current !== null) {
-        cancelAnimationFrame(drawFrameRef.current);
-        drawFrameRef.current = null;
-      }
-      const current = drawStrokeRef.current;
-      drawStrokeRef.current = null;
-      if (!current) {
-        setEditorCurrentStroke(null);
-        return;
-      }
-      if (current.points.length < 2) {
-        setEditorCurrentStroke(null);
-        return;
-      }
-      const brush = normalizeDrawBrush(current.brush);
-      current.brush = brush;
-      const nextPaths = buildSharedStrokePaths(current.points, brush, current.width);
-      current.d = nextPaths.d;
-      current.fillD = nextPaths.fillD;
-      const finalized: DrawStroke = {
-        ...current,
-        points: [...current.points],
-        grain: current.grain ? [...current.grain] : undefined,
-      };
-      setEditorStrokes((prev) => [...prev, finalized]);
-      setEditorCurrentStroke(null);
-    };
-
-    return PanResponder.create({
-      onStartShouldSetPanResponder: (e) =>
-        editorCategory === 'pen' &&
-        !isTouchingPhotoRef.current &&
-        editorActivePhotoId === null &&
-        !editorPhotoGestureCountRef.current &&
-        !canvasTouchStartedOnPhotoRef.current &&
-        !isPointOnAnyPhoto(getPoint(e), editorPhotos) &&
-        !isPointOnAnyTextElement(getPoint(e), editorTextElements) &&
-        !findEditorStickerAtPoint(getPoint(e), editorStickers),
-      onMoveShouldSetPanResponder: (e) =>
-        editorCategory === 'pen' &&
-        !isTouchingPhotoRef.current &&
-        editorActivePhotoId === null &&
-        !editorPhotoGestureCountRef.current &&
-        !canvasTouchStartedOnPhotoRef.current &&
-        !isPointOnAnyPhoto(getPoint(e), editorPhotos) &&
-        !isPointOnAnyTextElement(getPoint(e), editorTextElements) &&
-        !findEditorStickerAtPoint(getPoint(e), editorStickers),
-      onPanResponderGrant: (e) => {
-        setEditorActivePhotoId(null);
-        startStroke(getPoint(e));
-      },
-      onPanResponderMove: (e) => addPoint(getPoint(e)),
-      onPanResponderRelease: () => {
-        canvasTouchStartedOnPhotoRef.current = false;
-        endStroke();
-      },
-      onPanResponderTerminate: () => {
-        canvasTouchStartedOnPhotoRef.current = false;
-        endStroke();
-      },
-    });
-  }, [
-    drawFrameRef,
-    drawStrokeRef,
-    editorActivePhotoId,
-    editorCanvasBackground,
-    editorCategory,
-    editorColor,
-    editorOpacity,
-    editorPhotos,
-    editorStickers,
-    editorStrokeWidth,
-    editorTextElements,
-    editorToolMode,
-  ]);
+  const canStartFastStroke = useCallback(
+    (point: { x: number; y: number }) => {
+      if (editorCategory !== 'pen') return false;
+      if (isTouchingPhotoRef.current) return false;
+      if (editorActivePhotoId !== null) return false;
+      if (editorPhotoGestureCountRef.current) return false;
+      if (canvasTouchStartedOnPhotoRef.current) return false;
+      if (isPointOnAnyPhoto(point, editorPhotos)) return false;
+      if (isPointOnAnyTextElement(point, editorTextElements)) return false;
+      if (findEditorStickerAtPoint(point, editorStickers)) return false;
+      return true;
+    },
+    [editorActivePhotoId, editorCategory, editorPhotos, editorStickers, editorTextElements]
+  );
 
   const addEditorPhoto = useCallback(
     (uri: string) => {
@@ -2197,6 +2328,7 @@ export default function NotesScreen() {
       }
 
       setSaving(true);
+      clearMainPhotoResetTimeout();
       setMainCardPhotoUri(uri);
       setNoteText('');
 
@@ -2237,15 +2369,17 @@ export default function NotesScreen() {
 
         setMainCardPhotoUri(uploadedUrlForUi);
         await fetchNotes(coupleId);
+        scheduleMainPhotoReset();
       } catch (error) {
         console.log('[Notas] handleSaveMainPhotoNote error', error);
+        clearMainPhotoResetTimeout();
         setMainCardPhotoUri(null);
         Alert.alert('Notas', 'No se pudo guardar la foto. Inténtalo de nuevo.');
       } finally {
         setSaving(false);
       }
     },
-    [coupleId, fetchNotes, uploadNotePhoto, userId]
+    [clearMainPhotoResetTimeout, coupleId, fetchNotes, scheduleMainPhotoReset, uploadNotePhoto, userId]
   );
 
   const handleSaveMainTextNote = useCallback(async () => {
@@ -2296,8 +2430,7 @@ export default function NotesScreen() {
         return;
       }
 
-      setMainCardPhotoUri(null);
-      setNoteText('');
+      resetMainNoteCard();
       await fetchNotes(coupleId);
     } catch (error) {
       console.log('[Notas] handleSaveMainTextNote error', error);
@@ -2305,7 +2438,7 @@ export default function NotesScreen() {
     } finally {
       setSaving(false);
     }
-  }, [coupleId, fetchNotes, handleOpenEditor, noteText, userId]);
+  }, [coupleId, fetchNotes, handleOpenEditor, noteText, resetMainNoteCard, userId]);
 
   const handleMainFotoPress = useCallback(() => {
     setIsMainPhotoSheetOpen(true);
@@ -2540,26 +2673,11 @@ export default function NotesScreen() {
   const foldWidth = 8;
   const pageWidth = (bookWidth - foldWidth) / 2;
   const pageHeight = bookHeight;
-  const firstImageMemory = useMemo(
-    () =>
-      memories.find(
-        (item) =>
-          typeof item.previewImageUrl === 'string' ||
-          typeof item.drawingPreviewUrl === 'string' ||
-          typeof item.imageUrl === 'string'
-      ) ?? null,
-    [memories]
-  );
-  const firstImageUri =
-    firstImageMemory?.previewImageUrl ||
-    firstImageMemory?.drawingPreviewUrl ||
-    firstImageMemory?.imageUrl ||
-    null;
-  const spreadItems = useMemo(() => memories.slice(0, 6), [memories]);
-  const leftItems = useMemo(() => spreadItems.slice(0, 3), [spreadItems]);
-  const rightItems = useMemo(() => spreadItems.slice(3, 6), [spreadItems]);
-  const leftLayouts = useMemo(() => getSpreadPageLayouts('left', pageWidth, pageHeight), [pageHeight, pageWidth]);
-  const rightLayouts = useMemo(() => getSpreadPageLayouts('right', pageWidth, pageHeight), [pageHeight, pageWidth]);
+  const albumSpreads = useMemo<AlbumSpreadData[]>(() => {
+    const spreads = chunkMemoriesIntoSpreads(memories, pageWidth, pageHeight);
+    return spreads.length > 0 ? spreads : [{ left: [], right: [] }];
+  }, [memories, pageHeight, pageWidth]);
+  const totalAlbumSpreads = albumSpreads.length;
 
   const resolveAlbumPreviewUrls = useCallback(async (items: AlbumMemory[]) => {
     return Promise.all(
@@ -2642,6 +2760,28 @@ export default function NotesScreen() {
     };
   }, [notes, resolveAlbumPreviewUrls, userId]);
 
+  useEffect(() => {
+    if (!showAlbum) {
+      setSelectedMemory(null);
+      setCurrentAlbumSpreadIndex(0);
+      return;
+    }
+
+    requestAnimationFrame(() => {
+      albumPagerRef.current?.scrollToOffset({ offset: 0, animated: false });
+      setCurrentAlbumSpreadIndex(0);
+    });
+  }, [showAlbum]);
+
+  const handleAlbumPagerMomentumEnd = useCallback(
+    (event: NativeSyntheticEvent<NativeScrollEvent>) => {
+      const offsetX = event.nativeEvent.contentOffset.x;
+      const nextIndex = Math.round(offsetX / Math.max(bookWidth, 1));
+      setCurrentAlbumSpreadIndex(clampNumber(nextIndex, 0, Math.max(totalAlbumSpreads - 1, 0)));
+    },
+    [bookWidth, totalAlbumSpreads]
+  );
+
   if (loading) {
     return (
       <View style={[s.root, s.loadingState]}>
@@ -2655,6 +2795,7 @@ export default function NotesScreen() {
       <ScrollView
         contentContainerStyle={[s.scrollContent, { paddingBottom: insets.bottom + 28 }]}
         showsVerticalScrollIndicator={false}
+        scrollEnabled={!isDrawingActive}
       >
         <View style={s.headerRow}>
           <Pressable style={s.headerCircleButton} onPress={() => router.back()}>
@@ -2669,8 +2810,13 @@ export default function NotesScreen() {
             <Text style={s.headerSubtitle}>Cartas · Recuerdos</Text>
           </View>
 
-          <Pressable style={s.headerActionButton} onPress={handleUnavailableTool}>
-            <Heart size={17} color={WHITE} strokeWidth={2} />
+          <Pressable style={[s.headerActionButton, isHeaderHeartActive && s.headerActionButtonActive]} onPress={handleHeaderHeartPress}>
+            <Heart
+              size={17}
+              color={isHeaderHeartActive ? '#FFFFFF' : '#B2527A'}
+              fill={isHeaderHeartActive ? '#FFFFFF' : 'transparent'}
+              strokeWidth={2}
+            />
           </Pressable>
         </View>
 
@@ -2780,13 +2926,34 @@ export default function NotesScreen() {
           </>
         )}
       </ScrollView>
-      <Modal visible={isEditorOpen} animationType="fade" transparent onRequestClose={() => setIsEditorOpen(false)}>
+      <Modal
+        visible={isEditorOpen}
+        animationType="fade"
+        transparent
+        onRequestClose={() => {
+          setIsDrawingActive(false);
+          setIsEditorOpen(false);
+        }}
+      >
         <GestureHandlerRootView style={{ flex: 1 }}>
           <View style={s.editorOverlayBackdrop}>
-            <Pressable style={s.editorOverlayDismissArea} onPress={() => setIsEditorOpen(false)} />
+            <Pressable
+              style={s.editorOverlayDismissArea}
+              onPress={() => {
+                setIsDrawingActive(false);
+                setIsEditorOpen(false);
+              }}
+            />
             <View style={[s.editorOverlayCenter, { paddingTop: insets.top + 16, paddingBottom: insets.bottom + 16 }]}>
               <View style={s.editorCard}>
-                <Pressable style={s.editorCloseButton} onPress={() => setIsEditorOpen(false)} disabled={saving}>
+                <Pressable
+                  style={s.editorCloseButton}
+                  onPress={() => {
+                    setIsDrawingActive(false);
+                    setIsEditorOpen(false);
+                  }}
+                  disabled={saving}
+                >
                   <X size={18} color={TEXT} />
                 </Pressable>
 
@@ -2861,6 +3028,7 @@ export default function NotesScreen() {
                     canvasTouchStartedOnPhotoRef.current = false;
                     isTouchingTextRef.current = false;
                     isTouchingStickerRef.current = false;
+                    setIsDrawingActive(false);
                   }}
                   onLayout={(e) => {
                     const { width, height } = e.nativeEvent.layout;
@@ -2878,11 +3046,21 @@ export default function NotesScreen() {
                     );
                   }}
                 >
-                  <View style={s.editorCanvasDrawSurface} {...editorPanResponder.panHandlers} />
-                  <Canvas style={StyleSheet.absoluteFill} pointerEvents="none">
-                    <CommittedDrawLayer strokes={editorStrokes} backgroundColor={editorCanvasBackground} />
-                    <CurrentDrawLayer stroke={editorCurrentStroke} backgroundColor={editorCanvasBackground} />
-                  </Canvas>
+                  <FastDrawingSurface
+                    width={editorCanvasSize.width}
+                    height={editorCanvasSize.height}
+                    strokes={editorStrokes}
+                    brush={editorToolMode}
+                    color={editorColor}
+                    backgroundColor={editorCanvasBackground}
+                    strokeWidth={editorStrokeWidth}
+                    opacity={editorOpacity}
+                    enabled={editorCategory === 'pen' && !saving}
+                    onAddStroke={handleFastAddStroke}
+                    onDrawingStart={handleFastDrawingStart}
+                    onDrawingEnd={handleFastDrawingEnd}
+                    shouldStartStroke={canStartFastStroke}
+                  />
                   {editorStickers.map((item) => (
                     <EditorStickerItem
                       key={item.id}
@@ -3294,12 +3472,11 @@ export default function NotesScreen() {
                       const canvasTextsForSave = editorTextElements.filter((item) => item.text.trim().length > 0);
                       const hasDrawing =
                         editorStrokes.length > 0 ||
-                        (editorCurrentStroke?.points?.length ?? 0) > 1 ||
                         editorCanvasBackground !== EDITOR_CANVAS_DEFAULT_BG ||
                         editorPhotos.length > 0 ||
                         canvasTextsForSave.length > 0 ||
                         editorStickers.length > 0;
-                      const strokesForSave = editorCurrentStroke ? [...editorStrokes, editorCurrentStroke] : editorStrokes;
+                      const strokesForSave = editorStrokes;
                       const drawing = hasDrawing
                         ? {
                             backgroundColor: editorCanvasBackground,
@@ -3355,45 +3532,85 @@ export default function NotesScreen() {
               <Pressable style={s.albumOverlayCloseButton} onPress={() => setShowAlbum(false)}>
                 <X size={18} color={TEXT} />
               </Pressable>
-              <View style={[s.albumStaticBook, { width: bookWidth, height: bookHeight }]}>
-                <Text style={s.albumBookTitle}>Recuerdos juntos</Text>
-                <View style={[s.albumStaticPageLeft, { width: pageWidth, height: bookHeight }]}>
-                  <View style={s.albumStaticPageCanvas}>
-                    <PageDecoration side="left" />
-                    {leftItems.map((item, index) => (
-                      <MemoryPiece
-                        key={item.id}
-                        item={item}
-                        layout={leftLayouts[index] ?? leftLayouts[0]}
-                        fontsLoaded={fontsLoaded}
-                      />
-                    ))}
-                  </View>
+              <View style={[s.albumBookShadowWrapper, { width: bookWidth, height: bookHeight }]}>
+                <View style={[s.albumBookClipMask, { width: bookWidth, height: bookHeight }]}>
+                  <FlatList
+                    ref={albumPagerRef}
+                    data={albumSpreads}
+                    keyExtractor={(_, index) => `album-spread-${index}`}
+                    horizontal
+                    pagingEnabled
+                    showsHorizontalScrollIndicator={false}
+                    bounces={false}
+                    decelerationRate="fast"
+                    snapToInterval={bookWidth}
+                    snapToAlignment="start"
+                    disableIntervalMomentum
+                    onMomentumScrollEnd={handleAlbumPagerMomentumEnd}
+                    style={{ width: bookWidth, height: bookHeight }}
+                    renderItem={({ item: spread, index }) => (
+                      <View style={[s.albumPagerItem, { width: bookWidth, height: bookHeight }]}>
+                        <View style={s.albumStaticBook}>
+                          {index === currentAlbumSpreadIndex ? (
+                            <Text style={s.albumBookTitle}>
+                              {getAlbumSpreadTitle(albumSpreads[currentAlbumSpreadIndex] || spread)}
+                            </Text>
+                          ) : null}
+                          <View style={[s.albumStaticPageLeft, { width: pageWidth, height: bookHeight }]}>
+                            <View style={s.albumStaticPageCanvas}>
+                              <PageDecoration side="left" />
+                              {spread.left.map((placement) => (
+                                <MemoryPiece
+                                  key={placement.item.id}
+                                  item={placement.item}
+                                  layout={placement.layout}
+                                  fontsLoaded={fontsLoaded}
+                                  onPress={() => setSelectedMemory(placement.item)}
+                                />
+                              ))}
+                            </View>
+                          </View>
+                          <View style={[s.albumStaticFold, { width: foldWidth, height: bookHeight }]} />
+                          <View style={[s.albumStaticPageRight, { width: pageWidth, height: bookHeight }]}>
+                            <View style={s.albumStaticPageCanvas}>
+                              <PageDecoration side="right" />
+                              {spread.right.map((placement) => (
+                                <MemoryPiece
+                                  key={placement.item.id}
+                                  item={placement.item}
+                                  layout={placement.layout}
+                                  fontsLoaded={fontsLoaded}
+                                  onPress={() => setSelectedMemory(placement.item)}
+                                />
+                              ))}
+                            </View>
+                          </View>
+                          {memories.length === 0 ? (
+                            <View style={s.albumEmptyOverlay} pointerEvents="none">
+                              <View style={s.emptyBookState}>
+                                <Text style={s.emptyBookTitle}>Aún no hay recuerdos aquí ♡</Text>
+                                <Text style={s.emptyBookSubtitle}>Guarda una nota, una foto o un dibujo para empezar.</Text>
+                              </View>
+                            </View>
+                          ) : null}
+                        </View>
+                      </View>
+                    )}
+                    getItemLayout={(_, index) => ({
+                      length: bookWidth,
+                      offset: bookWidth * index,
+                      index,
+                    })}
+                  />
                 </View>
-                <View style={[s.albumStaticFold, { width: foldWidth, height: bookHeight }]} />
-                <View style={[s.albumStaticPageRight, { width: pageWidth, height: bookHeight }]}>
-                  <View style={s.albumStaticPageCanvas}>
-                    <PageDecoration side="right" />
-                    {rightItems.map((item, index) => (
-                      <MemoryPiece
-                        key={item.id}
-                        item={item}
-                        layout={rightLayouts[index] ?? rightLayouts[0]}
-                        fontsLoaded={fontsLoaded}
-                      />
-                    ))}
-                  </View>
-                </View>
-                {memories.length === 0 ? (
-                  <View style={s.albumEmptyOverlay} pointerEvents="none">
-                    <View style={s.emptyBookState}>
-                      <Text style={s.emptyBookTitle}>Aún no hay recuerdos aquí ♡</Text>
-                      <Text style={s.emptyBookSubtitle}>Guarda una nota, una foto o un dibujo para empezar.</Text>
-                    </View>
-                  </View>
-                ) : null}
               </View>
+              <Text style={s.albumPageIndicator}>
+                {Math.min(currentAlbumSpreadIndex + 1, totalAlbumSpreads)} / {totalAlbumSpreads}
+              </Text>
             </View>
+            {selectedMemory ? (
+              <AlbumMemoryDetailOverlay memory={selectedMemory} fontsLoaded={fontsLoaded} onClose={() => setSelectedMemory(null)} />
+            ) : null}
           </View>
         </View>
       </Modal>
@@ -3401,7 +3618,17 @@ export default function NotesScreen() {
   );
 }
 
-function TapePiece({ seed, variant = 'single' }: { seed: number; variant?: 'single' | 'double' }) {
+function TapePiece({
+  seed,
+  variant = 'single',
+  cardVariant = 'small',
+}: {
+  seed: number;
+  variant?: 'single' | 'double';
+  cardVariant?: CardVariant;
+}) {
+  const isDetail = cardVariant === 'detail';
+
   if (variant === 'double') {
     return (
       <>
@@ -3409,7 +3636,9 @@ function TapePiece({ seed, variant = 'single' }: { seed: number; variant?: 'sing
           pointerEvents="none"
           style={[
             s.tapePieceBase,
+            isDetail ? s.tapePieceBaseDetail : null,
             s.tapePieceTopLeft,
+            isDetail ? s.tapePieceTopLeftDetail : null,
             { transform: [{ rotate: seed % 2 === 0 ? '-12deg' : '-8deg' }] },
           ]}
         />
@@ -3417,7 +3646,9 @@ function TapePiece({ seed, variant = 'single' }: { seed: number; variant?: 'sing
           pointerEvents="none"
           style={[
             s.tapePieceBase,
+            isDetail ? s.tapePieceBaseDetail : null,
             s.tapePieceTopRight,
+            isDetail ? s.tapePieceTopRightDetail : null,
             { transform: [{ rotate: seed % 2 === 0 ? '9deg' : '12deg' }] },
           ]}
         />
@@ -3430,17 +3661,36 @@ function TapePiece({ seed, variant = 'single' }: { seed: number; variant?: 'sing
       pointerEvents="none"
       style={[
         s.tapePieceBase,
+        isDetail ? s.tapePieceBaseDetail : null,
         s.tapePieceTop,
-        { transform: [{ translateX: -22 }, { rotate: seed % 2 === 0 ? '-7deg' : '5deg' }] },
+        isDetail ? s.tapePieceTopDetail : null,
+        { transform: [{ translateX: isDetail ? -32 : -22 }, { rotate: seed % 2 === 0 ? '-7deg' : '5deg' }] },
       ]}
     />
   );
 }
 
-function PaperClip({ side = 'right' }: { side?: 'left' | 'right' }) {
+function PaperClip({
+  side = 'right',
+  cardVariant = 'small',
+}: {
+  side?: 'left' | 'right';
+  cardVariant?: CardVariant;
+}) {
+  const isDetail = cardVariant === 'detail';
+
   return (
-    <View style={[s.paperClip, side === 'left' ? s.paperClipLeft : s.paperClipRight]} pointerEvents="none">
-      <View style={s.paperClipInner} />
+    <View
+      style={[
+        s.paperClip,
+        isDetail ? s.paperClipDetail : null,
+        side === 'left' ? s.paperClipLeft : s.paperClipRight,
+        isDetail && side === 'left' ? s.paperClipLeftDetail : null,
+        isDetail && side === 'right' ? s.paperClipRightDetail : null,
+      ]}
+      pointerEvents="none"
+    >
+      <View style={[s.paperClipInner, isDetail ? s.paperClipInnerDetail : null]} />
     </View>
   );
 }
@@ -3471,144 +3721,338 @@ function PageDecoration({ side }: { side: 'left' | 'right' }) {
   );
 }
 
-function PolaroidPiece({
+function MemoryCardShell({
+  variant,
+  seed,
+  attachment,
+  clipSide = 'right',
+  wrapStyle,
+  shadowStyle,
+  decoration,
+  children,
+}: {
+  variant: CardVariant;
+  seed: number;
+  attachment?: MemoryAttachment;
+  clipSide?: 'left' | 'right';
+  wrapStyle: StyleProp<ViewStyle>;
+  shadowStyle?: StyleProp<ViewStyle>;
+  decoration?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <View style={wrapStyle}>
+      {decoration ||
+        (attachment === 'clip' ? (
+          <PaperClip side={clipSide} cardVariant={variant} />
+        ) : attachment ? (
+          <TapePiece seed={seed} variant={attachment === 'double_tape' ? 'double' : 'single'} cardVariant={variant} />
+        ) : null)}
+      {shadowStyle ? <View style={shadowStyle} pointerEvents="none" /> : null}
+      {children}
+    </View>
+  );
+}
+
+function PhotoMemoryCard({
   item,
   imageUri,
   seed,
-  caption,
-  fontsLoaded,
   attachment,
+  variant = 'small',
 }: {
   item: AlbumMemory;
   imageUri: string | null;
   seed: number;
-  caption: string;
-  fontsLoaded: boolean;
   attachment: MemoryAttachment;
+  variant?: CardVariant;
 }) {
   const [imageFailed, setImageFailed] = useState(false);
   const safeImageUri = typeof imageUri === 'string' && imageUri.trim().length > 0 ? imageUri.trim() : null;
   const hasImage = !!safeImageUri && !imageFailed;
+  const isDetail = variant === 'detail';
 
   useEffect(() => {
     setImageFailed(false);
   }, [safeImageUri]);
 
   return (
-    <View style={s.polaroidWrap}>
-      {attachment === 'clip' ? <PaperClip side={seed % 2 === 0 ? 'left' : 'right'} /> : <TapePiece seed={seed} variant={attachment === 'double_tape' ? 'double' : 'single'} />}
-      <View style={s.polaroidShadow} pointerEvents="none" />
-      <View style={s.polaroidFrame}>
-        <View style={s.polaroidPhotoArea}>
+    <MemoryCardShell
+      variant={variant}
+      seed={seed}
+      attachment={attachment}
+      clipSide={seed % 2 === 0 ? 'left' : 'right'}
+      wrapStyle={[s.polaroidWrap, isDetail ? s.polaroidWrapDetail : null]}
+      shadowStyle={[s.polaroidShadow, isDetail ? s.polaroidShadowDetail : null]}
+    >
+      <View style={[s.polaroidFrame, isDetail ? s.polaroidFrameDetail : null]}>
+        <View style={[s.polaroidPhotoArea, isDetail ? s.polaroidPhotoAreaDetail : null]}>
           {hasImage ? (
-          <Image
-            source={{ uri: safeImageUri }}
-            style={s.polaroidImage}
-            resizeMode="cover"
-            onLoad={() => console.log('[ALBUM_IMAGE] polaroid loaded', item.id)}
-            onError={(error) => {
-              console.log('[ALBUM_IMAGE] polaroid error', item.id, {
-                imageUriType: getImageUriType(safeImageUri),
-                imageUriStart: safeImageUri ? safeImageUri.slice(0, 160) : null,
-                nativeEvent: error.nativeEvent,
-              });
-              setImageFailed(true);
-            }}
-          />
-        ) : (
-          <View style={s.polaroidPlaceholder}>
-            <View style={s.polaroidPlaceholderInner}>
-              <Text style={s.polaroidPlaceholderIcon}>✦</Text>
-              <Text style={s.polaroidPlaceholderText}>Foto</Text>
+            <Image
+              source={{ uri: safeImageUri }}
+              style={s.polaroidImage}
+              resizeMode="cover"
+              onLoad={() => console.log('[ALBUM_IMAGE] polaroid loaded', item.id)}
+              onError={(error) => {
+                console.log('[ALBUM_IMAGE] polaroid error', item.id, {
+                  imageUriType: getImageUriType(safeImageUri),
+                  imageUriStart: safeImageUri ? safeImageUri.slice(0, 160) : null,
+                  nativeEvent: error.nativeEvent,
+                });
+                setImageFailed(true);
+              }}
+            />
+          ) : (
+            <View style={s.polaroidPlaceholder}>
+              <View style={[s.polaroidPlaceholderInner, isDetail ? s.polaroidPlaceholderInnerDetail : null]}>
+                <Text style={[s.polaroidPlaceholderIcon, isDetail ? s.polaroidPlaceholderIconDetail : null]}>✦</Text>
+                <Text style={[s.polaroidPlaceholderText, isDetail ? s.polaroidPlaceholderTextDetail : null]}>Foto</Text>
+              </View>
             </View>
-          </View>
-        )}
+          )}
         </View>
-        <Text
-          style={[s.polaroidCaption, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]}
-          numberOfLines={2}
-          ellipsizeMode="tail"
-        >
-          {caption}
-        </Text>
       </View>
-    </View>
+    </MemoryCardShell>
   );
 }
 
-function NotePaperPiece({
-  item,
-  caption,
-  fontsLoaded,
-  seed,
-  attachment,
-}: {
-  item: AlbumMemory;
-  caption: string;
-  fontsLoaded: boolean;
-  seed: number;
-  attachment: MemoryAttachment;
-}) {
-  const previewText = getPreviewText(item.previewText, 'Recuerdo');
-  const stampLabel = item.createdAt ? caption : '♡';
-
-  return (
-    <View style={s.notePaperWrap}>
-      {attachment === 'clip' ? <PaperClip side={seed % 2 === 0 ? 'left' : 'right'} /> : <TapePiece seed={seed} variant={attachment === 'double_tape' ? 'double' : 'single'} />}
-      <View style={[s.notePaperCard, { backgroundColor: getMemoryPaperTone(item) }]}>
-        <Text style={s.notePaperStamp} numberOfLines={1}>
-          ♡
-        </Text>
-        <View style={s.notePaperLines} pointerEvents="none">
-          <View style={s.notePaperLine} />
-          <View style={s.notePaperLine} />
-          <View style={s.notePaperLine} />
-          <View style={[s.notePaperLine, s.notePaperLineShort]} />
-        </View>
-        <Text
-          style={[s.notePaperText, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]}
-          numberOfLines={4}
-          ellipsizeMode="tail"
-        >
-          {previewText}
-        </Text>
-        <Text style={s.notePaperMeta} numberOfLines={1}>
-          {stampLabel}
-        </Text>
-      </View>
-    </View>
-  );
-}
-
-function DrawingPiece({
+function MixedMemoryCard({
   item,
   imageUri,
-  caption,
   seed,
   fontsLoaded,
   attachment,
+  variant = 'small',
 }: {
   item: AlbumMemory;
   imageUri: string | null;
-  caption: string;
   seed: number;
   fontsLoaded: boolean;
   attachment: MemoryAttachment;
+  variant?: CardVariant;
 }) {
   const [imageFailed, setImageFailed] = useState(false);
   const safeImageUri = typeof imageUri === 'string' && imageUri.trim().length > 0 ? imageUri.trim() : null;
   const hasImage = !!safeImageUri && !imageFailed;
+  const isDetail = variant === 'detail';
+  const previewText = getAlbumCardPreview(getAlbumCardSourceText(item, 'Recuerdo juntos'), 56);
+  const fullText = getMemoryDetailText(item);
 
   useEffect(() => {
     setImageFailed(false);
   }, [safeImageUri]);
 
   return (
-    <View style={s.drawingWrap}>
-      {attachment === 'clip' ? <PaperClip side={seed % 2 === 0 ? 'right' : 'left'} /> : <TapePiece seed={seed} variant="single" />}
-      <View style={[s.drawingCard, { backgroundColor: item.backgroundColor || getMemoryPaperTone(item) || '#FFF8EE' }]}>
+    <MemoryCardShell
+      variant={variant}
+      seed={seed}
+      attachment={attachment}
+      clipSide={seed % 2 === 0 ? 'left' : 'right'}
+      wrapStyle={[s.mixedWrap, isDetail ? s.mixedWrapDetail : null]}
+      shadowStyle={[s.mixedShadow, isDetail ? s.mixedShadowDetail : null]}
+    >
+      <View style={[s.mixedCard, isDetail ? s.mixedCardDetail : null]}>
+        <View style={[s.mixedPhotoArea, isDetail ? s.mixedPhotoAreaDetail : null]}>
+          {hasImage ? (
+            <Image
+              source={{ uri: safeImageUri }}
+              style={s.mixedImage}
+              resizeMode="cover"
+              onError={() => setImageFailed(true)}
+            />
+          ) : (
+            <View style={s.mixedPlaceholder}>
+              <Text style={[s.mixedPlaceholderIcon, isDetail ? s.mixedPlaceholderIconDetail : null]}>♡</Text>
+              <Text style={[s.mixedPlaceholderText, isDetail ? s.mixedPlaceholderTextDetail : null]}>Recuerdo</Text>
+            </View>
+          )}
+        </View>
+        <View style={[s.mixedBody, isDetail ? s.mixedBodyDetail : null]}>
+          {isDetail ? (
+            fullText ? (
+              <ScrollView
+                style={s.mixedScrollDetail}
+                contentContainerStyle={s.mixedScrollContentDetail}
+                showsVerticalScrollIndicator={false}
+              >
+                <Text style={[s.mixedText, s.mixedTextDetail, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]}>
+                  {fullText}
+                </Text>
+              </ScrollView>
+            ) : null
+          ) : (
+            <Text
+              style={[s.mixedText, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]}
+              numberOfLines={3}
+              ellipsizeMode="tail"
+            >
+              {previewText}
+            </Text>
+          )}
+        </View>
+      </View>
+    </MemoryCardShell>
+  );
+}
+
+function TextMemoryCard({
+  item,
+  fontsLoaded,
+  seed,
+  variant = 'small',
+}: {
+  item: AlbumMemory;
+  fontsLoaded: boolean;
+  seed: number;
+  variant?: CardVariant;
+}) {
+  const isDetail = variant === 'detail';
+  const notePreview = getAlbumCardPreview(getAlbumCardSourceText(item, 'Recuerdo'), 52);
+  const fullText = getMemoryDetailText(item);
+  const noteText = isDetail ? fullText || 'Recuerdo' : notePreview;
+  const lineCount = isDetail ? 10 : 4;
+
+  return (
+    <MemoryCardShell
+      variant={variant}
+      seed={seed}
+      wrapStyle={[s.notePaperWrap, isDetail ? s.notePaperWrapDetail : null]}
+      decoration={
+        <View
+          style={[
+            s.notePaperPin,
+            seed % 2 === 0 ? s.notePaperPinLeft : s.notePaperPinRight,
+            isDetail ? s.notePaperPinDetail : null,
+            isDetail && seed % 2 === 0 ? s.notePaperPinLeftDetail : null,
+            isDetail && seed % 2 !== 0 ? s.notePaperPinRightDetail : null,
+          ]}
+          pointerEvents="none"
+        >
+          <View style={[s.notePaperPinHead, isDetail ? s.notePaperPinHeadDetail : null]} />
+          <View style={[s.notePaperPinNeedle, isDetail ? s.notePaperPinNeedleDetail : null]} />
+        </View>
+      }
+    >
+      <View style={[s.notePaperCard, isDetail ? s.notePaperCardDetail : null, { backgroundColor: getMemoryPaperTone(item) }]}>
+        <View style={[s.notePaperContent, isDetail ? s.notePaperContentDetail : null]}>
+          <View style={[s.notePaperLines, isDetail ? s.notePaperLinesDetail : null]} pointerEvents="none">
+            {Array.from({ length: lineCount }).map((_, index) => (
+              <View
+                key={`note-line-${index}`}
+                style={[
+                  s.notePaperLine,
+                  isDetail ? s.notePaperLineDetail : null,
+                  index === lineCount - 1 ? s.notePaperLineShort : null,
+                ]}
+              />
+            ))}
+          </View>
+          {isDetail ? (
+            <ScrollView
+              style={s.notePaperScrollDetail}
+              contentContainerStyle={s.notePaperScrollContentDetail}
+              showsVerticalScrollIndicator={false}
+            >
+              <Text style={[s.notePaperText, s.notePaperTextDetail, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]}>
+                {noteText}
+              </Text>
+            </ScrollView>
+          ) : (
+            <Text
+              style={[s.notePaperText, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]}
+              numberOfLines={4}
+              ellipsizeMode="tail"
+            >
+              {noteText}
+            </Text>
+          )}
+        </View>
+      </View>
+    </MemoryCardShell>
+  );
+}
+
+function AlbumMemoryDetailOverlay({
+  memory,
+  fontsLoaded,
+  onClose,
+}: {
+  memory: AlbumMemory;
+  fontsLoaded: boolean;
+  onClose: () => void;
+}) {
+  const imageUri = memory.previewImageUrl || memory.drawingPreviewUrl || memory.imageUrl || null;
+  const safeImageUri = typeof imageUri === 'string' && imageUri.trim().length > 0 ? imageUri.trim() : null;
+  const seed = fnv1aHash(memory.id);
+  const attachment = getMemoryAttachment(memory, seed);
+
+  return (
+    <View style={s.albumDetailBackdrop}>
+      <Pressable style={s.albumDetailDismissArea} onPress={onClose} />
+      <View style={s.albumDetailStage} pointerEvents="box-none">
+        <View
+          style={[
+            s.albumDetailMemoryFrame,
+            memory.kind === 'text'
+              ? s.albumDetailMemoryFrameText
+              : memory.kind === 'photo'
+                ? s.albumDetailMemoryFramePhoto
+                : memory.kind === 'drawing'
+                  ? s.albumDetailMemoryFrameDrawing
+                  : s.albumDetailMemoryFrameMixed,
+          ]}
+        >
+          <Pressable style={s.albumDetailClose} onPress={onClose}>
+            <X size={18} color={TEXT} />
+          </Pressable>
+          {memory.kind === 'text' ? (
+            <TextMemoryCard item={memory} fontsLoaded={fontsLoaded} seed={seed} variant="detail" />
+          ) : memory.kind === 'photo' ? (
+            <PhotoMemoryCard item={memory} imageUri={safeImageUri} seed={seed} attachment={attachment} variant="detail" />
+          ) : memory.kind === 'drawing' ? (
+            <DrawingMemoryCard item={memory} imageUri={safeImageUri} seed={seed} attachment={attachment} variant="detail" />
+          ) : (
+            <MixedMemoryCard item={memory} imageUri={safeImageUri} seed={seed} fontsLoaded={fontsLoaded} attachment={attachment} variant="detail" />
+          )}
+        </View>
+      </View>
+    </View>
+  );
+}
+
+function DrawingMemoryCard({
+  item,
+  imageUri,
+  seed,
+  attachment,
+  variant = 'small',
+}: {
+  item: AlbumMemory;
+  imageUri: string | null;
+  seed: number;
+  attachment: MemoryAttachment;
+  variant?: CardVariant;
+}) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const safeImageUri = typeof imageUri === 'string' && imageUri.trim().length > 0 ? imageUri.trim() : null;
+  const hasImage = !!safeImageUri && !imageFailed;
+  const isDetail = variant === 'detail';
+
+  useEffect(() => {
+    setImageFailed(false);
+  }, [safeImageUri]);
+
+  return (
+    <MemoryCardShell
+      variant={variant}
+      seed={seed}
+      attachment={attachment}
+      clipSide={seed % 2 === 0 ? 'right' : 'left'}
+      wrapStyle={[s.drawingWrap, isDetail ? s.drawingWrapDetail : null]}
+    >
+      <View style={[s.drawingCard, isDetail ? s.drawingCardDetail : null, { backgroundColor: item.backgroundColor || getMemoryPaperTone(item) || '#FFF8EE' }]}>
         {hasImage ? (
-          <View style={s.drawingImageFrame}>
+          <View style={[s.drawingImageFrame, isDetail ? s.drawingImageFrameDetail : null]}>
             <Image
               source={{ uri: safeImageUri }}
               style={s.drawingImage}
@@ -3625,24 +4069,17 @@ function DrawingPiece({
             />
           </View>
         ) : (
-          <View style={s.drawingFallback}>
-            <Text style={s.drawingFallbackIcon}>✦</Text>
-            <View style={s.drawingFallbackDoodle}>
-              <View style={s.drawingFallbackLine} />
-              <View style={[s.drawingFallbackLine, s.drawingFallbackLineShort]} />
+          <View style={[s.drawingFallback, isDetail ? s.drawingFallbackDetail : null]}>
+            <Text style={[s.drawingFallbackIcon, isDetail ? s.drawingFallbackIconDetail : null]}>✦</Text>
+            <View style={[s.drawingFallbackDoodle, isDetail ? s.drawingFallbackDoodleDetail : null]}>
+              <View style={[s.drawingFallbackLine, isDetail ? s.drawingFallbackLineDetail : null]} />
+              <View style={[s.drawingFallbackLine, s.drawingFallbackLineShort, isDetail ? s.drawingFallbackLineDetail : null]} />
             </View>
-            <Text style={s.drawingFallbackText}>Nota con dibujo</Text>
+            <Text style={[s.drawingFallbackText, isDetail ? s.drawingFallbackTextDetail : null]}>Nota con dibujo</Text>
           </View>
         )}
-        <Text
-          style={[s.drawingCaption, fontsLoaded ? { fontFamily: 'DancingScript_600SemiBold' } : null]}
-          numberOfLines={2}
-          ellipsizeMode="tail"
-        >
-          {caption}
-        </Text>
       </View>
-    </View>
+    </MemoryCardShell>
   );
 }
 
@@ -3657,10 +4094,8 @@ const MemoryPiece = React.memo(function MemoryPiece({ item, layout, fontsLoaded,
   const imageUri = item.previewImageUrl || item.drawingPreviewUrl || item.imageUrl || null;
   const hasImage = typeof imageUri === 'string' && imageUri.trim().length > 0;
   const safeImageUri = hasImage ? imageUri.trim() : null;
-  const caption = getMemoryCaption(item);
   const seed = fnv1aHash(item.id);
   const attachment = getMemoryAttachment(item, seed);
-  const pieceZIndex = item.kind === 'photo' || (item.kind === 'mixed' && hasImage) ? 4 : item.kind === 'text' ? 2 : 3;
 
   return (
     <TouchableOpacity
@@ -3673,23 +4108,23 @@ const MemoryPiece = React.memo(function MemoryPiece({ item, layout, fontsLoaded,
           top: layout.y,
           width: layout.w,
           height: layout.h,
-          zIndex: pieceZIndex,
+          zIndex: 1,
           transform: [{ rotate: getSeededRotate(layout.rotate, seed) }],
         },
       ]}
     >
       {item.kind === 'photo' ? (
-        <PolaroidPiece item={item} imageUri={safeImageUri} seed={seed} caption={caption} fontsLoaded={fontsLoaded} attachment={attachment} />
+        <PhotoMemoryCard item={item} imageUri={safeImageUri} seed={seed} attachment={attachment} />
       ) : item.kind === 'mixed' ? (
         hasImage ? (
-          <PolaroidPiece item={item} imageUri={safeImageUri} seed={seed} caption={caption} fontsLoaded={fontsLoaded} attachment={attachment} />
+          <MixedMemoryCard item={item} imageUri={safeImageUri} seed={seed} fontsLoaded={fontsLoaded} attachment={attachment} />
         ) : (
-          <NotePaperPiece item={item} caption={caption} fontsLoaded={fontsLoaded} seed={seed} attachment={attachment} />
+          <TextMemoryCard item={item} fontsLoaded={fontsLoaded} seed={seed} />
         )
       ) : item.kind === 'drawing' ? (
-        <DrawingPiece item={item} imageUri={safeImageUri} caption={caption} seed={seed} fontsLoaded={fontsLoaded} attachment={attachment} />
+        <DrawingMemoryCard item={item} imageUri={safeImageUri} seed={seed} attachment={attachment} />
       ) : (
-        <NotePaperPiece item={item} caption={caption} fontsLoaded={fontsLoaded} seed={seed} attachment={attachment} />
+        <TextMemoryCard item={item} fontsLoaded={fontsLoaded} seed={seed} />
       )}
     </TouchableOpacity>
   );
@@ -4410,7 +4845,9 @@ const s = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: PINK_STRONG,
+    backgroundColor: WHITE,
+    borderWidth: 1,
+    borderColor: '#B2527A',
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: 'rgba(232, 140, 175, 0.36)',
@@ -4418,6 +4855,10 @@ const s = StyleSheet.create({
     shadowOpacity: 1,
     shadowRadius: 20,
     elevation: 5,
+  },
+  headerActionButtonActive: {
+    backgroundColor: '#B2527A',
+    borderColor: '#B2527A',
   },
   headerCenter: {
     flex: 1,
@@ -5383,12 +5824,23 @@ const s = StyleSheet.create({
     paddingHorizontal: 14,
   },
   albumStaticShellWrap: {
-    width: '92%',
+    width: '100%',
     height: '68%',
     alignSelf: 'center',
     justifyContent: 'center',
     alignItems: 'center',
     backgroundColor: 'transparent',
+  },
+  albumPagerItem: {
+    alignItems: 'stretch',
+    justifyContent: 'center',
+  },
+  albumPageIndicator: {
+    marginTop: 12,
+    color: '#8B6A74',
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.3,
   },
   openBookContainer: {
     width: '100%',
@@ -5415,33 +5867,41 @@ const s = StyleSheet.create({
     shadowRadius: 16,
     elevation: 3,
   },
-  albumStaticBook: {
-    flexDirection: 'row',
+  albumBookShadowWrapper: {
     borderRadius: 24,
-    overflow: 'hidden',
-    backgroundColor: '#FFF4E8',
-    borderWidth: 1,
-    borderColor: 'rgba(120, 70, 45, 0.16)',
+    backgroundColor: 'transparent',
     shadowColor: '#000',
     shadowOpacity: 0.16,
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 8 },
     elevation: 8,
   },
+  albumBookClipMask: {
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: '#FFF4E8',
+    borderWidth: 1,
+    borderColor: 'rgba(120, 70, 45, 0.16)',
+  },
+  albumStaticBook: {
+    width: '100%',
+    height: '100%',
+    flexDirection: 'row',
+  },
   albumBookTitle: {
     position: 'absolute',
-    top: 12,
+    top: 11,
     left: 0,
     right: 0,
     zIndex: 3,
     textAlign: 'center',
-    color: '#936D78',
-    fontSize: 12,
+    color: '#7A4A5D',
+    fontSize: 15,
     fontWeight: '600',
-    letterSpacing: 0.4,
+    letterSpacing: 0.25,
   },
   albumStaticPageLeft: {
-    backgroundColor: '#FFF7EC',
+    backgroundColor: '#FFF8F0',
     borderTopLeftRadius: 24,
     borderBottomLeftRadius: 24,
     position: 'relative',
@@ -5451,7 +5911,7 @@ const s = StyleSheet.create({
     backgroundColor: 'rgba(120, 70, 45, 0.14)',
   },
   albumStaticPageRight: {
-    backgroundColor: '#FFF2E5',
+    backgroundColor: '#FFFAF4',
     borderTopRightRadius: 24,
     borderBottomRightRadius: 24,
     position: 'relative',
@@ -5463,13 +5923,13 @@ const s = StyleSheet.create({
   },
   pageDecoration: {
     position: 'absolute',
-    color: 'rgba(180, 117, 145, 0.32)',
-    fontSize: 16,
+    color: 'rgba(180, 117, 145, 0.22)',
+    fontSize: 14,
     zIndex: 0,
   },
   pageDecorationTiny: {
-    color: 'rgba(154, 128, 118, 0.24)',
-    fontSize: 12,
+    color: 'rgba(154, 128, 118, 0.18)',
+    fontSize: 11,
   },
   pageDecorationLeftTop: {
     top: 34,
@@ -5641,31 +6101,77 @@ const s = StyleSheet.create({
     lineHeight: 16,
   },
   albumDetailBackdrop: {
-    flex: 1,
+    ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(20,12,16,0.45)',
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 20,
+    zIndex: 20,
+  },
+  albumDetailDismissArea: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  albumDetailStage: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 12,
+  },
+  albumDetailMemoryFrame: {
+    position: 'relative',
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  albumDetailMemoryFramePhoto: {
+    width: DETAIL_CARD_SIZE,
+    aspectRatio: 1,
+  },
+  albumDetailMemoryFrameText: {
+    width: DETAIL_CARD_SIZE,
+    aspectRatio: 1,
+  },
+  albumDetailMemoryFrameDrawing: {
+    width: DETAIL_CARD_SIZE,
+    aspectRatio: 1,
+  },
+  albumDetailMemoryFrameMixed: {
+    width: DETAIL_CARD_SIZE,
+    aspectRatio: 1,
   },
   albumDetailCard: {
-    width: '100%',
-    maxWidth: 360,
+    width: '86%',
+    maxWidth: 380,
+    maxHeight: SCREEN_HEIGHT * 0.74,
     backgroundColor: '#FFF9FC',
     borderRadius: 24,
-    padding: 20,
+    padding: 18,
     borderWidth: 1,
     borderColor: BORDER,
+    shadowColor: SHADOW,
+    shadowOffset: { width: 0, height: 12 },
+    shadowOpacity: 0.16,
+    shadowRadius: 18,
+    elevation: 8,
   },
   albumDetailClose: {
     position: 'absolute',
-    top: 12,
-    right: 12,
-    width: 34,
-    height: 34,
-    borderRadius: 17,
+    top: -10,
+    right: 10,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: WHITE,
+    borderWidth: 1,
+    borderColor: 'rgba(120, 70, 45, 0.10)',
+    shadowColor: SHADOW,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    elevation: 3,
+    zIndex: 5,
   },
   albumDetailDate: {
     color: TEXT_SOFT,
@@ -5680,14 +6186,130 @@ const s = StyleSheet.create({
   },
   albumDetailImage: {
     width: '100%',
-    height: 200,
+    height: '100%',
     borderRadius: 16,
-    marginBottom: 12,
   },
   albumDetailBody: {
     color: TEXT,
     fontSize: 14,
     lineHeight: 20,
+  },
+  albumDetailScroll: {
+    width: '100%',
+    flexGrow: 0,
+  },
+  albumDetailScrollContent: {
+    paddingTop: 8,
+    paddingBottom: 4,
+  },
+  albumDetailPolaroid: {
+    width: '100%',
+    backgroundColor: '#FFFDF8',
+    borderRadius: 18,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(120, 70, 45, 0.08)',
+  },
+  albumDetailPolaroidPhotoArea: {
+    width: '100%',
+    height: SCREEN_HEIGHT * 0.42,
+    minHeight: 220,
+    maxHeight: SCREEN_HEIGHT * 0.5,
+    borderRadius: 14,
+    overflow: 'hidden',
+    backgroundColor: '#FBE7EF',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  albumDetailSketchCard: {
+    width: '100%',
+    height: SCREEN_HEIGHT * 0.46,
+    minHeight: 240,
+    maxHeight: SCREEN_HEIGHT * 0.54,
+    borderRadius: 18,
+    padding: 10,
+    borderWidth: 1,
+    borderColor: 'rgba(120, 70, 45, 0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  albumDetailFallback: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 14,
+    backgroundColor: '#FBE7EF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+  },
+  albumDetailFallbackText: {
+    color: '#7A4A5D',
+    fontSize: 15,
+    textAlign: 'center',
+  },
+  albumDetailMixedCard: {
+    width: '100%',
+    borderRadius: 18,
+    backgroundColor: '#FFF8F3',
+    borderWidth: 1,
+    borderColor: 'rgba(120, 70, 45, 0.08)',
+    padding: 10,
+  },
+  albumDetailMixedImageArea: {
+    width: '100%',
+    height: SCREEN_HEIGHT * 0.30,
+    minHeight: 180,
+    maxHeight: SCREEN_HEIGHT * 0.38,
+    borderRadius: 14,
+    overflow: 'hidden',
+    backgroundColor: '#FBE7EF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  albumDetailMixedText: {
+    color: '#6E4252',
+    fontSize: 16,
+    lineHeight: 24,
+    paddingHorizontal: 2,
+    paddingBottom: 4,
+  },
+  albumDetailNoteCard: {
+    width: '100%',
+    maxHeight: SCREEN_HEIGHT * 0.62,
+    borderRadius: 18,
+    borderWidth: 1,
+    borderColor: 'rgba(120, 70, 45, 0.08)',
+    overflow: 'hidden',
+    paddingHorizontal: 18,
+    paddingTop: 18,
+    paddingBottom: 12,
+  },
+  albumDetailNotePin: {
+    position: 'absolute',
+    top: 8,
+    left: 20,
+    zIndex: 2,
+    alignItems: 'center',
+    transform: [{ rotate: '-8deg' }],
+  },
+  albumDetailNoteLines: {
+    position: 'absolute',
+    top: 34,
+    left: 18,
+    right: 18,
+  },
+  albumDetailNoteLine: {
+    height: 1,
+    backgroundColor: 'rgba(214, 173, 189, 0.24)',
+    marginBottom: 26,
+  },
+  albumDetailNoteText: {
+    color: '#6E4252',
+    fontSize: 18,
+    lineHeight: 28,
+    paddingTop: 14,
+    paddingHorizontal: 2,
   },
   openBookSpread: {
     width: '100%',
@@ -5772,36 +6394,52 @@ const s = StyleSheet.create({
   },
   memoryPiece: {
     position: 'absolute',
-    borderRadius: 18,
+    borderRadius: 20,
     overflow: 'visible',
     shadowColor: SHADOW,
     shadowOffset: { width: 0, height: 10 },
-    shadowOpacity: 0.16,
-    shadowRadius: 10,
+    shadowOpacity: 0.12,
+    shadowRadius: 12,
     elevation: 2,
   },
   tapePieceBase: {
     position: 'absolute',
-    width: 44,
-    height: 16,
+    width: 42,
+    height: 15,
     borderRadius: 5,
-    backgroundColor: 'rgba(246, 220, 208, 0.82)',
+    backgroundColor: 'rgba(244, 214, 204, 0.72)',
     borderWidth: 1,
-    borderColor: 'rgba(222, 182, 170, 0.24)',
+    borderColor: 'rgba(222, 182, 170, 0.18)',
     zIndex: 2,
-    opacity: 0.95,
+    opacity: 0.92,
+  },
+  tapePieceBaseDetail: {
+    width: 66,
+    height: 22,
+    borderRadius: 8,
   },
   tapePieceTop: {
     top: -7,
     left: '50%',
   },
+  tapePieceTopDetail: {
+    top: -10,
+  },
   tapePieceTopLeft: {
     top: -6,
     left: 10,
   },
+  tapePieceTopLeftDetail: {
+    top: -9,
+    left: 22,
+  },
   tapePieceTopRight: {
     top: -6,
     right: 10,
+  },
+  tapePieceTopRightDetail: {
+    top: -9,
+    right: 22,
   },
   tapePieceCorner: {
     top: 8,
@@ -5811,21 +6449,36 @@ const s = StyleSheet.create({
   polaroidWrap: {
     width: '100%',
     height: '100%',
+    paddingHorizontal: 3,
+    paddingVertical: 2,
+  },
+  polaroidWrapDetail: {
+    paddingHorizontal: 10,
+    paddingVertical: 10,
   },
   polaroidShadow: {
     position: 'absolute',
-    top: 16,
-    left: 7,
-    right: 7,
-    bottom: 3,
+    top: 14,
+    left: 8,
+    right: 8,
+    bottom: 4,
     borderRadius: 14,
-    backgroundColor: 'rgba(107, 52, 76, 0.06)',
+    backgroundColor: 'rgba(107, 52, 76, 0.05)',
+  },
+  polaroidShadowDetail: {
+    top: 20,
+    left: 18,
+    right: 18,
+    bottom: 10,
+    borderRadius: 24,
+    backgroundColor: 'rgba(107, 52, 76, 0.09)',
   },
   polaroidFrame: {
     flex: 1,
-    borderRadius: 10,
+    borderRadius: 9,
     backgroundColor: '#FFFDF8',
     padding: 7,
+    overflow: 'hidden',
     borderWidth: 1,
     borderColor: 'rgba(120, 70, 45, 0.10)',
     shadowColor: SHADOW,
@@ -5834,14 +6487,27 @@ const s = StyleSheet.create({
     shadowRadius: 8,
     elevation: 2,
   },
+  polaroidFrameDetail: {
+    borderRadius: 20,
+    padding: 14,
+    borderColor: 'rgba(120, 70, 45, 0.12)',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.14,
+    shadowRadius: 14,
+    elevation: 4,
+  },
   polaroidPhotoArea: {
     flex: 1,
     minHeight: 72,
-    borderRadius: 7,
+    borderRadius: 6,
     overflow: 'hidden',
-    backgroundColor: '#FBE2ED',
+    backgroundColor: '#F7E6EC',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  polaroidPhotoAreaDetail: {
+    minHeight: 0,
+    borderRadius: 16,
   },
   polaroidImage: {
     width: '100%',
@@ -5851,11 +6517,11 @@ const s = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#F7DCE8',
+    backgroundColor: '#F8E8EE',
   },
   polaroidPlaceholderInner: {
-    width: '64%',
-    height: '54%',
+    width: '58%',
+    height: '48%',
     borderRadius: 4,
     borderWidth: 1,
     borderColor: 'rgba(120, 70, 45, 0.08)',
@@ -5863,26 +6529,150 @@ const s = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: 'rgba(255, 253, 248, 0.48)',
   },
+  polaroidPlaceholderInnerDetail: {
+    borderRadius: 12,
+    borderWidth: 1.5,
+  },
   polaroidPlaceholderIcon: {
     color: 'rgba(107, 52, 76, 0.45)',
     fontSize: 12,
     marginBottom: 3,
+  },
+  polaroidPlaceholderIconDetail: {
+    fontSize: 24,
+    marginBottom: 8,
   },
   polaroidPlaceholderText: {
     color: '#6B344C',
     fontSize: 10,
     fontWeight: '600',
   },
-  polaroidCaption: {
-    marginTop: 7,
-    color: '#6B344C',
+  polaroidPlaceholderTextDetail: {
+    fontSize: 16,
+  },
+  mixedWrap: {
+    width: '100%',
+    height: '100%',
+    paddingHorizontal: 4,
+    paddingVertical: 3,
+  },
+  mixedWrapDetail: {
+    paddingHorizontal: 10,
+    paddingVertical: 12,
+  },
+  mixedShadow: {
+    position: 'absolute',
+    top: 12,
+    left: 8,
+    right: 6,
+    bottom: 4,
+    borderRadius: 16,
+    backgroundColor: 'rgba(112, 73, 64, 0.05)',
+  },
+  mixedShadowDetail: {
+    top: 18,
+    left: 16,
+    right: 14,
+    bottom: 10,
+    borderRadius: 24,
+    backgroundColor: 'rgba(112, 73, 64, 0.09)',
+  },
+  mixedCard: {
+    flex: 1,
+    backgroundColor: '#FFF8F3',
+    borderRadius: 16,
+    padding: 7,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(145, 110, 92, 0.10)',
+    shadowColor: SHADOW,
+    shadowOffset: { width: 0, height: 7 },
+    shadowOpacity: 0.08,
+    shadowRadius: 10,
+    elevation: 2,
+  },
+  mixedCardDetail: {
+    borderRadius: 24,
+    padding: 14,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.12,
+    shadowRadius: 14,
+    elevation: 4,
+  },
+  mixedPhotoArea: {
+    flex: 1,
+    minHeight: 68,
+    borderRadius: 11,
+    overflow: 'hidden',
+    backgroundColor: '#F3E7E2',
+    marginBottom: 6,
+  },
+  mixedPhotoAreaDetail: {
+    minHeight: 0,
+    borderRadius: 18,
+    marginBottom: 12,
+  },
+  mixedImage: {
+    width: '100%',
+    height: '100%',
+  },
+  mixedPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F6E8EE',
+  },
+  mixedPlaceholderIcon: {
+    color: 'rgba(138, 88, 110, 0.56)',
+    fontSize: 12,
+    marginBottom: 2,
+  },
+  mixedPlaceholderIconDetail: {
+    fontSize: 24,
+    marginBottom: 6,
+  },
+  mixedPlaceholderText: {
+    color: '#7D5765',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  mixedPlaceholderTextDetail: {
+    fontSize: 16,
+  },
+  mixedBody: {
+    flex: 1,
+    paddingHorizontal: 2,
+    gap: 3,
+  },
+  mixedBodyDetail: {
+    minHeight: 0,
+    paddingHorizontal: 4,
+    gap: 8,
+  },
+  mixedText: {
+    color: '#6A4150',
     fontSize: 11,
     lineHeight: 14,
-    textAlign: 'center',
+  },
+  mixedTextDetail: {
+    fontSize: 20,
+    lineHeight: 30,
+  },
+  mixedScrollDetail: {
+    flex: 1,
+  },
+  mixedScrollContentDetail: {
+    paddingBottom: 6,
   },
   drawingWrap: {
     width: '100%',
     height: '100%',
+    paddingHorizontal: 5,
+    paddingVertical: 3,
+  },
+  drawingWrapDetail: {
+    paddingHorizontal: 10,
+    paddingVertical: 12,
   },
   paperClip: {
     position: 'absolute',
@@ -5898,11 +6688,27 @@ const s = StyleSheet.create({
     backgroundColor: 'transparent',
     zIndex: 3,
   },
+  paperClipDetail: {
+    top: 6,
+    width: 24,
+    height: 38,
+    borderTopLeftRadius: 10,
+    borderTopRightRadius: 10,
+    borderBottomLeftRadius: 8,
+    borderBottomRightRadius: 8,
+    borderWidth: 2.6,
+  },
   paperClipLeft: {
     left: 12,
   },
+  paperClipLeftDetail: {
+    left: 24,
+  },
   paperClipRight: {
     right: 14,
+  },
+  paperClipRightDetail: {
+    right: 24,
   },
   paperClipInner: {
     position: 'absolute',
@@ -5915,11 +6721,21 @@ const s = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: 'rgba(255,255,255,0.7)',
   },
+  paperClipInnerDetail: {
+    top: 5,
+    left: 3,
+    right: 3,
+    bottom: 11,
+    borderTopLeftRadius: 7,
+    borderTopRightRadius: 7,
+    borderWidth: 2,
+  },
   drawingCard: {
     flex: 1,
-    borderRadius: 10,
-    backgroundColor: '#FFF8EF',
-    padding: 8,
+    borderRadius: 9,
+    backgroundColor: '#FFF9F1',
+    padding: 7,
+    overflow: 'hidden',
     borderWidth: 1,
     borderColor: 'rgba(120, 70, 45, 0.10)',
     shadowColor: SHADOW,
@@ -5927,12 +6743,26 @@ const s = StyleSheet.create({
     shadowOpacity: 0.1,
     shadowRadius: 8,
   },
+  drawingCardDetail: {
+    borderRadius: 20,
+    padding: 14,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.13,
+    shadowRadius: 14,
+    elevation: 4,
+  },
   drawingImageFrame: {
     flex: 1,
-    minHeight: 62,
-    borderRadius: 7,
+    minHeight: 58,
+    borderRadius: 6,
     overflow: 'hidden',
-    marginBottom: 8,
+    marginBottom: 6,
+    backgroundColor: '#F3EBE3',
+  },
+  drawingImageFrameDetail: {
+    minHeight: 0,
+    borderRadius: 16,
+    marginBottom: 10,
   },
   drawingImage: {
     width: '100%',
@@ -5941,23 +6771,36 @@ const s = StyleSheet.create({
   },
   drawingFallback: {
     flex: 1,
-    minHeight: 62,
-    borderRadius: 4,
-    backgroundColor: 'rgba(247, 220, 232, 0.52)',
+    minHeight: 58,
+    borderRadius: 5,
+    backgroundColor: 'rgba(250, 241, 232, 0.88)',
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: 8,
+    marginBottom: 6,
     borderWidth: 1,
-    borderColor: 'rgba(120, 70, 45, 0.08)',
+    borderColor: 'rgba(120, 70, 45, 0.06)',
+  },
+  drawingFallbackDetail: {
+    minHeight: 0,
+    borderRadius: 16,
+    marginBottom: 10,
   },
   drawingFallbackIcon: {
     color: 'rgba(107, 52, 76, 0.48)',
     fontSize: 12,
     marginBottom: 4,
   },
+  drawingFallbackIconDetail: {
+    fontSize: 24,
+    marginBottom: 10,
+  },
   drawingFallbackDoodle: {
     width: '60%',
     marginBottom: 6,
+  },
+  drawingFallbackDoodleDetail: {
+    width: '52%',
+    marginBottom: 12,
   },
   drawingFallbackLine: {
     height: 2,
@@ -5965,27 +6808,35 @@ const s = StyleSheet.create({
     backgroundColor: 'rgba(107, 52, 76, 0.22)',
     marginBottom: 6,
   },
+  drawingFallbackLineDetail: {
+    height: 4,
+    marginBottom: 10,
+  },
   drawingFallbackLineShort: {
     width: '68%',
     alignSelf: 'center',
     marginBottom: 0,
   },
   drawingFallbackText: {
-    color: '#6B344C',
-    fontSize: 10,
+    color: '#7C5C5A',
+    fontSize: 9.5,
     fontWeight: '600',
     textAlign: 'center',
   },
-  drawingCaption: {
-    color: '#6B344C',
-    fontSize: 11,
-    lineHeight: 14,
-    textAlign: 'center',
+  drawingFallbackTextDetail: {
+    fontSize: 16,
   },
   notePaperWrap: {
     width: '100%',
     height: '100%',
-    paddingTop: 10,
+    paddingTop: 6,
+    paddingHorizontal: 11,
+    paddingBottom: 7,
+  },
+  notePaperWrapDetail: {
+    paddingTop: 14,
+    paddingHorizontal: 14,
+    paddingBottom: 12,
   },
   notePaperCard: {
     flex: 1,
@@ -5993,47 +6844,134 @@ const s = StyleSheet.create({
     borderTopRightRadius: 13,
     borderBottomLeftRadius: 15,
     borderBottomRightRadius: 8,
-    backgroundColor: '#FFF0F5',
+    backgroundColor: '#FFF7F3',
     borderWidth: 1,
-    borderColor: 'rgba(120, 70, 45, 0.08)',
-    paddingHorizontal: 12,
+    borderColor: 'rgba(120, 70, 45, 0.07)',
+    overflow: 'hidden',
+    paddingHorizontal: 11,
     paddingTop: 12,
-    paddingBottom: 10,
+    paddingBottom: 8,
     shadowColor: SHADOW,
     shadowOffset: { width: 0, height: 6 },
-    shadowOpacity: 0.09,
+    shadowOpacity: 0.07,
     shadowRadius: 8,
   },
+  notePaperCardDetail: {
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 24,
+    borderBottomLeftRadius: 28,
+    borderBottomRightRadius: 16,
+    borderColor: 'rgba(120, 70, 45, 0.10)',
+    paddingHorizontal: 18,
+    paddingTop: 22,
+    paddingBottom: 16,
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.1,
+    shadowRadius: 14,
+    elevation: 4,
+  },
+  notePaperContent: {
+    flex: 1,
+    position: 'relative',
+    justifyContent: 'flex-start',
+    paddingTop: 6,
+  },
+  notePaperContentDetail: {
+    paddingTop: 12,
+  },
   notePaperLines: {
-    marginBottom: 10,
+    position: 'absolute',
+    top: 8,
+    left: 0,
+    right: 0,
+  },
+  notePaperLinesDetail: {
+    top: 18,
   },
   notePaperLine: {
     height: 1,
-    backgroundColor: 'rgba(214, 173, 189, 0.28)',
-    marginBottom: 7,
+    backgroundColor: 'rgba(214, 173, 189, 0.24)',
+    marginBottom: 14,
+  },
+  notePaperLineDetail: {
+    marginBottom: 28,
   },
   notePaperLineShort: {
-    width: '72%',
+    width: '74%',
   },
   notePaperText: {
-    color: TEXT,
-    fontSize: 15,
-    lineHeight: 19,
-    paddingRight: 30,
+    color: '#6E4252',
+    fontSize: 10.5,
+    lineHeight: 16,
+    paddingTop: 2,
+    paddingRight: 10,
+    paddingLeft: 2,
+    maxWidth: '96%',
   },
-  notePaperStamp: {
+  notePaperTextDetail: {
+    fontSize: 20,
+    lineHeight: 30,
+    paddingTop: 6,
+    paddingRight: 12,
+    paddingLeft: 4,
+    maxWidth: '100%',
+  },
+  notePaperPin: {
     position: 'absolute',
-    top: 8,
-    right: 10,
-    color: '#C16D93',
-    fontSize: 12,
-    fontWeight: '700',
+    top: 2,
+    zIndex: 2,
+    alignItems: 'center',
   },
-  notePaperMeta: {
-    marginTop: 8,
-    color: '#9B7080',
-    fontSize: 10,
-    textAlign: 'right',
+  notePaperPinDetail: {
+    top: 8,
+  },
+  notePaperPinLeft: {
+    left: 20,
+    transform: [{ rotate: '-8deg' }],
+  },
+  notePaperPinLeftDetail: {
+    left: 34,
+  },
+  notePaperPinRight: {
+    right: 20,
+    transform: [{ rotate: '8deg' }],
+  },
+  notePaperPinRightDetail: {
+    right: 34,
+  },
+  notePaperPinHead: {
+    width: 10,
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: '#D989A8',
+    borderWidth: 1,
+    borderColor: 'rgba(122, 74, 93, 0.18)',
+    shadowColor: SHADOW,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.14,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  notePaperPinHeadDetail: {
+    width: 16,
+    height: 16,
+  },
+  notePaperPinNeedle: {
+    width: 1.5,
+    height: 12,
+    marginTop: -1,
+    borderRadius: 999,
+    backgroundColor: 'rgba(122, 74, 93, 0.35)',
+  },
+  notePaperPinNeedleDetail: {
+    width: 2,
+    height: 18,
+  },
+  notePaperScrollDetail: {
+    flex: 1,
+  },
+  notePaperScrollContentDetail: {
+    paddingBottom: 18,
   },
   emptyBookState: {
     alignItems: 'center',
