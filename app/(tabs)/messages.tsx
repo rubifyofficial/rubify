@@ -7,12 +7,12 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import {
-  Phone, Video, MoreVertical, Plus, Send,
-  Image as ImageIcon, MapPin, Sparkles, BookHeart, CheckCheck,
-  ChevronLeft, Search, Play
+  Phone, Video, Plus, Send, ChevronLeft, Search, Play
 } from 'lucide-react-native';
 import { supabase } from '../../lib/supabase';
 import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
+import { getStreamVideoClient } from '../../lib/streamVideo';
+import { MessagesCallOverlay, type MessagesCallKind } from '../../components/calls/MessagesCallOverlay';
 
 // --- Light / Pastel Theme Constants ---
 const BG = '#FFFFFF';
@@ -23,6 +23,65 @@ const PARTNER_BUBBLE = '#FFF7F7';
 const TEXT_DARK = '#222222';
 const TEXT_MUTED = '#9CA3AF';
 const BORDER = '#F1DCDC';
+const MEMORY_SHARE_PREFIX = 'USFULLY_MEMORY_SHARE::';
+
+type MemorySharePayload = {
+  kind: 'memory_share';
+  memoryId?: string;
+  title?: string;
+  dateLabel?: string;
+  type?: 'photo' | 'video' | string;
+  mediaUrl?: string | null;
+  comment?: string;
+};
+
+type IncomingMessagesCall = {
+  callId: string;
+  kind: MessagesCallKind;
+};
+
+const getMessagesCallId = (coupleId: string, kind: MessagesCallKind) => `messages-${kind}-call-${coupleId}`;
+
+const getMessagesCallKindFromId = (callId?: string | null): MessagesCallKind | null => {
+  if (!callId) return null;
+  if (callId.startsWith('messages-audio-call-')) return 'audio';
+  if (callId.startsWith('messages-video-call-')) return 'video';
+  return null;
+};
+
+const parseMemoryShareMessage = (content?: string): MemorySharePayload | null => {
+  if (!content?.startsWith(MEMORY_SHARE_PREFIX)) return null;
+
+  try {
+    const raw = content.slice(MEMORY_SHARE_PREFIX.length);
+    const parsed = JSON.parse(raw);
+
+    if (parsed?.kind !== 'memory_share') return null;
+
+    return parsed;
+  } catch (error) {
+    console.log('[Messages] Failed to parse memory share message:', error);
+    return null;
+  }
+};
+
+const getSearchableMessageText = (message: any): string => {
+  const parsedMemoryShare = parseMemoryShareMessage(message?.content);
+  if (parsedMemoryShare) {
+    return [
+      parsedMemoryShare.title,
+      parsedMemoryShare.dateLabel,
+      parsedMemoryShare.comment,
+      parsedMemoryShare.type,
+      'recuerdo compartido',
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+  }
+
+  return String(message?.content || '').toLowerCase();
+};
 
 export default function MensajesScreen() {
   const insets = useSafeAreaInsets();
@@ -32,31 +91,84 @@ export default function MensajesScreen() {
   const [messages, setMessages] = useState<any[]>([]);
   const [inputText, setInputText] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [callModalType, setCallModalType] = useState<'voice' | 'video' | null>(null);
+  const [messagesCallVisible, setMessagesCallVisible] = useState(false);
+  const [messagesCallKind, setMessagesCallKind] = useState<MessagesCallKind | null>(null);
+  const [messagesCallId, setMessagesCallId] = useState<string | null>(null);
+  const [messagesCallMode, setMessagesCallMode] = useState<'incoming' | 'outgoing'>('outgoing');
+  const [incomingCall, setIncomingCall] = useState<IncomingMessagesCall | null>(null);
+  const [isIncomingCallBusy, setIsIncomingCallBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const scrollViewRef = useRef<ScrollView>(null);
 
+  const currentUserId = profile?.id ?? null;
+  const coupleId = couple?.couple_id ?? null;
+  const partnerId = couple?.partner_id ?? null;
   const partnerName = couple?.partner_name || 'Pareja';
   const partnerAvatar = couple?.partner_avatar_url;
 
-  const startCall = useCallback(
-    (type: 'voice' | 'video') => {
-      if (!couple?.couple_id) {
-        Alert.alert('Error', 'No se pudo iniciar la llamada.');
-        return;
+  const handleEndMessagesCall = useCallback(() => {
+    setMessagesCallVisible(false);
+    setMessagesCallKind(null);
+    setMessagesCallId(null);
+    setMessagesCallMode('outgoing');
+  }, []);
+
+  const handleStartCall = useCallback((kind: MessagesCallKind) => {
+    if (!coupleId || !currentUserId) {
+      Alert.alert('Error', 'No se pudo iniciar la llamada. Inténtalo de nuevo.');
+      return;
+    }
+
+    setIncomingCall(null);
+    setMessagesCallMode('outgoing');
+    setMessagesCallKind(kind);
+    setMessagesCallId(getMessagesCallId(coupleId, kind));
+    setMessagesCallVisible(true);
+  }, [coupleId, currentUserId]);
+
+  const handleStartAudioCall = useCallback(() => {
+    void handleStartCall('audio');
+  }, [handleStartCall]);
+
+  const handleStartVideoCall = useCallback(() => {
+    void handleStartCall('video');
+  }, [handleStartCall]);
+
+  const acceptIncomingCall = useCallback(async () => {
+    if (!incomingCall) return;
+
+    setIsIncomingCallBusy(true);
+    setMessagesCallMode('incoming');
+    setMessagesCallKind(incomingCall.kind || 'video');
+    setMessagesCallId(incomingCall.callId);
+    setIncomingCall(null);
+    setMessagesCallVisible(true);
+    setIsIncomingCallBusy(false);
+  }, [incomingCall]);
+
+  const rejectIncomingCall = useCallback(async () => {
+    if (!incomingCall?.callId) return;
+
+    setIsIncomingCallBusy(true);
+    try {
+      const client = await getStreamVideoClient();
+      if (!client) {
+        throw new Error('missing stream client');
       }
 
-      setCallModalType(null);
-      router.push({
-        pathname: '/ver-juntos',
-        params: { autoCall: '1', source: 'messages', callKind: type },
-      } as any);
-    },
-    [couple?.couple_id, router]
-  );
+      const ringCall = client.call('default', incomingCall.callId, { reuseInstance: true });
+      await ringCall.reject();
+      setIncomingCall(null);
+    } catch (error) {
+      console.log('[Messages] reject incoming call error:', error);
+      Alert.alert('Error', 'No se pudo iniciar la llamada. Inténtalo de nuevo.');
+    } finally {
+      setIsIncomingCallBusy(false);
+    }
+  }, [incomingCall]);
 
-  const filteredMessages = messages.filter(m => 
-    m.content.toLowerCase().includes(searchQuery.toLowerCase())
+  const filteredMessages = messages.filter((m) =>
+    getSearchableMessageText(m).includes(searchQuery.toLowerCase())
   );
 
   useEffect(() => {
@@ -68,6 +180,44 @@ export default function MensajesScreen() {
       };
     }
   }, [couple]);
+
+  useEffect(() => {
+    if (!coupleId || !currentUserId) return;
+
+    let isCancelled = false;
+    let unsubscribeRing = () => {};
+
+    (async () => {
+      try {
+        const client = await getStreamVideoClient();
+        if (!client || isCancelled) return;
+
+        unsubscribeRing = client.on('call.ring', (event: any) => {
+          const rawCallId =
+            event?.call?.id ||
+            String(event?.call_cid || '')
+              .split(':')
+              .pop() ||
+            null;
+          const kind = getMessagesCallKindFromId(rawCallId);
+          const createdById = String(event?.call?.created_by?.id || '');
+
+          if (!kind || !rawCallId || createdById === String(currentUserId) || messagesCallVisible) {
+            return;
+          }
+
+          setIncomingCall({ callId: rawCallId, kind });
+        });
+      } catch (error) {
+        console.log('[Messages] stream ring listener error:', error);
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+      unsubscribeRing();
+    };
+  }, [coupleId, currentUserId, messagesCallVisible]);
 
   const fetchMessages = async () => {
     try {
@@ -102,14 +252,29 @@ export default function MensajesScreen() {
   );
 
   const renderMomentMessage = useCallback(
-    (message: any, key: string) => {
+    (message: any, key: string, memorySharePayload: MemorySharePayload | null = null) => {
       const isMe = message.sender_id === profile?.id;
-      const mediaType = message.media_type === 'video' ? 'video' : 'image';
-      const badge = message.moment_badge || (mediaType === 'video' ? 'VIDEO' : 'FOTO');
-      const title = message.moment_title || (mediaType === 'video' ? 'Nuevo video' : 'Nueva foto');
-      const subtitle = message.moment_subtitle || 'Una pequeña parte de su historia';
-
-      const previewUrl = message.thumbnail_url || (mediaType === 'image' ? message.media_url : null);
+      const mediaType = memorySharePayload
+        ? memorySharePayload.type === 'video'
+          ? 'video'
+          : 'image'
+        : message.media_type === 'video'
+          ? 'video'
+          : 'image';
+      const badge = memorySharePayload
+        ? mediaType === 'video'
+          ? 'VIDEO'
+          : 'FOTO'
+        : message.moment_badge || (mediaType === 'video' ? 'VIDEO' : 'FOTO');
+      const subtitle = memorySharePayload
+        ? memorySharePayload.dateLabel || 'Recuerdo compartido'
+        : message.moment_subtitle || 'Una pequeña parte de su historia';
+      const comment = memorySharePayload?.comment || message.moment_comment || '';
+      const previewUrl = memorySharePayload
+        ? mediaType === 'image'
+          ? memorySharePayload.mediaUrl || null
+          : null
+        : message.thumbnail_url || (mediaType === 'image' ? message.media_url : null);
 
       return (
         <View key={key} style={[s.msgRow, isMe ? s.rowMe : s.rowPartner]}>
@@ -131,12 +296,15 @@ export default function MensajesScreen() {
                   ) : null}
 
                   <View style={s.chatMomentBottom}>
-                    <Text style={s.chatMomentTitle} numberOfLines={1}>
-                      {title}
-                    </Text>
                     <Text style={s.chatMomentSubtitle} numberOfLines={2}>
                       {subtitle}
                     </Text>
+                    {comment ? (
+                      <View style={s.chatMomentCommentBox}>
+                        <Text style={s.chatMomentCommentLabel}>Comentario</Text>
+                        <Text style={s.chatMomentCommentText}>{comment}</Text>
+                      </View>
+                    ) : null}
                     <Text style={s.chatMomentOpenText}>Toca para abrir en Momentos</Text>
                   </View>
                 </View>
@@ -147,16 +315,21 @@ export default function MensajesScreen() {
                   <View style={s.chatMomentBadge}>
                     <Text style={s.chatMomentBadgeText}>{badge}</Text>
                   </View>
-                  <View style={s.chatMomentPlayButton}>
-                    <Play size={22} color="#fff" fill="#fff" />
-                  </View>
+                  {mediaType === 'video' ? (
+                    <View style={s.chatMomentPlayButton}>
+                      <Play size={22} color="#fff" fill="#fff" />
+                    </View>
+                  ) : null}
                   <View style={s.chatMomentBottom}>
-                    <Text style={s.chatMomentTitle} numberOfLines={1}>
-                      {title}
-                    </Text>
                     <Text style={s.chatMomentSubtitle} numberOfLines={2}>
                       {subtitle}
                     </Text>
+                    {comment ? (
+                      <View style={s.chatMomentCommentBox}>
+                        <Text style={s.chatMomentCommentLabel}>Comentario</Text>
+                        <Text style={s.chatMomentCommentText}>{comment}</Text>
+                      </View>
+                    ) : null}
                     <Text style={s.chatMomentOpenText}>Toca para abrir en Momentos</Text>
                   </View>
                 </View>
@@ -240,10 +413,16 @@ export default function MensajesScreen() {
         </View>
 
         <View style={s.hdrActions}>
-          <Pressable style={s.hdrBtn} onPress={() => setCallModalType('voice')}>
+          <Pressable
+            style={s.hdrBtn}
+            onPress={handleStartAudioCall}
+          >
             <Phone size={20} color={TEXT_DARK} />
           </Pressable>
-          <Pressable style={s.hdrBtn} onPress={() => setCallModalType('video')}>
+          <Pressable
+            style={s.hdrBtn}
+            onPress={handleStartVideoCall}
+          >
             <Video size={20} color={TEXT_DARK} />
           </Pressable>
         </View>
@@ -273,8 +452,9 @@ export default function MensajesScreen() {
         ) : (
           filteredMessages.map((m, idx) => {
             const isMe = m.sender_id === profile?.id;
-            if (m.message_type === 'moment') {
-              return renderMomentMessage(m, String(m.id || idx));
+            const parsedMemoryShare = parseMemoryShareMessage(m.content);
+            if (m.message_type === 'moment' || parsedMemoryShare) {
+              return renderMomentMessage(m, String(m.id || idx), parsedMemoryShare);
             }
             return (
               <View key={m.id || idx} style={[s.msgRow, isMe ? s.rowMe : s.rowPartner]}>
@@ -305,38 +485,65 @@ export default function MensajesScreen() {
         </Pressable>
       </View>
       <Modal
-        visible={!!callModalType}
+        visible={!!incomingCall}
         transparent={true}
         animationType="fade"
-        onRequestClose={() => setCallModalType(null)}
+        onRequestClose={() => {
+          if (!isIncomingCallBusy) {
+            void rejectIncomingCall();
+          }
+        }}
       >
         <View style={s.modalOverlay}>
           <View style={s.modalContent}>
-            <Text style={s.modalTitle}>
-              {callModalType === 'voice' ? 'Llamada de voz' : 'Videollamada'}
+            <AvatarSource uri={partnerAvatar} initial={partnerName.charAt(0)} size={68} />
+            <Text style={[s.modalTitle, s.incomingCallTitle]}>
+              {incomingCall?.kind === 'audio' ? 'Llamada entrante' : 'Videollamada entrante'}
             </Text>
             <Text style={s.modalText}>
-              {callModalType === 'voice'
-                ? '¿Quieres iniciar una llamada de voz con tu pareja?'
-                : '¿Quieres iniciar una videollamada con tu pareja?'}
+              {incomingCall?.kind === 'audio'
+                ? `${partnerName} quiere iniciar una llamada.`
+                : `${partnerName} quiere iniciar una videollamada.`}
             </Text>
             <View style={s.modalActions}>
-              <Pressable 
-                style={[s.modalBtn, s.modalBtnCancel]} 
-                onPress={() => setCallModalType(null)}
+              <Pressable
+                style={[s.modalBtn, s.modalBtnCancel, isIncomingCallBusy && s.modalBtnDisabled]}
+                onPress={() => {
+                  void rejectIncomingCall();
+                }}
+                disabled={isIncomingCallBusy}
               >
-                <Text style={s.modalBtnTextCancel}>Cancelar</Text>
+                <Text style={s.modalBtnTextCancel}>Rechazar</Text>
               </Pressable>
-              <Pressable 
-                style={[s.modalBtn, s.modalBtnConfirm]} 
-                onPress={() => startCall(callModalType === 'voice' ? 'voice' : 'video')}
+              <Pressable
+                style={[s.modalBtn, s.modalBtnConfirm, isIncomingCallBusy && s.modalBtnDisabled]}
+                onPress={() => {
+                  void acceptIncomingCall();
+                }}
+                disabled={isIncomingCallBusy}
               >
-                <Text style={s.modalBtnText}>Llamar</Text>
+                {isIncomingCallBusy ? (
+                  <ActivityIndicator size="small" color="#FFF" />
+                ) : (
+                  <Text style={s.modalBtnText}>Aceptar</Text>
+                )}
               </Pressable>
             </View>
           </View>
         </View>
       </Modal>
+      <MessagesCallOverlay
+        visible={messagesCallVisible}
+        callKind={messagesCallKind}
+        callId={messagesCallId}
+        mode={messagesCallMode}
+        coupleId={coupleId}
+        currentUserId={currentUserId}
+        partnerId={partnerId}
+        partnerName={partnerName}
+        partnerAvatarUrl={partnerAvatar}
+        onEnd={handleEndMessagesCall}
+      />
     </KeyboardAvoidingView>
   );
 }
@@ -477,10 +684,26 @@ const s = StyleSheet.create({
   chatMomentBottom: {
     gap: 4,
   },
-  chatMomentTitle: {
-    color: '#fff',
-    fontSize: 22,
+  chatMomentCommentBox: {
+    marginTop: 6,
+    backgroundColor: 'rgba(255,255,255,0.92)',
+    borderRadius: 16,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+  },
+  chatMomentCommentLabel: {
+    color: '#7b2d3b',
+    fontSize: 11,
     fontWeight: '900',
+    marginBottom: 4,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  chatMomentCommentText: {
+    color: '#3B2730',
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '700',
   },
   chatMomentSubtitle: {
     color: 'rgba(255,255,255,0.9)',
@@ -572,6 +795,9 @@ const s = StyleSheet.create({
   modalBtnConfirm: {
     backgroundColor: USER_BUBBLE,
   },
+  modalBtnDisabled: {
+    opacity: 0.6,
+  },
   modalBtnText: {
     color: '#FFF',
     fontSize: 16,
@@ -581,5 +807,8 @@ const s = StyleSheet.create({
     color: TEXT_DARK,
     fontSize: 16,
     fontWeight: '600',
+  },
+  incomingCallTitle: {
+    marginTop: 16,
   },
 });

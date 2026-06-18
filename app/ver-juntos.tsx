@@ -113,13 +113,20 @@ type PartnerProfile = {
 export default function VerJuntosScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
-  const params = useLocalSearchParams<{ autoCall?: string; source?: string; callKind?: string }>();
+  const params = useLocalSearchParams<{ autoCall?: string; source?: string; callKind?: string; callType?: string }>();
   const { height } = useWindowDimensions();
   const { profile, couple, loading: profileLoading } = useProfileAndCouple();
   const coupleId = couple?.couple_id || (profile as any)?.couple_id || null;
   const currentUserId = profile?.id ?? null;
   const isSmallScreen = height < 760;
   const shouldReturnOnHangup = params?.source === 'messages';
+
+  const desiredCallKind = useMemo<'voice' | 'video'>(() => {
+    const rawType = String((params as any)?.callType ?? '').toLowerCase();
+    if (rawType === 'audio' || rawType === 'voice') return 'voice';
+    if (rawType === 'video') return 'video';
+    return (params as any)?.callKind === 'voice' ? 'voice' : 'video';
+  }, [params]);
 
   const partnerName = couple?.partner_name || 'Tu pareja';
 
@@ -536,8 +543,10 @@ export default function VerJuntosScreen() {
     };
   }, [leaveWatchCall]);
 
-  const joinWatchCall = useCallback(async () => {
+  const joinWatchCall = useCallback(async (options?: { callKind?: 'voice' | 'video' }) => {
     try {
+      const cameraOn = options?.callKind ? options.callKind !== 'voice' : myRoomStatus.camera;
+      const micOn = myRoomStatus.mic;
       const partnerIdForFallback = (couple as any)?.partner_id ?? partnerProfile?.id ?? null;
       const computedCallId = coupleId
         ? `couple-${coupleId}`
@@ -552,8 +561,8 @@ export default function VerJuntosScreen() {
       setCallError(null);
 
       const hasPermissions = await ensureCallPermissions({
-        needCamera: myRoomStatus.camera,
-        needMicrophone: myRoomStatus.mic,
+        needCamera: cameraOn,
+        needMicrophone: micOn,
       });
       if (!hasPermissions) {
         setCallError('No se pudo iniciar la llamada sin permisos de cámara o micrófono.');
@@ -586,12 +595,12 @@ export default function VerJuntosScreen() {
       await call.join({ create: true });
 
       try {
-        if (myRoomStatus.mic) {
+        if (micOn) {
           await (call as any)?.microphone?.enable?.();
         } else {
           await (call as any)?.microphone?.disable?.();
         }
-        if (myRoomStatus.camera) {
+        if (cameraOn) {
           await (call as any)?.camera?.enable?.();
         } else {
           await (call as any)?.camera?.disable?.();
@@ -629,8 +638,10 @@ export default function VerJuntosScreen() {
     partnerProfile?.id,
   ]);
 
-  const startRoom = useCallback(async () => {
+  const startRoom = useCallback(async (options?: { callKind?: 'voice' | 'video' }) => {
     try {
+      const cameraOn = options?.callKind ? options.callKind !== 'voice' : myRoomStatus.camera;
+      const micOn = myRoomStatus.mic;
       const user = await getSafeUser();
       if (!user || !coupleId) {
         Alert.alert('Error', 'No se pudo encontrar la pareja.');
@@ -654,14 +665,14 @@ export default function VerJuntosScreen() {
             participant_status: {
               ...currentParticipantStatus,
               [user.id]: {
-                mic: true,
-                camera: true,
+                mic: micOn,
+                camera: cameraOn,
                 screen: false,
                 updated_at: new Date().toISOString(),
               },
             },
-            is_mic_on: true,
-            is_camera_on: true,
+            is_mic_on: micOn,
+            is_camera_on: cameraOn,
             is_screen_sharing: false,
             updated_at: new Date().toISOString(),
           })
@@ -678,7 +689,7 @@ export default function VerJuntosScreen() {
         setWatchRoom(updatedRoom as any);
         applyRoomToState(updatedRoom as any);
         setInviteDismissed(false);
-        await joinWatchCall();
+        await joinWatchCall(options);
         return;
       }
 
@@ -697,8 +708,8 @@ export default function VerJuntosScreen() {
         ],
         participant_status: {
           [user.id]: {
-            mic: true,
-            camera: true,
+            mic: micOn,
+            camera: cameraOn,
             screen: false,
             updated_at: now,
           },
@@ -708,8 +719,8 @@ export default function VerJuntosScreen() {
         invite_status: 'idle',
         room_chat_open: false,
         is_screen_sharing: false,
-        is_mic_on: true,
-        is_camera_on: true,
+        is_mic_on: micOn,
+        is_camera_on: cameraOn,
         started_at: now,
         created_at: now,
         updated_at: now,
@@ -730,14 +741,16 @@ export default function VerJuntosScreen() {
       setWatchRoom(newRoom as any);
       applyRoomToState(newRoom as any);
       setInviteDismissed(false);
-      await joinWatchCall();
+      await joinWatchCall(options);
     } catch (error: any) {
       console.log('createOrJoinWatchRoom catch:', error);
       Alert.alert('Error', error?.message || 'No se pudo crear la sala.');
     }
-  }, [applyRoomToState, coupleId, findActiveWatchRoom, joinWatchCall]);
+  }, [applyRoomToState, coupleId, findActiveWatchRoom, joinWatchCall, myRoomStatus.camera, myRoomStatus.mic]);
 
-  const joinRoom = useCallback(async () => {
+  const joinRoom = useCallback(async (options?: { callKind?: 'voice' | 'video' }) => {
+    const cameraOn = options?.callKind ? options.callKind !== 'voice' : myRoomStatus.camera;
+    const micOn = myRoomStatus.mic;
     const user = await getSafeUser();
     if (!watchRoom || !coupleId || !user?.id) {
       console.log('joinRoom missing:', {
@@ -762,14 +775,14 @@ export default function VerJuntosScreen() {
       participant_status: {
         ...currentParticipantStatus,
         [user.id]: {
-          mic: true,
-          camera: true,
+          mic: micOn,
+          camera: cameraOn,
           screen: false,
           updated_at: new Date().toISOString(),
         },
       },
-      is_mic_on: true,
-      is_camera_on: true,
+      is_mic_on: micOn,
+      is_camera_on: cameraOn,
       is_screen_sharing: false,
       active: true,
       updated_at: new Date().toISOString(),
@@ -796,8 +809,8 @@ export default function VerJuntosScreen() {
     applyRoomToState(data as any);
     setInviteDismissed(false);
 
-    await joinWatchCall();
-  }, [applyRoomToState, coupleId, joinWatchCall, watchRoom]);
+    await joinWatchCall(options);
+  }, [applyRoomToState, coupleId, joinWatchCall, myRoomStatus.camera, myRoomStatus.mic, watchRoom]);
 
   const declineRoomInvite = useCallback(async () => {
     setInviteDismissed(true);
@@ -973,7 +986,7 @@ export default function VerJuntosScreen() {
     if (!isCurrentUserParticipant && watchRoom?.active) {
       Alert.alert('Unirse', 'Únete a la sala para ver en pantalla completa.', [
         { text: 'Cancelar', style: 'cancel' },
-        { text: 'Unirme', onPress: joinRoom },
+        { text: 'Unirme', onPress: () => { void joinRoom(); } },
       ]);
       return;
     }
@@ -1122,22 +1135,18 @@ export default function VerJuntosScreen() {
 
     (async () => {
       try {
-        const kind = params?.callKind === 'voice' ? 'voice' : 'video';
+        const kind = desiredCallKind;
 
         if (watchRoom.active) {
           const participants = Array.isArray(watchRoom.participant_ids) ? watchRoom.participant_ids : [];
           const isParticipant = participants.some((id) => String(id) === String(currentUserId));
           if (isParticipant) {
-            await joinWatchCall();
+            await joinWatchCall({ callKind: kind });
           } else {
-            await joinRoom();
+            await joinRoom({ callKind: kind });
           }
         } else {
-          await startRoom();
-        }
-
-        if (kind === 'voice' && myRoomStatus.camera) {
-          await toggleCamera();
+          await startRoom({ callKind: kind });
         }
       } catch (error) {
         console.log('autoCall flow ignored:', error);
@@ -1147,14 +1156,12 @@ export default function VerJuntosScreen() {
   }, [
     coupleId,
     currentUserId,
+    desiredCallKind,
     joinRoom,
     joinWatchCall,
-    myRoomStatus.camera,
     params?.autoCall,
-    params?.callKind,
     profileLoading,
     startRoom,
-    toggleCamera,
     watchRoom,
   ]);
 
@@ -1291,7 +1298,7 @@ export default function VerJuntosScreen() {
                 Únete para ver juntos.
               </Text>
               <View style={s.roomCtaRow}>
-                <Pressable style={s.roomPrimaryBtn} onPress={joinRoom}>
+                <Pressable style={s.roomPrimaryBtn} onPress={() => { void joinRoom(); }}>
                   <Text style={s.roomPrimaryBtnText}>Unirme</Text>
                 </Pressable>
                 <Pressable style={s.roomSecondaryBtn} onPress={declineRoomInvite}>
@@ -1359,7 +1366,7 @@ export default function VerJuntosScreen() {
                 Compartan pantalla, hablen y vean algo juntos.
               </Text>
               <View style={s.roomCtaRow}>
-                <Pressable style={s.roomPrimaryBtn} onPress={startRoom}>
+                <Pressable style={s.roomPrimaryBtn} onPress={() => { void startRoom(); }}>
                   <Text style={s.roomPrimaryBtnText}>Crear sala</Text>
                 </Pressable>
                 <Pressable style={s.roomSecondaryBtn} onPress={openSelectModal}>
