@@ -2,9 +2,8 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, Pressable, TextInput,
   ScrollView, KeyboardAvoidingView, Platform, Alert,
-  ActivityIndicator, Image, Modal, ImageBackground
+  ActivityIndicator, Image, ImageBackground
 } from 'react-native';
-import Constants from 'expo-constants';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import {
@@ -12,12 +11,7 @@ import {
 } from 'lucide-react-native';
 import { supabase } from '../../lib/supabase';
 import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
-import { createMessagesStreamCall, getStreamVideoClient } from '../../lib/streamVideo';
-import {
-  MessagesCallOverlay,
-  type MessagesCallKind,
-  type MessagesCallRole,
-} from '../../components/calls/MessagesCallOverlay';
+import { useGlobalCall } from '../../components/calls/CallProvider';
 
 // --- Light / Pastel Theme Constants ---
 const BG = '#FFFFFF';
@@ -38,60 +32,6 @@ type MemorySharePayload = {
   type?: 'photo' | 'video' | string;
   mediaUrl?: string | null;
   comment?: string;
-};
-
-type CoupleCallStatus = 'ringing' | 'accepted' | 'rejected' | 'cancelled' | 'ended';
-
-type CoupleCallRecord = {
-  id: string;
-  couple_id: string;
-  caller_id: string;
-  recipient_id: string;
-  stream_call_id: string;
-  call_type: MessagesCallKind;
-  status: CoupleCallStatus;
-  created_at: string;
-  answered_at: string | null;
-  ended_at: string | null;
-  updated_at: string;
-};
-
-type IncomingMessagesCall = CoupleCallRecord;
-
-const RINGING_TIMEOUT_MS = 35_000;
-const INCOMING_CALL_MAX_AGE_MS = 45_000;
-const MESSAGES_CALL_DEBUG_URL = 'http://192.168.100.35:7777/event';
-const MESSAGES_CALL_DEBUG_SESSION = 'mensajes-call-startup';
-
-const buildMessagesStreamCallId = (coupleId: string) => `messages-call-${coupleId}-${Date.now()}`;
-
-const getMessagesCallKindFromId = (callId?: string | null): MessagesCallKind | null => {
-  if (!callId) return null;
-  if (callId.startsWith('messages-call-')) return 'video';
-  return null;
-};
-
-const isCallRecent = (createdAt?: string | null) => {
-  if (!createdAt) return false;
-  const createdAtTime = new Date(createdAt).getTime();
-  if (Number.isNaN(createdAtTime)) return false;
-  return Date.now() - createdAtTime <= INCOMING_CALL_MAX_AGE_MS;
-};
-
-const reportMessagesCallDebug = (hypothesisId: string, location: string, msg: string, data?: Record<string, unknown>) => {
-  void fetch(MESSAGES_CALL_DEBUG_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      sessionId: MESSAGES_CALL_DEBUG_SESSION,
-      runId: 'pre-fix',
-      hypothesisId,
-      location,
-      msg,
-      data,
-      ts: Date.now(),
-    }),
-  }).catch(() => {});
 };
 
 const parseMemoryShareMessage = (content?: string): MemorySharePayload | null => {
@@ -132,417 +72,26 @@ export default function MensajesScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { profile, couple } = useProfileAndCouple();
+  const { startGlobalCall, isStartingCall } = useGlobalCall();
   
   const [messages, setMessages] = useState<any[]>([]);
   const [inputText, setInputText] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
-  const [isCreatingCall, setIsCreatingCall] = useState(false);
-  const [callNotice, setCallNotice] = useState<string | null>(null);
-  const [messagesCallVisible, setMessagesCallVisible] = useState(false);
-  const [messagesCallKind, setMessagesCallKind] = useState<MessagesCallKind | null>(null);
-  const [messagesCallStreamCallId, setMessagesCallStreamCallId] = useState<string | null>(null);
-  const [messagesCallRecordId, setMessagesCallRecordId] = useState<string | null>(null);
-  const [messagesCallRole, setMessagesCallRole] = useState<MessagesCallRole | null>(null);
-  const [activeCallRecord, setActiveCallRecord] = useState<CoupleCallRecord | null>(null);
-  const [incomingCall, setIncomingCall] = useState<IncomingMessagesCall | null>(null);
-  const [isIncomingCallBusy, setIsIncomingCallBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const scrollViewRef = useRef<ScrollView>(null);
-  const ringingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const activeCallRecordRef = useRef<CoupleCallRecord | null>(null);
-  const messagesCallRoleRef = useRef<MessagesCallRole | null>(null);
-  const incomingCallRef = useRef<IncomingMessagesCall | null>(null);
-  const messagesCallVisibleRef = useRef(false);
-
-  const currentUserId = profile?.id ?? null;
-  const coupleId = couple?.couple_id ?? null;
-  const partnerId = couple?.partner_id ?? null;
   const partnerName = couple?.partner_name || 'Pareja';
   const partnerAvatar = couple?.partner_avatar_url;
-
-  const clearRingingTimeout = useCallback(() => {
-    if (ringingTimeoutRef.current) {
-      clearTimeout(ringingTimeoutRef.current);
-      ringingTimeoutRef.current = null;
-    }
-  }, []);
-
-  const dismissMessagesCallUi = useCallback(() => {
-    setMessagesCallVisible(false);
-    setMessagesCallKind(null);
-    setMessagesCallStreamCallId(null);
-    setMessagesCallRecordId(null);
-    setMessagesCallRole(null);
-    setActiveCallRecord(null);
-  }, []);
-
-  const showCallNotice = useCallback((message: string) => {
-    setCallNotice(message);
-  }, []);
-
-  const openMessagesCallOverlay = useCallback((record: CoupleCallRecord, role: MessagesCallRole) => {
-    setActiveCallRecord(record);
-    setMessagesCallKind(record.call_type);
-    setMessagesCallStreamCallId(record.stream_call_id);
-    setMessagesCallRecordId(record.id);
-    setMessagesCallRole(role);
-    setMessagesCallVisible(true);
-  }, []);
-
-  const scheduleRingingTimeout = useCallback((record: CoupleCallRecord) => {
-    clearRingingTimeout();
-    ringingTimeoutRef.current = setTimeout(async () => {
-      const currentRecord = activeCallRecordRef.current;
-      const currentRole = messagesCallRoleRef.current;
-      if (!currentRecord || currentRecord.id !== record.id || currentRole !== 'caller' || currentRecord.status !== 'ringing') {
-        return;
-      }
-
-      try {
-        const endedAt = new Date().toISOString();
-        await supabase
-          .from('couple_calls')
-          .update({
-            status: 'cancelled',
-            ended_at: endedAt,
-            updated_at: endedAt,
-          })
-          .eq('id', record.id)
-          .eq('status', 'ringing');
-      } catch (error) {
-        console.log('[Messages] call timeout update error:', error);
-      } finally {
-        dismissMessagesCallUi();
-        showCallNotice('No hubo respuesta.');
-      }
-    }, RINGING_TIMEOUT_MS);
-  }, [clearRingingTimeout, dismissMessagesCallUi, showCallNotice]);
-
-  const handleStartCall = useCallback(async (kind: MessagesCallKind) => {
-    const isExpoGo = Constants.appOwnership === 'expo';
-    let startupStage = 'initial';
-
-    console.log('[MessagesCall] start context', {
-      callKind: kind,
-      hasCurrentUserId: Boolean(currentUserId),
-      hasCoupleId: Boolean(coupleId),
-      hasPartnerUserId: Boolean(partnerId),
-      sameUserAsPartner: currentUserId === partnerId,
-      isExpoGo,
-    });
-
-    // #region debug-point B:validate-call-data
-    reportMessagesCallDebug('B', 'messages.tsx:handleStartCall:entry', '[DEBUG] stage: validate-call-data', {
-      hasCoupleId: Boolean(coupleId),
-      hasCurrentUserId: Boolean(currentUserId),
-      hasPartnerUserId: Boolean(partnerId),
-      sameUser: Boolean(currentUserId && partnerId && currentUserId === partnerId),
-      callKind: kind,
-      appOwnership: Constants.appOwnership ?? null,
-    });
-    // #endregion
-
-    startupStage = 'validate-data';
-    if (isCreatingCall) {
-      return;
-    }
-
-    if (isExpoGo) {
-      Alert.alert('Error de llamada', 'Las llamadas requieren la versión de desarrollo de Usfully.');
-      return;
-    }
-
-    if (!currentUserId) {
-      Alert.alert('Error de llamada', 'Tu sesión no está disponible. Inténtalo de nuevo.');
-      return;
-    }
-
-    if (!coupleId) {
-      Alert.alert('Error de llamada', 'No se pudo identificar la relación.');
-      return;
-    }
-
-    if (!partnerId) {
-      Alert.alert('Error de llamada', 'No se encontró a tu pareja para iniciar la llamada.');
-      return;
-    }
-
-    if (currentUserId === partnerId) {
-      Alert.alert('Error de llamada', 'No puedes iniciar una llamada contigo mismo.');
-      return;
-    }
-
-    if (kind !== 'audio' && kind !== 'video') {
-      // #region debug-point B:validate-call-data-failed
-      reportMessagesCallDebug('B', 'messages.tsx:handleStartCall:invalid', '[DEBUG] stage: validate-call-data failed', {
-        isCreatingCall,
-        hasCoupleId: Boolean(coupleId),
-        hasCurrentUserId: Boolean(currentUserId),
-        hasPartnerUserId: Boolean(partnerId),
-        callKind: kind,
-      });
-      // #endregion
-      Alert.alert('Error de llamada', 'No se pudo iniciar la llamada. Inténtalo de nuevo.');
-      return;
-    }
-
-    setIsCreatingCall(true);
-    clearRingingTimeout();
-    setIncomingCall(null);
-    setCallNotice(null);
-
-    try {
-      // #region debug-point A:create-call-record
-      startupStage = 'create-call-record';
-      console.log('[MessagesCall] stage: create-call-record');
-      reportMessagesCallDebug('A', 'messages.tsx:handleStartCall:create-call-record', '[DEBUG] stage: create-call-record', {
-        callKind: kind,
-        hasCoupleId: Boolean(coupleId),
-        hasCurrentUserId: Boolean(currentUserId),
-        hasPartnerUserId: Boolean(partnerId),
-      });
-      // #endregion
-      const now = new Date().toISOString();
-      const streamCallId = buildMessagesStreamCallId(coupleId);
-      const { data, error } = await supabase
-        .from('couple_calls')
-        .insert({
-          couple_id: coupleId,
-          caller_id: currentUserId,
-          recipient_id: partnerId,
-          stream_call_id: streamCallId,
-          call_type: kind,
-          status: 'ringing',
-          updated_at: now,
-        })
-        .select('*')
-        .single();
-
-      if (error || !data) {
-        console.error('[MessagesCall] couple_calls insert failed', error || new Error('missing call record'));
-        // #region debug-point A:create-call-record-failed
-        reportMessagesCallDebug('A', 'messages.tsx:handleStartCall:create-call-record-failed', '[DEBUG] stage: create-call-record failed', {
-          code: (error as any)?.code ?? null,
-          details: (error as any)?.details ?? null,
-          hint: (error as any)?.hint ?? null,
-          message: (error as any)?.message ?? 'missing call record',
-          streamCallId,
-        });
-        // #endregion
-        throw new Error(`couple_calls insert failed: ${(error as any)?.message ?? 'missing call record'}`);
-      }
-
-      console.log('[MessagesCall] call record created', {
-        hasCallRecord: Boolean(data?.id),
-        callType: data?.call_type ?? null,
-      });
-
-      const record = data as CoupleCallRecord;
-      // #region debug-point A:create-call-record-success
-      reportMessagesCallDebug('A', 'messages.tsx:handleStartCall:create-call-record-success', '[DEBUG] stage: create-call-record success', {
-        callRecordId: record.id,
-        streamCallId: record.stream_call_id,
-        callType: record.call_type,
-        status: record.status,
-      });
-      // #endregion
-      startupStage = 'get-stream-token';
-      console.log('[MessagesCall] stage: get-stream-token');
-      await getStreamVideoClient();
-
-      startupStage = 'prepare-stream-call-server-side';
-      console.log('[MessagesCall] stage: prepare-stream-call-server-side');
-      reportMessagesCallDebug('C', 'messages.tsx:handleStartCall:create-stream-call', '[DEBUG] stage: create-stream-call', {
-        callRecordId: record.id,
-        streamCallId: record.stream_call_id,
-        callType: record.call_type,
-        recipientId: partnerId,
-      });
-      await createMessagesStreamCall({
-        callId: record.stream_call_id,
-        callType: record.call_type,
-        recipientId: partnerId,
-        recipientName: partnerName,
-        recipientImage: partnerAvatar ?? null,
-      });
-      reportMessagesCallDebug('C', 'messages.tsx:handleStartCall:create-stream-call-success', '[DEBUG] stage: create-stream-call success', {
-        callRecordId: record.id,
-        streamCallId: record.stream_call_id,
-        callType: record.call_type,
-      });
-
-      console.log('[MessagesCall] stage: join-existing-stream-call');
-      openMessagesCallOverlay(record, 'caller');
-      scheduleRingingTimeout(record);
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      const userMessage =
-        typeof error === 'object' && error && 'userMessage' in error && typeof (error as any).userMessage === 'string'
-          ? (error as any).userMessage
-          : startupStage === 'prepare-stream-call-server-side'
-            ? 'No se pudo preparar la llamada. Inténtalo de nuevo.'
-            : 'No se pudo iniciar la llamada. Inténtalo de nuevo.';
-      // #region debug-point A:start-call-failed
-      reportMessagesCallDebug('A', 'messages.tsx:handleStartCall:catch', '[DEBUG] startup failed', {
-        stage: startupStage,
-        message: errorMessage,
-        code: (error as any)?.code ?? null,
-        details: (error as any)?.details ?? null,
-      });
-      // #endregion
-      console.error('[MessagesCall] failed', {
-        startupStage,
-        error,
-        errorMessage,
-      });
-      Alert.alert('Error de llamada', userMessage);
-    } finally {
-      setIsCreatingCall(false);
-    }
-  }, [clearRingingTimeout, coupleId, currentUserId, isCreatingCall, openMessagesCallOverlay, partnerAvatar, partnerId, partnerName, scheduleRingingTimeout]);
-
   const handleStartAudioCall = useCallback(() => {
-    void handleStartCall('audio');
-  }, [handleStartCall]);
+    void startGlobalCall('audio');
+  }, [startGlobalCall]);
 
   const handleStartVideoCall = useCallback(() => {
-    void handleStartCall('video');
-  }, [handleStartCall]);
-
-  const acceptIncomingCall = useCallback(async () => {
-    if (!incomingCall) return;
-
-    setIsIncomingCallBusy(true);
-    clearRingingTimeout();
-
-    try {
-      const answeredAt = new Date().toISOString();
-      const { data, error } = await supabase
-        .from('couple_calls')
-        .update({
-          status: 'accepted',
-          answered_at: answeredAt,
-          updated_at: answeredAt,
-        })
-        .eq('id', incomingCall.id)
-        .eq('status', 'ringing')
-        .select('*')
-        .single();
-
-      if (error || !data) {
-        throw error || new Error('missing accepted call');
-      }
-
-      setIncomingCall(null);
-      openMessagesCallOverlay(data as CoupleCallRecord, 'recipient');
-    } catch (error) {
-      console.log('[Messages] accept incoming call error:', error);
-      Alert.alert('Error', 'No se pudo iniciar la llamada. Inténtalo de nuevo.');
-    } finally {
-      setIsIncomingCallBusy(false);
-    }
-  }, [clearRingingTimeout, incomingCall, openMessagesCallOverlay]);
-
-  const rejectIncomingCall = useCallback(async () => {
-    if (!incomingCall?.id) return;
-
-    setIsIncomingCallBusy(true);
-    try {
-      const endedAt = new Date().toISOString();
-      const { error } = await supabase
-        .from('couple_calls')
-        .update({
-          status: 'rejected',
-          ended_at: endedAt,
-          updated_at: endedAt,
-        })
-        .eq('id', incomingCall.id)
-        .eq('status', 'ringing');
-
-      if (error) {
-        throw error;
-      }
-
-      setIncomingCall(null);
-    } catch (error) {
-      console.log('[Messages] reject incoming call error:', error);
-      Alert.alert('Error', 'No se pudo iniciar la llamada. Inténtalo de nuevo.');
-    } finally {
-      setIsIncomingCallBusy(false);
-    }
-  }, [incomingCall]);
-
-  const handleEndMessagesCall = useCallback(async () => {
-    const currentRecord = activeCallRecordRef.current;
-    const currentRole = messagesCallRoleRef.current;
-
-    clearRingingTimeout();
-
-    try {
-      if (currentRecord?.id) {
-        const now = new Date().toISOString();
-        let nextStatus: CoupleCallStatus | null = null;
-
-        if (currentRecord.status === 'ringing' && currentRole === 'caller') {
-          nextStatus = 'cancelled';
-        } else if (currentRecord.status === 'accepted') {
-          nextStatus = 'ended';
-        }
-
-        if (nextStatus) {
-          const { error } = await supabase
-            .from('couple_calls')
-            .update({
-              status: nextStatus,
-              ended_at: now,
-              updated_at: now,
-            })
-            .eq('id', currentRecord.id)
-            .in('status', nextStatus === 'cancelled' ? ['ringing'] : ['accepted']);
-
-          if (error) {
-            console.log('[Messages] end call update error:', error);
-          }
-        }
-
-        if (nextStatus === 'cancelled') {
-          showCallNotice('Llamada cancelada');
-        }
-      }
-    } finally {
-      dismissMessagesCallUi();
-    }
-  }, [clearRingingTimeout, dismissMessagesCallUi, showCallNotice]);
+    void startGlobalCall('video');
+  }, [startGlobalCall]);
 
   const filteredMessages = messages.filter((m) =>
     getSearchableMessageText(m).includes(searchQuery.toLowerCase())
   );
-
-  useEffect(() => {
-    activeCallRecordRef.current = activeCallRecord;
-  }, [activeCallRecord]);
-
-  useEffect(() => {
-    messagesCallRoleRef.current = messagesCallRole;
-  }, [messagesCallRole]);
-
-  useEffect(() => {
-    incomingCallRef.current = incomingCall;
-  }, [incomingCall]);
-
-  useEffect(() => {
-    messagesCallVisibleRef.current = messagesCallVisible;
-  }, [messagesCallVisible]);
-
-  useEffect(() => {
-    if (!callNotice) return;
-
-    const timeout = setTimeout(() => {
-      setCallNotice(null);
-    }, 4200);
-
-    return () => clearTimeout(timeout);
-  }, [callNotice]);
 
   useEffect(() => {
     if (couple?.couple_id) {
@@ -553,126 +102,6 @@ export default function MensajesScreen() {
       };
     }
   }, [couple]);
-
-  useEffect(() => {
-    if (!coupleId || !currentUserId) return;
-
-    const handleCallRealtimeChange = (record: CoupleCallRecord | null) => {
-      if (!record) return;
-
-      const involvesCurrentUser =
-        String(record.caller_id) === String(currentUserId) ||
-        String(record.recipient_id) === String(currentUserId);
-      if (!involvesCurrentUser) return;
-
-      const currentActive = activeCallRecordRef.current;
-      if (currentActive?.id === record.id) {
-        setActiveCallRecord(record);
-
-        if (record.status === 'accepted') {
-          clearRingingTimeout();
-          return;
-        }
-
-        if (record.status === 'rejected') {
-          clearRingingTimeout();
-          dismissMessagesCallUi();
-          setIncomingCall(null);
-          showCallNotice('La llamada fue rechazada.');
-          return;
-        }
-
-        if (record.status === 'cancelled') {
-          clearRingingTimeout();
-          dismissMessagesCallUi();
-          setIncomingCall(null);
-          showCallNotice('Llamada cancelada');
-          return;
-        }
-
-        if (record.status === 'ended') {
-          clearRingingTimeout();
-          dismissMessagesCallUi();
-          setIncomingCall(null);
-          showCallNotice('La llamada terminó.');
-        }
-
-        return;
-      }
-
-      if (
-        String(record.recipient_id) === String(currentUserId) &&
-        record.status === 'ringing' &&
-        isCallRecent(record.created_at) &&
-        !messagesCallVisibleRef.current &&
-        !incomingCallRef.current
-      ) {
-        setIncomingCall(record);
-        return;
-      }
-
-      if (incomingCallRef.current?.id === record.id && record.status !== 'ringing') {
-        setIncomingCall(null);
-        if (record.status === 'cancelled') {
-          showCallNotice('Llamada cancelada');
-        } else if (record.status === 'ended') {
-          showCallNotice('La llamada terminó.');
-        }
-      }
-    };
-
-    const loadRecentCalls = async () => {
-      try {
-        const { data, error } = await supabase
-          .from('couple_calls')
-          .select('*')
-          .eq('couple_id', coupleId)
-          .order('created_at', { ascending: false })
-          .limit(10);
-
-        if (error) {
-          throw error;
-        }
-
-        (data || []).forEach((row) => {
-          handleCallRealtimeChange(row as CoupleCallRecord);
-        });
-      } catch (error) {
-        console.log('[Messages] load recent calls error:', error);
-      }
-    };
-
-    void loadRecentCalls();
-
-    const channel = supabase
-      .channel(`couple-calls:${coupleId}:${currentUserId}`)
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'couple_calls', filter: `couple_id=eq.${coupleId}` },
-        (payload) => {
-          const nextRecord = (payload.new || payload.old || null) as CoupleCallRecord | null;
-          handleCallRealtimeChange(nextRecord);
-        }
-      )
-      .subscribe();
-
-    return () => {
-      clearRingingTimeout();
-      supabase.removeChannel(channel);
-    };
-  }, [
-    clearRingingTimeout,
-    coupleId,
-    currentUserId,
-    dismissMessagesCallUi,
-    showCallNotice,
-  ]);
-
-  useEffect(() => {
-    return () => {
-      clearRingingTimeout();
-    };
-  }, [clearRingingTimeout]);
 
   const fetchMessages = async () => {
     try {
@@ -869,27 +298,21 @@ export default function MensajesScreen() {
 
         <View style={s.hdrActions}>
           <Pressable
-            style={[s.hdrBtn, isCreatingCall && s.hdrBtnDisabled]}
+            style={[s.hdrBtn, isStartingCall && s.hdrBtnDisabled]}
             onPress={handleStartAudioCall}
-            disabled={isCreatingCall}
+            disabled={isStartingCall}
           >
             <Phone size={20} color={TEXT_DARK} />
           </Pressable>
           <Pressable
-            style={[s.hdrBtn, isCreatingCall && s.hdrBtnDisabled]}
+            style={[s.hdrBtn, isStartingCall && s.hdrBtnDisabled]}
             onPress={handleStartVideoCall}
-            disabled={isCreatingCall}
+            disabled={isStartingCall}
           >
             <Video size={20} color={TEXT_DARK} />
           </Pressable>
         </View>
       </View>
-
-      {callNotice ? (
-        <View style={s.callNoticeBar}>
-          <Text style={s.callNoticeText}>{callNotice}</Text>
-        </View>
-      ) : null}
 
       <View style={s.searchContainer}>
         <Search size={18} color={TEXT_MUTED} style={s.searchIcon} />
@@ -947,76 +370,6 @@ export default function MensajesScreen() {
           <Send size={20} color="#FFF" />
         </Pressable>
       </View>
-      <Modal
-        visible={!!incomingCall}
-        transparent={true}
-        animationType="fade"
-        onRequestClose={() => {
-          if (!isIncomingCallBusy) {
-            void rejectIncomingCall();
-          }
-        }}
-      >
-        <View style={s.modalOverlay}>
-          <View style={s.modalContent}>
-            <View style={s.incomingCallIconWrap}>
-              {incomingCall?.call_type === 'audio' ? (
-                <Phone size={22} color="#7A5563" />
-              ) : (
-                <Video size={22} color="#7A5563" />
-              )}
-            </View>
-            <AvatarSource uri={partnerAvatar} initial={partnerName.charAt(0)} size={68} />
-            <Text style={[s.modalTitle, s.incomingCallTitle]}>
-              {incomingCall?.call_type === 'audio' ? 'Llamada entrante' : 'Videollamada entrante'}
-            </Text>
-            <Text style={s.incomingCallerName}>{partnerName}</Text>
-            <Text style={s.modalText}>
-              {incomingCall?.call_type === 'audio'
-                ? `${partnerName} quiere iniciar una llamada.`
-                : `${partnerName} quiere iniciar una videollamada.`}
-            </Text>
-            <View style={s.modalActions}>
-              <Pressable
-                style={[s.modalBtn, s.modalBtnCancel, isIncomingCallBusy && s.modalBtnDisabled]}
-                onPress={() => {
-                  void rejectIncomingCall();
-                }}
-                disabled={isIncomingCallBusy}
-              >
-                <Text style={s.modalBtnTextCancel}>Rechazar</Text>
-              </Pressable>
-              <Pressable
-                style={[s.modalBtn, s.modalBtnConfirm, isIncomingCallBusy && s.modalBtnDisabled]}
-                onPress={() => {
-                  void acceptIncomingCall();
-                }}
-                disabled={isIncomingCallBusy}
-              >
-                {isIncomingCallBusy ? (
-                  <ActivityIndicator size="small" color="#FFF" />
-                ) : (
-                  <Text style={s.modalBtnText}>Aceptar</Text>
-                )}
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
-      <MessagesCallOverlay
-        visible={messagesCallVisible}
-        callKind={messagesCallKind}
-        streamCallId={messagesCallStreamCallId}
-        callRecordId={messagesCallRecordId}
-        role={messagesCallRole}
-        callRecordStatus={activeCallRecord?.status ?? null}
-        coupleId={coupleId}
-        currentUserId={currentUserId}
-        partnerId={partnerId}
-        partnerName={partnerName}
-        partnerAvatarUrl={partnerAvatar}
-        onEnd={handleEndMessagesCall}
-      />
     </KeyboardAvoidingView>
   );
 }

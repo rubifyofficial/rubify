@@ -64,6 +64,7 @@ module.exports = () => ({
         },
       ],
       'expo-video',
+      'expo-notifications',
       'expo-router',
       [
         '@stream-io/video-react-native-sdk',

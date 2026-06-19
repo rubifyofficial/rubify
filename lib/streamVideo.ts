@@ -12,10 +12,8 @@ type StreamTokenResponse = {
   userId?: string;
 };
 
-type StreamCreateCallResponse = {
-  callId?: string;
-  callType?: 'audio' | 'video';
-  created?: boolean;
+type StreamPrepareUsersResponse = {
+  usersReady?: boolean;
 };
 
 type CallSetupError = Error & {
@@ -113,7 +111,7 @@ const mapStreamTokenErrorToUserMessage = (technicalMessage: string) => {
   return 'No se pudo iniciar la llamada. Inténtalo de nuevo.';
 };
 
-const mapStreamCreateCallErrorToUserMessage = (technicalMessage: string) => {
+const mapStreamPrepareUsersErrorToUserMessage = (technicalMessage: string) => {
   const normalized = technicalMessage.toLowerCase();
 
   if (
@@ -132,23 +130,17 @@ const mapStreamCreateCallErrorToUserMessage = (technicalMessage: string) => {
   return 'No se pudo preparar la llamada. Inténtalo de nuevo.';
 };
 
-export const createMessagesStreamCall = async ({
-  callId,
-  callType,
+export const prepareMessagesStreamUsers = async ({
   recipientId,
   recipientName,
   recipientImage,
 }: {
-  callId: string;
-  callType: 'audio' | 'video';
   recipientId: string;
   recipientName?: string;
   recipientImage?: string | null;
 }) => {
   const { data, error } = await supabase.functions.invoke('stream-create-call', {
     body: {
-      callId,
-      callType,
       recipientId,
       recipientName,
       recipientImage,
@@ -157,7 +149,7 @@ export const createMessagesStreamCall = async ({
 
   if (error) {
     const safeResponseText = await readFunctionErrorBody((error as any)?.context);
-    const technicalMessage = `Stream create call failed: ${(error as any)?.message ?? String(error)}${
+    const technicalMessage = `Stream prepare users failed: ${(error as any)?.message ?? String(error)}${
       safeResponseText ? ` | ${safeResponseText}` : ''
     }`;
 
@@ -167,14 +159,14 @@ export const createMessagesStreamCall = async ({
       safeResponseText: safeResponseText || null,
     });
 
-    throw createCallSetupError(technicalMessage, mapStreamCreateCallErrorToUserMessage(technicalMessage));
+    throw createCallSetupError(technicalMessage, mapStreamPrepareUsersErrorToUserMessage(technicalMessage));
   }
 
-  const payload = (data ?? {}) as StreamCreateCallResponse;
+  const payload = (data ?? {}) as StreamPrepareUsersResponse;
 
-  if (!payload.callId || payload.callType !== callType || payload.created !== true) {
+  if (payload.usersReady !== true) {
     throw createCallSetupError(
-      'Stream create call response missing callId/callType/created',
+      'Stream prepare users response missing usersReady',
       'No se pudo preparar la llamada.'
     );
   }

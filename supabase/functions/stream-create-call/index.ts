@@ -19,8 +19,6 @@ const jsonResponse = (body: Record<string, unknown>, status: number) =>
   });
 
 type StreamCreateCallRequest = {
-  callId?: string;
-  callType?: 'audio' | 'video';
   recipientId?: string;
   recipientName?: string;
   recipientImage?: string | null;
@@ -64,15 +62,11 @@ serve(async (req) => {
       body = null;
     }
 
-    const callId = normalizeOptionalText(body?.callId);
-    const callType = body?.callType;
     const recipientId = normalizeOptionalText(body?.recipientId);
 
     console.log('[stream-create-call] request', {
       hasAuthorization: Boolean(authHeader),
-      hasCallId: Boolean(callId),
       hasRecipientId: Boolean(recipientId),
-      callType: callType ?? null,
     });
 
     console.log('[stream-create-call] configuration', {
@@ -88,7 +82,7 @@ serve(async (req) => {
       return jsonResponse({ error: 'Unauthorized' }, 401);
     }
 
-    if (!callId || !recipientId || (callType !== 'audio' && callType !== 'video')) {
+    if (!recipientId) {
       return jsonResponse({ error: 'Invalid call request' }, 400);
     }
 
@@ -157,25 +151,9 @@ serve(async (req) => {
         recipientId,
       });
 
-      const call = streamClient.video.call('default', callId);
-      await call.getOrCreate({
-        ring: true,
-        video: callType === 'video',
-        data: {
-          created_by_id: callerId,
-          members: [{ user_id: callerId }, { user_id: recipientId }],
-          custom: {
-            app_context: 'messages',
-            call_kind: callType,
-          },
-        },
-      });
-
       return jsonResponse(
         {
-          callId,
-          callType,
-          created: true,
+          usersReady: true,
         },
         200
       );

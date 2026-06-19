@@ -15,6 +15,7 @@ import {
 import {
   Camera,
   CameraOff,
+  ChevronDown,
   Mic,
   MicOff,
   PhoneOff,
@@ -23,7 +24,6 @@ import {
   VolumeX,
   UserRound,
 } from 'lucide-react-native';
-import { getStreamVideoClient } from '../../lib/streamVideo';
 
 export type MessagesCallKind = 'audio' | 'video';
 export type MessagesCallStatus = 'idle' | 'connecting' | 'ringing' | 'connected' | 'error';
@@ -43,7 +43,11 @@ type MessagesCallOverlayProps = {
   partnerId?: string | null;
   partnerName: string;
   partnerAvatarUrl?: string | null;
+  connectEnabled?: boolean;
+  streamClient?: StreamVideoClient | null;
   onEnd: () => void;
+  onMinimize?: () => void;
+  onConnected?: () => void;
 };
 
 const getMessagesCallId = (coupleId: string) => `messages-call-${coupleId}`;
@@ -78,15 +82,19 @@ export function MessagesCallOverlay({
   partnerId,
   partnerName,
   partnerAvatarUrl,
+  connectEnabled = false,
+  streamClient = null,
   onEnd,
+  onMinimize,
+  onConnected,
 }: MessagesCallOverlayProps) {
-  const [client, setClient] = React.useState<StreamVideoClient | null>(null);
   const [call, setCall] = React.useState<Call | null>(null);
   const [isPreparing, setIsPreparing] = React.useState(false);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
   const [callStatus, setCallStatus] = React.useState<MessagesCallStatus>('idle');
   const callRef = React.useRef<Call | null>(null);
   const isCleaningUpRef = React.useRef(false);
+  const isJoiningExistingCallRef = React.useRef(false);
   const initKeyRef = React.useRef<string | null>(null);
 
   const cleanupCall = React.useCallback(async (callToCleanup?: Call | null, options?: { reject?: boolean }) => {
@@ -209,8 +217,51 @@ export function MessagesCallOverlay({
     }
   }, []);
 
+  const joinExistingMessagesCall = React.useCallback(
+    async ({
+      nextStreamClient,
+      nextStreamCallId,
+      nextCallKind,
+      nextRole,
+      nextCallRecordId,
+    }: {
+      nextStreamClient: StreamVideoClient;
+      nextStreamCallId: string;
+      nextCallKind: MessagesCallKind;
+      nextRole: MessagesCallRole;
+      nextCallRecordId: string | null;
+    }) => {
+      if (isJoiningExistingCallRef.current && callRef.current) {
+        return callRef.current;
+      }
+
+      isJoiningExistingCallRef.current = true;
+
+      try {
+        const nextCall = nextStreamClient.call('default', nextStreamCallId, { reuseInstance: true });
+        callRef.current = nextCall;
+        setCall(nextCall);
+
+        await nextCall.get({ video: nextCallKind === 'video' });
+        await nextCall.join();
+        await syncCallDevices(nextCall, nextCallKind);
+
+        if (nextRole === 'caller' && nextCallRecordId) {
+          console.log('[GlobalCall] caller joined accepted call', {
+            callRecordId: nextCallRecordId,
+          });
+        }
+
+        return nextCall;
+      } finally {
+        isJoiningExistingCallRef.current = false;
+      }
+    },
+    [syncCallDevices]
+  );
+
   React.useEffect(() => {
-    if (!visible || !callKind || !currentUserId) return;
+    if (!connectEnabled || !callKind || !currentUserId || !role || !streamClient) return;
 
     let cancelled = false;
     const startMessagesCall = async () => {
@@ -253,7 +304,7 @@ export function MessagesCallOverlay({
         return;
       }
 
-      const initKey = `${role ?? 'caller'}:${callKind}:${resolvedCallId}:${callRecordId ?? 'none'}:${visible ? 'open' : 'closed'}`;
+      const initKey = `${role}:${callKind}:${resolvedCallId}:${callRecordId ?? 'none'}`;
       if (initKeyRef.current === initKey && callRef.current) {
         return;
       }
@@ -280,19 +331,8 @@ export function MessagesCallOverlay({
           role: role ?? null,
         });
         // #endregion
-        const nextClient = await getStreamVideoClient();
-        if (!nextClient) {
-          // #region debug-point C:missing-stream-client
-          reportMessagesCallDebug('C', 'MessagesCallOverlay.tsx:startMessagesCall:missing-client', '[DEBUG] startup failed', {
-            stage: 'connect-stream-client',
-            message: 'missing stream client',
-          });
-          // #endregion
-          throw new Error('missing stream client');
-        }
+        const nextClient = streamClient;
         if (cancelled) return;
-
-        setClient(nextClient);
         // #region debug-point D:get-stream-call
         reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:startMessagesCall:get-call', '[DEBUG] stage: get-stream-call', {
           resolvedCallId,
@@ -300,24 +340,7 @@ export function MessagesCallOverlay({
           callKind,
         });
         // #endregion
-        const nextCall = nextClient.call('default', resolvedCallId, { reuseInstance: true });
-        callRef.current = nextCall;
-        setCall(nextCall);
-
         startupStage = 'get-stream-call';
-        setCallStatus(role === 'caller' ? 'ringing' : 'connecting');
-        try {
-          await nextCall.get({ video: callKind === 'video' });
-        } catch (error) {
-          // #region debug-point D:get-stream-call-failed
-          reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:startMessagesCall:get-call-failed', '[DEBUG] startup failed', {
-            stage: 'get-stream-call',
-            message: error instanceof Error ? error.message : String(error),
-          });
-          // #endregion
-          throw error;
-        }
-
         setCallStatus('connecting');
         // #region debug-point D:join-stream-call
         startupStage = 'join-stream-call';
@@ -333,9 +356,13 @@ export function MessagesCallOverlay({
           }
         );
         // #endregion
-        await nextCall.join();
-
-        await syncCallDevices(nextCall, callKind);
+        await joinExistingMessagesCall({
+          nextStreamClient: nextClient,
+          nextStreamCallId: resolvedCallId,
+          nextCallKind: callKind,
+          nextRole: role,
+          nextCallRecordId: callRecordId,
+        });
         // #region debug-point D:join-stream-call-success
         reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:startMessagesCall:join-success', '[DEBUG] stage: join-stream-call success', {
           resolvedCallId,
@@ -374,6 +401,9 @@ export function MessagesCallOverlay({
         if (!cancelled) {
           setIsPreparing(false);
         }
+        if (cancelled) {
+          isJoiningExistingCallRef.current = false;
+        }
       }
     };
 
@@ -386,41 +416,38 @@ export function MessagesCallOverlay({
         void cleanupCall(callRef.current);
       }
     };
-  }, [callKind, callRecordId, cleanupCall, coupleId, currentUserId, ensureCallPermissions, partnerId, role, streamCallId, syncCallDevices, visible]);
+  }, [callKind, callRecordId, cleanupCall, connectEnabled, coupleId, currentUserId, ensureCallPermissions, joinExistingMessagesCall, partnerId, role, streamCallId, streamClient]);
 
   React.useEffect(() => {
     callRef.current = call;
   }, [call]);
 
   React.useEffect(() => {
-    if (!call) return;
-
-    const unsubscribeEnded = call.on('call.ended', () => {
-      setCallStatus('idle');
-      onEnd();
-    });
-    const unsubscribeRejected = call.on('call.rejected', () => {
-      setCallStatus('idle');
-      onEnd();
-    });
-
-    return () => {
-      unsubscribeEnded();
-      unsubscribeRejected();
-    };
-  }, [call, onEnd]);
+    if (callStatus === 'connected') {
+      onConnected?.();
+    }
+  }, [callStatus, onConnected]);
 
   const handleEndPress = React.useCallback(async () => {
     await cleanupCall(callRef.current, { reject: Boolean((callRef.current as any)?.ringing) });
     onEnd();
   }, [cleanupCall, onEnd]);
 
+  const handleMinimizePress = React.useCallback(() => {
+    onMinimize?.();
+  }, [onMinimize]);
+
   const title = callKind === 'audio' ? 'Llamada' : 'Videollamada';
 
   return (
-    <Modal visible={visible} animationType="fade" presentationStyle="fullScreen" onRequestClose={handleEndPress}>
+    <Modal
+      visible={visible}
+      animationType="fade"
+      presentationStyle="fullScreen"
+      onRequestClose={onMinimize ? handleMinimizePress : handleEndPress}
+    >
       <View style={[styles.overlayBase, callKind === 'video' ? styles.videoOverlay : styles.audioOverlay]}>
-        {!client || !call || !callKind ? (
+        {!streamClient || !call || !callKind ? (
           <CallFallbackCard
             title={title}
             partnerName={partnerName}
@@ -428,9 +455,10 @@ export function MessagesCallOverlay({
             statusText={errorMessage || (isPreparing ? 'Conectando...' : 'Llamando...')}
             errorMessage={errorMessage}
             onEnd={handleEndPress}
+            onMinimize={onMinimize ? handleMinimizePress : undefined}
           />
         ) : (
-          <StreamVideo client={client}>
+          <StreamVideo client={streamClient}>
             <StreamCall call={call}>
               <MessagesCallOverlayContent
                 callKind={callKind}
@@ -443,6 +471,7 @@ export function MessagesCallOverlay({
                 isPreparing={isPreparing}
                 errorMessage={errorMessage}
                 onEnd={handleEndPress}
+                onMinimize={onMinimize ? handleMinimizePress : undefined}
               />
             </StreamCall>
           </StreamVideo>
@@ -463,6 +492,7 @@ function MessagesCallOverlayContent({
   isPreparing,
   errorMessage,
   onEnd,
+  onMinimize,
 }: {
   callKind: MessagesCallKind;
   partnerName: string;
@@ -474,6 +504,7 @@ function MessagesCallOverlayContent({
   isPreparing: boolean;
   errorMessage: string | null;
   onEnd: () => void;
+  onMinimize?: () => void;
 }) {
   const { useCallCallingState, useMicrophoneState, useCameraState, useParticipants } = useCallStateHooks();
   const callingState = useCallCallingState();
@@ -575,7 +606,13 @@ function MessagesCallOverlayContent({
     return (
       <View style={styles.audioCallShell}>
         <View style={styles.audioCallTop}>
-          <Text style={styles.audioCallTitle}>Llamada</Text>
+          <View style={styles.audioCallTopRow}>
+            <View style={styles.audioCallTopSpacer} />
+            <Text style={styles.audioCallTitle}>Llamada</Text>
+            <Pressable style={styles.minimizeButton} onPress={onMinimize}>
+              <ChevronDown size={20} color="#7A5563" />
+            </Pressable>
+          </View>
           <Text style={styles.audioCallStatus}>{statusText}</Text>
         </View>
 
@@ -635,6 +672,9 @@ function MessagesCallOverlayContent({
         ) : null}
 
         <View style={styles.videoTopInfo}>
+          <Pressable style={styles.videoMinimizeButton} onPress={onMinimize}>
+            <ChevronDown size={20} color="#FFFFFF" />
+          </Pressable>
           <Text style={styles.videoTitle}>Videollamada</Text>
           <Text style={styles.videoStatus}>{statusText}</Text>
         </View>
@@ -700,6 +740,7 @@ function CallFallbackCard({
   statusText,
   errorMessage,
   onEnd,
+  onMinimize,
 }: {
   title: string;
   partnerName: string;
@@ -707,9 +748,15 @@ function CallFallbackCard({
   statusText: string;
   errorMessage?: string | null;
   onEnd: () => void;
+  onMinimize?: () => void;
 }) {
   return (
     <View style={styles.fallbackCard}>
+      {onMinimize ? (
+        <Pressable style={styles.fallbackMinimizeButton} onPress={onMinimize}>
+          <ChevronDown size={20} color="#7A5563" />
+        </Pressable>
+      ) : null}
       <AvatarCircle uri={partnerAvatarUrl} label={partnerName} size={96} />
       <Text style={styles.fallbackTitle}>{title}</Text>
       <Text style={styles.fallbackName}>{partnerName}</Text>
@@ -824,6 +871,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 10,
   },
+  fallbackMinimizeButton: {
+    position: 'absolute',
+    top: 22,
+    right: 22,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#F1D2DC',
+  },
   fallbackStatus: {
     fontSize: 15,
     fontWeight: '700',
@@ -856,6 +916,16 @@ const styles = StyleSheet.create({
   audioCallTop: {
     alignItems: 'center',
     gap: 8,
+  },
+  audioCallTopRow: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  audioCallTopSpacer: {
+    width: 38,
+    height: 38,
   },
   audioCallTitle: {
     fontSize: 20,
@@ -904,6 +974,16 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '800',
     textAlign: 'center',
+  },
+  minimizeButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#F1D2DC',
   },
   videoCallShell: {
     flex: 1,
@@ -960,6 +1040,19 @@ const styles = StyleSheet.create({
     right: 24,
     alignItems: 'center',
     gap: 6,
+  },
+  videoMinimizeButton: {
+    position: 'absolute',
+    right: 0,
+    top: -2,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
   },
   videoTitle: {
     fontSize: 18,

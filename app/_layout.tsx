@@ -6,6 +6,7 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { AuthProvider } from '../lib/AuthProvider';
 import { StatusBar } from 'expo-status-bar';
+import { CallProvider } from '../components/calls/CallProvider';
 
 export default function RootLayout() {
   const colorScheme = useColorScheme() ?? 'light';
@@ -15,13 +16,15 @@ export default function RootLayout() {
       <SafeAreaProvider>
         <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
           <AuthProvider>
-            <StatusBar style="dark" />
-            <Stack screenOptions={{ headerShown: false }}>
-              <Stack.Screen name="(tabs)" />
-              <Stack.Screen name="(auth)/login" />
-              <Stack.Screen name="(auth)/register" />
-              <Stack.Screen name="partner-setup" />
-            </Stack>
+            <CallProvider>
+              <StatusBar style="dark" />
+              <Stack screenOptions={{ headerShown: false }}>
+                <Stack.Screen name="(tabs)" />
+                <Stack.Screen name="(auth)/login" />
+                <Stack.Screen name="(auth)/register" />
+                <Stack.Screen name="partner-setup" />
+              </Stack>
+            </CallProvider>
           </AuthProvider>
         </ThemeProvider>
       </SafeAreaProvider>
