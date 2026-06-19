@@ -1,6 +1,7 @@
 import React from 'react';
 import { StreamVideoClient, type User } from '@stream-io/video-react-native-sdk';
 import { getSafeUser, isInvalidRefreshTokenError, supabase } from './supabase';
+import { getStreamApiKey } from './streamVideo';
 
 type StreamTokenResponse = {
   token: string;
@@ -16,6 +17,34 @@ type ProfileRow = {
   photo_url?: string | null;
 } | null;
 
+const readFunctionErrorBody = async (context: unknown) => {
+  if (!context || typeof context !== 'object') {
+    return '';
+  }
+
+  const maybeResponse = context as {
+    text?: () => Promise<string>;
+    clone?: () => { text?: () => Promise<string> };
+  };
+
+  try {
+    if (typeof maybeResponse.clone === 'function') {
+      const cloned = maybeResponse.clone();
+      if (cloned && typeof cloned.text === 'function') {
+        return (await cloned.text()).trim();
+      }
+    }
+
+    if (typeof maybeResponse.text === 'function') {
+      return (await maybeResponse.text()).trim();
+    }
+  } catch (error) {
+    console.warn('[StreamToken] Could not read function error response body:', error);
+  }
+
+  return '';
+};
+
 export function useStreamVideoClientForUsfully() {
   const [client, setClient] = React.useState<StreamVideoClient | null>(null);
   const [loading, setLoading] = React.useState(true);
@@ -26,6 +55,8 @@ export function useStreamVideoClientForUsfully() {
 
     const setup = async () => {
       try {
+        const streamApiKey = getStreamApiKey();
+
         const user = await getSafeUser();
         if (!user) {
           if (mounted) setClient(null);
@@ -44,16 +75,30 @@ export function useStreamVideoClientForUsfully() {
 
         const profile = (profileData as ProfileRow) ?? null;
 
-        const { data: tokenData, error: tokenError } = await supabase.functions.invoke('stream-token');
+        const { data: tokenData, error: tokenError } = await supabase.functions.invoke('stream-token', {
+          body: {},
+        });
         if (tokenError) {
-          throw tokenError;
+          const safeResponseText = await readFunctionErrorBody((tokenError as any)?.context);
+
+          console.log('[StreamToken] Edge Function invoke failed', {
+            name: (tokenError as any)?.name ?? null,
+            message: (tokenError as any)?.message ?? String(tokenError),
+            safeResponseText: safeResponseText || null,
+          });
+
+          throw new Error(
+            `Stream token failed: ${(tokenError as any)?.message ?? String(tokenError)}${
+              safeResponseText ? ` | ${safeResponseText}` : ''
+            }`
+          );
         }
 
         const payload = tokenData as StreamTokenResponse;
-        const apiKey = payload?.apiKey;
         const token = payload?.token;
+        const userId = payload?.userId;
 
-        if (!apiKey || !token) {
+        if (!payload?.apiKey || !token || !userId) {
           throw new Error('Missing Stream token payload.');
         }
 
@@ -63,8 +108,12 @@ export function useStreamVideoClientForUsfully() {
           image: profile?.avatar_url || profile?.photo_url || undefined,
         };
 
+        console.log('[StreamConfig] API key availability', {
+          hasStreamApiKey: Boolean(process.env.EXPO_PUBLIC_STREAM_API_KEY?.trim()),
+        });
+
         const streamClient = StreamVideoClient.getOrCreateInstance({
-          apiKey,
+          apiKey: streamApiKey,
           user: streamUser,
           token,
         });

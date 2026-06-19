@@ -1,6 +1,7 @@
 import React from 'react';
 import { ActivityIndicator, Alert, Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 import { Camera as ExpoCamera } from 'expo-camera';
+import Constants from 'expo-constants';
 import {
   CallingState,
   ParticipantView,
@@ -25,13 +26,18 @@ import {
 import { getStreamVideoClient } from '../../lib/streamVideo';
 
 export type MessagesCallKind = 'audio' | 'video';
-type MessagesCallMode = 'incoming' | 'outgoing';
+export type MessagesCallStatus = 'idle' | 'connecting' | 'ringing' | 'connected' | 'error';
+export type MessagesCallRole = 'caller' | 'recipient';
+const MESSAGES_CALL_DEBUG_URL = 'http://192.168.100.35:7777/event';
+const MESSAGES_CALL_DEBUG_SESSION = 'mensajes-call-startup';
 
 type MessagesCallOverlayProps = {
   visible: boolean;
   callKind: MessagesCallKind | null;
-  callId?: string | null;
-  mode?: MessagesCallMode;
+  streamCallId: string | null;
+  callRecordId: string | null;
+  role: MessagesCallRole | null;
+  callRecordStatus?: 'ringing' | 'accepted' | 'rejected' | 'cancelled' | 'ended' | null;
   coupleId: string | null;
   currentUserId: string | null;
   partnerId?: string | null;
@@ -40,15 +46,33 @@ type MessagesCallOverlayProps = {
   onEnd: () => void;
 };
 
-const getMessagesCallId = (coupleId: string, kind: MessagesCallKind) => `messages-${kind}-call-${coupleId}`;
+const getMessagesCallId = (coupleId: string) => `messages-call-${coupleId}`;
 const getParticipantUserId = (participant: any) =>
   participant?.userId || participant?.user_id || participant?.user?.id || null;
+
+const reportMessagesCallDebug = (hypothesisId: string, location: string, msg: string, data?: Record<string, unknown>) => {
+  void fetch(MESSAGES_CALL_DEBUG_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: MESSAGES_CALL_DEBUG_SESSION,
+      runId: 'pre-fix',
+      hypothesisId,
+      location,
+      msg,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => {});
+};
 
 export function MessagesCallOverlay({
   visible,
   callKind,
-  callId,
-  mode = 'outgoing',
+  streamCallId,
+  callRecordId,
+  role,
+  callRecordStatus = null,
   coupleId,
   currentUserId,
   partnerId,
@@ -60,8 +84,10 @@ export function MessagesCallOverlay({
   const [call, setCall] = React.useState<Call | null>(null);
   const [isPreparing, setIsPreparing] = React.useState(false);
   const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
+  const [callStatus, setCallStatus] = React.useState<MessagesCallStatus>('idle');
   const callRef = React.useRef<Call | null>(null);
   const isCleaningUpRef = React.useRef(false);
+  const initKeyRef = React.useRef<string | null>(null);
 
   const cleanupCall = React.useCallback(async (callToCleanup?: Call | null, options?: { reject?: boolean }) => {
     if (!callToCleanup || isCleaningUpRef.current) return;
@@ -91,36 +117,78 @@ export function MessagesCallOverlay({
         callRef.current = null;
       }
       setCall((prev) => (prev === callToCleanup ? null : prev));
+      setCallStatus('idle');
       isCleaningUpRef.current = false;
     }
   }, []);
 
   const ensureCallPermissions = React.useCallback(async (kind: MessagesCallKind) => {
-    const currentMic = await ExpoCamera.getMicrophonePermissionsAsync();
-    const micResult =
-      currentMic.granted || currentMic.status === 'granted'
-        ? currentMic
-        : await ExpoCamera.requestMicrophonePermissionsAsync();
+    try {
+      // #region debug-point D:request-permissions
+      reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:ensureCallPermissions:start', '[DEBUG] stage: request-permissions', {
+        callKind: kind,
+      });
+      // #endregion
+      const currentMic = await ExpoCamera.getMicrophonePermissionsAsync();
+      const micResult =
+        currentMic.granted || currentMic.status === 'granted'
+          ? currentMic
+          : await ExpoCamera.requestMicrophonePermissionsAsync();
 
-    if (!micResult.granted && micResult.status !== 'granted') {
-      Alert.alert('Permiso requerido', 'No tenemos permiso para usar el micrófono.');
-      return false;
-    }
-
-    if (kind === 'video') {
-      const currentCamera = await ExpoCamera.getCameraPermissionsAsync();
-      const cameraResult =
-        currentCamera.granted || currentCamera.status === 'granted'
-          ? currentCamera
-          : await ExpoCamera.requestCameraPermissionsAsync();
-
-      if (!cameraResult.granted && cameraResult.status !== 'granted') {
-        Alert.alert('Permiso requerido', 'No tenemos permiso para usar la cámara.');
+      if (!micResult.granted && micResult.status !== 'granted') {
+        // #region debug-point D:microphone-permission-denied
+        reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:ensureCallPermissions:microphone-denied', '[DEBUG] stage: request-permissions microphone denied', {
+          microphoneStatus: micResult.status,
+          granted: micResult.granted,
+        });
+        // #endregion
+        const message = 'No tenemos permiso para usar el micrófono.';
+        setErrorMessage(message);
+        setCallStatus('error');
+        Alert.alert('Permiso requerido', message);
         return false;
       }
-    }
 
-    return true;
+      if (kind === 'video') {
+        const currentCamera = await ExpoCamera.getCameraPermissionsAsync();
+        const cameraResult =
+          currentCamera.granted || currentCamera.status === 'granted'
+            ? currentCamera
+            : await ExpoCamera.requestCameraPermissionsAsync();
+
+        if (!cameraResult.granted && cameraResult.status !== 'granted') {
+          // #region debug-point D:camera-permission-denied
+          reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:ensureCallPermissions:camera-denied', '[DEBUG] stage: request-permissions camera denied', {
+            cameraStatus: cameraResult.status,
+            granted: cameraResult.granted,
+          });
+          // #endregion
+          const message = 'No tenemos permiso para usar la cámara.';
+          setErrorMessage(message);
+          setCallStatus('error');
+          Alert.alert('Permiso requerido', message);
+          return false;
+        }
+      }
+
+      // #region debug-point D:request-permissions-success
+      reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:ensureCallPermissions:success', '[DEBUG] stage: request-permissions success', {
+        callKind: kind,
+      });
+      // #endregion
+      return true;
+    } catch (error) {
+      // #region debug-point D:request-permissions-failed
+      reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:ensureCallPermissions:catch', '[DEBUG] startup failed', {
+        stage: 'request-permissions',
+        message: error instanceof Error ? error.message : String(error),
+      });
+      // #endregion
+      console.log('[MessagesCallOverlay] permissions error:', error);
+      setErrorMessage('No se pudo iniciar la llamada. Inténtalo de nuevo.');
+      setCallStatus('error');
+      return false;
+    }
   }, []);
 
   const syncCallDevices = React.useCallback(async (streamCall: Call, kind: MessagesCallKind) => {
@@ -146,65 +214,161 @@ export function MessagesCallOverlay({
 
     let cancelled = false;
     const startMessagesCall = async () => {
-      const resolvedCallId = callId ?? (coupleId ? getMessagesCallId(coupleId, callKind) : null);
+      let startupStage = 'initial';
+
+      console.log('[MessagesCall] overlay context', {
+        callKind,
+        hasCurrentUserId: Boolean(currentUserId),
+        hasCoupleId: Boolean(coupleId),
+        hasPartnerUserId: Boolean(partnerId),
+        hasStreamCallId: Boolean(streamCallId),
+        hasCallRecordId: Boolean(callRecordId),
+        role: role ?? null,
+        isExpoGo: Constants.appOwnership === 'expo',
+      });
+
+      // #region debug-point C:overlay-start
+      reportMessagesCallDebug('C', 'MessagesCallOverlay.tsx:startMessagesCall:entry', '[DEBUG] stage: initialize-overlay-call', {
+        hasVisible: visible,
+        hasCallKind: Boolean(callKind),
+        hasStreamCallId: Boolean(streamCallId),
+        hasCallRecordId: Boolean(callRecordId),
+        hasCoupleId: Boolean(coupleId),
+        hasCurrentUserId: Boolean(currentUserId),
+        hasPartnerId: Boolean(partnerId),
+        role: role ?? null,
+        appOwnership: Constants.appOwnership ?? null,
+      });
+      // #endregion
+      const resolvedCallId = streamCallId ?? (coupleId ? getMessagesCallId(coupleId) : null);
       if (!resolvedCallId) {
+        // #region debug-point B:missing-stream-call-id
+        reportMessagesCallDebug('B', 'MessagesCallOverlay.tsx:startMessagesCall:missing-call-id', '[DEBUG] stage: validate-call-data failed', {
+          hasStreamCallId: Boolean(streamCallId),
+          hasCoupleId: Boolean(coupleId),
+        });
+        // #endregion
         setErrorMessage('No se pudo iniciar la llamada. Inténtalo de nuevo.');
+        setCallStatus('error');
         return;
       }
 
+      const initKey = `${role ?? 'caller'}:${callKind}:${resolvedCallId}:${callRecordId ?? 'none'}:${visible ? 'open' : 'closed'}`;
+      if (initKeyRef.current === initKey && callRef.current) {
+        return;
+      }
+      initKeyRef.current = initKey;
+
       setIsPreparing(true);
       setErrorMessage(null);
+      setCallStatus('connecting');
       setCall(null);
       callRef.current = null;
 
       try {
+        startupStage = 'request-permissions';
         const hasPermissions = await ensureCallPermissions(callKind);
         if (!hasPermissions) {
-          if (!cancelled) {
-            setErrorMessage('No se pudo iniciar la llamada. Inténtalo de nuevo.');
-          }
           return;
         }
 
+        // #region debug-point C:fetch-stream-client
+        startupStage = 'connect-stream-client';
+        reportMessagesCallDebug('C', 'MessagesCallOverlay.tsx:startMessagesCall:get-client', '[DEBUG] stage: connect-stream-client', {
+          callKind,
+          resolvedCallId,
+          role: role ?? null,
+        });
+        // #endregion
         const nextClient = await getStreamVideoClient();
         if (!nextClient) {
+          // #region debug-point C:missing-stream-client
+          reportMessagesCallDebug('C', 'MessagesCallOverlay.tsx:startMessagesCall:missing-client', '[DEBUG] startup failed', {
+            stage: 'connect-stream-client',
+            message: 'missing stream client',
+          });
+          // #endregion
           throw new Error('missing stream client');
         }
         if (cancelled) return;
 
         setClient(nextClient);
+        // #region debug-point D:get-stream-call
+        reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:startMessagesCall:get-call', '[DEBUG] stage: get-stream-call', {
+          resolvedCallId,
+          role: role ?? null,
+          callKind,
+        });
+        // #endregion
         const nextCall = nextClient.call('default', resolvedCallId, { reuseInstance: true });
         callRef.current = nextCall;
         setCall(nextCall);
 
-        if (mode === 'incoming') {
-          try {
-            await nextCall.get({ video: callKind === 'video' });
-          } catch (error) {
-            console.log('[MessagesCallOverlay] incoming call get ignored:', error);
-          }
-          await nextCall.join();
-        } else {
-          const members = [{ user_id: currentUserId }];
-          if (partnerId) {
-            members.push({ user_id: partnerId });
-          }
-
-          await nextCall.getOrCreate({
-            ring: true,
-            video: callKind === 'video',
-            data: {
-              members,
-            },
+        startupStage = 'get-stream-call';
+        setCallStatus(role === 'caller' ? 'ringing' : 'connecting');
+        try {
+          await nextCall.get({ video: callKind === 'video' });
+        } catch (error) {
+          // #region debug-point D:get-stream-call-failed
+          reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:startMessagesCall:get-call-failed', '[DEBUG] startup failed', {
+            stage: 'get-stream-call',
+            message: error instanceof Error ? error.message : String(error),
           });
-          await nextCall.join();
+          // #endregion
+          throw error;
         }
 
+        setCallStatus('connecting');
+        // #region debug-point D:join-stream-call
+        startupStage = 'join-stream-call';
+        reportMessagesCallDebug(
+          'D',
+          role === 'recipient'
+            ? 'MessagesCallOverlay.tsx:startMessagesCall:join-recipient'
+            : 'MessagesCallOverlay.tsx:startMessagesCall:join-caller',
+          '[DEBUG] stage: join-stream-call',
+          {
+            resolvedCallId,
+            role: role ?? null,
+          }
+        );
+        // #endregion
+        await nextCall.join();
+
         await syncCallDevices(nextCall, callKind);
-      } catch (error) {
-        console.log('[MessagesCallOverlay] start call error:', error);
+        // #region debug-point D:join-stream-call-success
+        reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:startMessagesCall:join-success', '[DEBUG] stage: join-stream-call success', {
+          resolvedCallId,
+          role: role ?? null,
+          callKind,
+        });
+        // #endregion
         if (!cancelled) {
-          setErrorMessage('No se pudo iniciar la llamada. Inténtalo de nuevo.');
+          setCallStatus('connected');
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const userMessage =
+          typeof error === 'object' && error && 'userMessage' in error && typeof (error as any).userMessage === 'string'
+            ? (error as any).userMessage
+            : null;
+        // #region debug-point D:startMessagesCall-failed
+        reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:startMessagesCall:catch', '[DEBUG] startup failed', {
+          stage: startupStage,
+          message: errorMessage,
+          resolvedCallId: streamCallId ?? (coupleId ? getMessagesCallId(coupleId) : null),
+          role: role ?? null,
+          callKind: callKind ?? null,
+        });
+        // #endregion
+        console.error('[MessagesCall] failed', {
+          startupStage,
+          error,
+          errorMessage,
+        });
+        if (!cancelled) {
+          setErrorMessage(userMessage ?? `Paso: ${startupStage}\n\n${errorMessage}`);
+          setCallStatus('error');
         }
       } finally {
         if (!cancelled) {
@@ -217,11 +381,12 @@ export function MessagesCallOverlay({
 
     return () => {
       cancelled = true;
+      initKeyRef.current = null;
       if (callRef.current) {
         void cleanupCall(callRef.current);
       }
     };
-  }, [callId, callKind, cleanupCall, coupleId, currentUserId, ensureCallPermissions, mode, partnerId, syncCallDevices, visible]);
+  }, [callKind, callRecordId, cleanupCall, coupleId, currentUserId, ensureCallPermissions, partnerId, role, streamCallId, syncCallDevices, visible]);
 
   React.useEffect(() => {
     callRef.current = call;
@@ -231,9 +396,11 @@ export function MessagesCallOverlay({
     if (!call) return;
 
     const unsubscribeEnded = call.on('call.ended', () => {
+      setCallStatus('idle');
       onEnd();
     });
     const unsubscribeRejected = call.on('call.rejected', () => {
+      setCallStatus('idle');
       onEnd();
     });
 
@@ -270,6 +437,9 @@ export function MessagesCallOverlay({
                 partnerName={partnerName}
                 partnerAvatarUrl={partnerAvatarUrl}
                 currentUserId={currentUserId}
+                role={role}
+                callRecordStatus={callRecordStatus}
+                callStatus={callStatus}
                 isPreparing={isPreparing}
                 errorMessage={errorMessage}
                 onEnd={handleEndPress}
@@ -287,6 +457,9 @@ function MessagesCallOverlayContent({
   partnerName,
   partnerAvatarUrl,
   currentUserId,
+  role,
+  callRecordStatus,
+  callStatus,
   isPreparing,
   errorMessage,
   onEnd,
@@ -295,6 +468,9 @@ function MessagesCallOverlayContent({
   partnerName: string;
   partnerAvatarUrl?: string | null;
   currentUserId?: string | null;
+  role: MessagesCallRole | null;
+  callRecordStatus: 'ringing' | 'accepted' | 'rejected' | 'cancelled' | 'ended' | null;
+  callStatus: MessagesCallStatus;
   isPreparing: boolean;
   errorMessage: string | null;
   onEnd: () => void;
@@ -351,13 +527,19 @@ function MessagesCallOverlayContent({
 
   const statusText = React.useMemo(() => {
     if (errorMessage) return errorMessage;
+    if (callStatus === 'error') return 'No se pudo iniciar la llamada. Inténtalo de nuevo.';
+    if (callRecordStatus === 'ringing' && role === 'caller') return 'Llamando...';
+    if (callStatus === 'ringing') return 'Llamando...';
     if (isPreparing) return 'Conectando...';
-    if (callingState === CallingState.JOINED) {
+    if (
+      (callRecordStatus === 'accepted' && (callStatus === 'connected' || callingState === CallingState.JOINED)) ||
+      (callRecordStatus == null && (callStatus === 'connected' || callingState === CallingState.JOINED))
+    ) {
       return elapsedSeconds > 0 ? formatElapsed(elapsedSeconds) : 'En llamada';
     }
     if (callingState === CallingState.RINGING) return 'Llamando...';
     return 'Conectando...';
-  }, [callingState, elapsedSeconds, errorMessage, isPreparing]);
+  }, [callRecordStatus, role, callStatus, callingState, elapsedSeconds, errorMessage, isPreparing]);
 
   const toggleSpeaker = React.useCallback(() => {
     const next = !speakerOn;
