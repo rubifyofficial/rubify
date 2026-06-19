@@ -1,11 +1,22 @@
 import { serve } from 'https://deno.land/std@0.224.0/http/server.ts';
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'npm:@supabase/supabase-js@2';
 import { StreamClient } from 'npm:@stream-io/node-sdk';
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
 };
+
+const jsonHeaders = {
+  ...corsHeaders,
+  'Content-Type': 'application/json',
+};
+
+const jsonResponse = (body: Record<string, unknown>, status: number) =>
+  new Response(JSON.stringify(body), {
+    status,
+    headers: jsonHeaders,
+  });
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -17,21 +28,51 @@ serve(async (req) => {
     const supabaseAnonKey = Deno.env.get('SUPABASE_ANON_KEY');
     const streamApiKey = Deno.env.get('STREAM_API_KEY');
     const streamApiSecret = Deno.env.get('STREAM_API_SECRET');
+    const authHeader = req.headers.get('Authorization');
+
+    console.log('[stream-token] request received', {
+      hasAuthorization: Boolean(authHeader),
+    });
+
+    console.log('[stream-token] configuration', {
+      hasStreamApiKey: Boolean(streamApiKey),
+      hasStreamApiSecret: Boolean(streamApiSecret),
+    });
 
     if (!supabaseUrl || !supabaseAnonKey) {
-      throw new Error('Missing Supabase env vars');
+      return jsonResponse(
+        {
+          error: 'Function runtime error',
+        },
+        500
+      );
     }
 
-    if (!streamApiKey || !streamApiSecret) {
-      throw new Error('Missing Stream env vars');
-    }
-
-    const authHeader = req.headers.get('Authorization');
     if (!authHeader) {
-      return new Response(JSON.stringify({ error: 'Missing Authorization header' }), {
-        status: 401,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      });
+      return jsonResponse(
+        {
+          error: 'Unauthorized',
+        },
+        401
+      );
+    }
+
+    if (!streamApiKey) {
+      return jsonResponse(
+        {
+          error: 'Missing Stream server configuration',
+        },
+        500
+      );
+    }
+
+    if (!streamApiSecret) {
+      return jsonResponse(
+        {
+          error: 'Missing Stream server configuration',
+        },
+        500
+      );
     }
 
     const supabase = createClient(supabaseUrl, supabaseAnonKey, {
@@ -48,44 +89,54 @@ serve(async (req) => {
     } = await supabase.auth.getUser();
 
     if (userError || !user) {
-      return new Response(
-        JSON.stringify({
-          error: userError?.message || 'Unauthorized',
-        }),
+      return jsonResponse(
         {
-          status: 401,
-          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-        }
+          error: 'Unauthorized',
+        },
+        401
       );
     }
 
-    const streamClient = new StreamClient(streamApiKey, streamApiSecret);
-    const token = streamClient.generateUserToken({
-      user_id: user.id,
+    try {
+      const streamClient = new StreamClient(streamApiKey, streamApiSecret);
+      const token = streamClient.generateUserToken({
+        user_id: user.id,
+      });
+
+      return jsonResponse(
+        {
+          apiKey: streamApiKey,
+          token,
+          userId: user.id,
+        },
+        200
+      );
+    } catch (error) {
+      const safeErrorMessage = error instanceof Error ? error.message : 'Unknown token generation error';
+
+      console.log('[stream-token] token generation failed', {
+        message: safeErrorMessage,
+      });
+
+      return jsonResponse(
+        {
+          error: 'Token generation failed',
+        },
+        500
+      );
+    }
+  } catch (error) {
+    const safeErrorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+    console.log('[stream-token] unexpected error', {
+      message: safeErrorMessage,
     });
 
-    return new Response(
-      JSON.stringify({
-        apiKey: streamApiKey,
-        token,
-        userId: user.id,
-      }),
+    return jsonResponse(
       {
-        status: 200,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      }
-    );
-  } catch (error) {
-    console.log('stream-token error:', error);
-
-    return new Response(
-      JSON.stringify({
-        error: (error as Error)?.message || 'Unknown error',
-      }),
-      {
-        status: 500,
-        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
-      }
+        error: 'Function runtime error',
+      },
+      500
     );
   }
 });
