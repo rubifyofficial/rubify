@@ -1,0 +1,5596 @@
+
+
+==============================
+FILE: components\calls\MessagesCallOverlay.tsx
+==============================
+
+import React from 'react';
+import { ActivityIndicator, Alert, Image, Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Camera as ExpoCamera } from 'expo-camera';
+import Constants from 'expo-constants';
+import {
+  CallingState,
+  ParticipantView,
+  StreamCall,
+  StreamVideo,
+  callManager,
+  useCallStateHooks,
+  type Call,
+  type StreamVideoClient,
+} from '@stream-io/video-react-native-sdk';
+import {
+  Camera,
+  CameraOff,
+  ChevronDown,
+  Mic,
+  MicOff,
+  PhoneOff,
+  RefreshCw,
+  Volume2,
+  VolumeX,
+  UserRound,
+} from 'lucide-react-native';
+
+export type MessagesCallKind = 'audio' | 'video';
+export type MessagesCallStatus = 'idle' | 'connecting' | 'ringing' | 'connected' | 'error';
+export type MessagesCallRole = 'caller' | 'recipient';
+const MESSAGES_CALL_DEBUG_URL = 'http://192.168.100.35:7777/event';
+const MESSAGES_CALL_DEBUG_SESSION = 'mensajes-call-startup';
+
+type MessagesCallOverlayProps = {
+  visible: boolean;
+  callKind: MessagesCallKind | null;
+  streamCallId: string | null;
+  callRecordId: string | null;
+  role: MessagesCallRole | null;
+  callRecordStatus?: 'ringing' | 'accepted' | 'rejected' | 'cancelled' | 'ended' | null;
+  coupleId: string | null;
+  currentUserId: string | null;
+  partnerId?: string | null;
+  partnerName: string;
+  partnerAvatarUrl?: string | null;
+  connectEnabled?: boolean;
+  streamClient?: StreamVideoClient | null;
+  onEnd: () => void;
+  onMinimize?: () => void;
+  onConnected?: () => void;
+};
+
+const getMessagesCallId = (coupleId: string) => `messages-call-${coupleId}`;
+const getParticipantUserId = (participant: any) =>
+  participant?.userId || participant?.user_id || participant?.user?.id || null;
+
+const reportMessagesCallDebug = (hypothesisId: string, location: string, msg: string, data?: Record<string, unknown>) => {
+  void fetch(MESSAGES_CALL_DEBUG_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: MESSAGES_CALL_DEBUG_SESSION,
+      runId: 'pre-fix',
+      hypothesisId,
+      location,
+      msg,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => {});
+};
+
+export function MessagesCallOverlay({
+  visible,
+  callKind,
+  streamCallId,
+  callRecordId,
+  role,
+  callRecordStatus = null,
+  coupleId,
+  currentUserId,
+  partnerId,
+  partnerName,
+  partnerAvatarUrl,
+  connectEnabled = false,
+  streamClient = null,
+  onEnd,
+  onMinimize,
+  onConnected,
+}: MessagesCallOverlayProps) {
+  const [call, setCall] = React.useState<Call | null>(null);
+  const [isPreparing, setIsPreparing] = React.useState(false);
+  const [errorMessage, setErrorMessage] = React.useState<string | null>(null);
+  const [callStatus, setCallStatus] = React.useState<MessagesCallStatus>('idle');
+  const callRef = React.useRef<Call | null>(null);
+  const isCleaningUpRef = React.useRef(false);
+  const isJoiningExistingCallRef = React.useRef(false);
+  const initKeyRef = React.useRef<string | null>(null);
+
+  const cleanupCall = React.useCallback(async (callToCleanup?: Call | null, options?: { reject?: boolean }) => {
+    if (!callToCleanup || isCleaningUpRef.current) return;
+
+    isCleaningUpRef.current = true;
+
+    try {
+      const anyCall = callToCleanup as any;
+      await anyCall?.screenShare?.disable?.();
+      await anyCall?.screenSharing?.disable?.();
+      await anyCall?.microphone?.disable?.();
+      await anyCall?.camera?.disable?.();
+    } catch (error) {
+      console.log('[MessagesCallOverlay] device cleanup ignored:', error);
+    }
+
+    try {
+      if ((callToCleanup as any)?.ringing && options?.reject) {
+        await callToCleanup.leave({ reject: true });
+      } else {
+        await callToCleanup.leave();
+      }
+    } catch (error) {
+      console.log('[MessagesCallOverlay] leave call ignored:', error);
+    } finally {
+      if (callRef.current === callToCleanup) {
+        callRef.current = null;
+      }
+      setCall((prev) => (prev === callToCleanup ? null : prev));
+      setCallStatus('idle');
+      isCleaningUpRef.current = false;
+    }
+  }, []);
+
+  const ensureCallPermissions = React.useCallback(async (kind: MessagesCallKind) => {
+    try {
+      // #region debug-point D:request-permissions
+      reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:ensureCallPermissions:start', '[DEBUG] stage: request-permissions', {
+        callKind: kind,
+      });
+      // #endregion
+      const currentMic = await ExpoCamera.getMicrophonePermissionsAsync();
+      const micResult =
+        currentMic.granted || currentMic.status === 'granted'
+          ? currentMic
+          : await ExpoCamera.requestMicrophonePermissionsAsync();
+
+      if (!micResult.granted && micResult.status !== 'granted') {
+        // #region debug-point D:microphone-permission-denied
+        reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:ensureCallPermissions:microphone-denied', '[DEBUG] stage: request-permissions microphone denied', {
+          microphoneStatus: micResult.status,
+          granted: micResult.granted,
+        });
+        // #endregion
+        const message = 'No tenemos permiso para usar el micrófono.';
+        setErrorMessage(message);
+        setCallStatus('error');
+        Alert.alert('Permiso requerido', message);
+        return false;
+      }
+
+      if (kind === 'video') {
+        const currentCamera = await ExpoCamera.getCameraPermissionsAsync();
+        const cameraResult =
+          currentCamera.granted || currentCamera.status === 'granted'
+            ? currentCamera
+            : await ExpoCamera.requestCameraPermissionsAsync();
+
+        if (!cameraResult.granted && cameraResult.status !== 'granted') {
+          // #region debug-point D:camera-permission-denied
+          reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:ensureCallPermissions:camera-denied', '[DEBUG] stage: request-permissions camera denied', {
+            cameraStatus: cameraResult.status,
+            granted: cameraResult.granted,
+          });
+          // #endregion
+          const message = 'No tenemos permiso para usar la cámara.';
+          setErrorMessage(message);
+          setCallStatus('error');
+          Alert.alert('Permiso requerido', message);
+          return false;
+        }
+      }
+
+      // #region debug-point D:request-permissions-success
+      reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:ensureCallPermissions:success', '[DEBUG] stage: request-permissions success', {
+        callKind: kind,
+      });
+      // #endregion
+      return true;
+    } catch (error) {
+      // #region debug-point D:request-permissions-failed
+      reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:ensureCallPermissions:catch', '[DEBUG] startup failed', {
+        stage: 'request-permissions',
+        message: error instanceof Error ? error.message : String(error),
+      });
+      // #endregion
+      console.log('[MessagesCallOverlay] permissions error:', error);
+      setErrorMessage('No se pudo iniciar la llamada. Inténtalo de nuevo.');
+      setCallStatus('error');
+      return false;
+    }
+  }, []);
+
+  const syncCallDevices = React.useCallback(async (streamCall: Call, kind: MessagesCallKind) => {
+    try {
+      await streamCall.microphone.enable();
+    } catch (error) {
+      console.log('[MessagesCallOverlay] microphone sync ignored:', error);
+    }
+
+    try {
+      if (kind === 'video') {
+        await streamCall.camera.enable();
+      } else {
+        await streamCall.camera.disable();
+      }
+    } catch (error) {
+      console.log('[MessagesCallOverlay] camera sync ignored:', error);
+    }
+  }, []);
+
+  const joinExistingMessagesCall = React.useCallback(
+    async ({
+      nextStreamClient,
+      nextStreamCallId,
+      nextCallKind,
+      nextRole,
+      nextCallRecordId,
+    }: {
+      nextStreamClient: StreamVideoClient;
+      nextStreamCallId: string;
+      nextCallKind: MessagesCallKind;
+      nextRole: MessagesCallRole;
+      nextCallRecordId: string | null;
+    }) => {
+      if (isJoiningExistingCallRef.current && callRef.current) {
+        return callRef.current;
+      }
+
+      isJoiningExistingCallRef.current = true;
+
+      try {
+        const nextCall = nextStreamClient.call('default', nextStreamCallId, { reuseInstance: true });
+        callRef.current = nextCall;
+        setCall(nextCall);
+
+        await nextCall.get({ video: nextCallKind === 'video' });
+        await nextCall.join();
+        await syncCallDevices(nextCall, nextCallKind);
+
+        if (nextRole === 'caller' && nextCallRecordId) {
+          console.log('[GlobalCall] caller joined accepted call', {
+            callRecordId: nextCallRecordId,
+          });
+        }
+
+        return nextCall;
+      } finally {
+        isJoiningExistingCallRef.current = false;
+      }
+    },
+    [syncCallDevices]
+  );
+
+  React.useEffect(() => {
+    if (!connectEnabled || !callKind || !currentUserId || !role || !streamClient) return;
+
+    let cancelled = false;
+    const startMessagesCall = async () => {
+      let startupStage = 'initial';
+
+      console.log('[MessagesCall] overlay context', {
+        callKind,
+        hasCurrentUserId: Boolean(currentUserId),
+        hasCoupleId: Boolean(coupleId),
+        hasPartnerUserId: Boolean(partnerId),
+        hasStreamCallId: Boolean(streamCallId),
+        hasCallRecordId: Boolean(callRecordId),
+        role: role ?? null,
+        isExpoGo: Constants.appOwnership === 'expo',
+      });
+
+      // #region debug-point C:overlay-start
+      reportMessagesCallDebug('C', 'MessagesCallOverlay.tsx:startMessagesCall:entry', '[DEBUG] stage: initialize-overlay-call', {
+        hasVisible: visible,
+        hasCallKind: Boolean(callKind),
+        hasStreamCallId: Boolean(streamCallId),
+        hasCallRecordId: Boolean(callRecordId),
+        hasCoupleId: Boolean(coupleId),
+        hasCurrentUserId: Boolean(currentUserId),
+        hasPartnerId: Boolean(partnerId),
+        role: role ?? null,
+        appOwnership: Constants.appOwnership ?? null,
+      });
+      // #endregion
+      const resolvedCallId = streamCallId ?? (coupleId ? getMessagesCallId(coupleId) : null);
+      if (!resolvedCallId) {
+        // #region debug-point B:missing-stream-call-id
+        reportMessagesCallDebug('B', 'MessagesCallOverlay.tsx:startMessagesCall:missing-call-id', '[DEBUG] stage: validate-call-data failed', {
+          hasStreamCallId: Boolean(streamCallId),
+          hasCoupleId: Boolean(coupleId),
+        });
+        // #endregion
+        setErrorMessage('No se pudo iniciar la llamada. Inténtalo de nuevo.');
+        setCallStatus('error');
+        return;
+      }
+
+      const initKey = `${role}:${callKind}:${resolvedCallId}:${callRecordId ?? 'none'}`;
+      if (initKeyRef.current === initKey && callRef.current) {
+        return;
+      }
+      initKeyRef.current = initKey;
+
+      setIsPreparing(true);
+      setErrorMessage(null);
+      setCallStatus('connecting');
+      setCall(null);
+      callRef.current = null;
+
+      try {
+        startupStage = 'request-permissions';
+        const hasPermissions = await ensureCallPermissions(callKind);
+        if (!hasPermissions) {
+          return;
+        }
+
+        // #region debug-point C:fetch-stream-client
+        startupStage = 'connect-stream-client';
+        reportMessagesCallDebug('C', 'MessagesCallOverlay.tsx:startMessagesCall:get-client', '[DEBUG] stage: connect-stream-client', {
+          callKind,
+          resolvedCallId,
+          role: role ?? null,
+        });
+        // #endregion
+        const nextClient = streamClient;
+        if (cancelled) return;
+        // #region debug-point D:get-stream-call
+        reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:startMessagesCall:get-call', '[DEBUG] stage: get-stream-call', {
+          resolvedCallId,
+          role: role ?? null,
+          callKind,
+        });
+        // #endregion
+        startupStage = 'get-stream-call';
+        setCallStatus('connecting');
+        // #region debug-point D:join-stream-call
+        startupStage = 'join-stream-call';
+        reportMessagesCallDebug(
+          'D',
+          role === 'recipient'
+            ? 'MessagesCallOverlay.tsx:startMessagesCall:join-recipient'
+            : 'MessagesCallOverlay.tsx:startMessagesCall:join-caller',
+          '[DEBUG] stage: join-stream-call',
+          {
+            resolvedCallId,
+            role: role ?? null,
+          }
+        );
+        // #endregion
+        await joinExistingMessagesCall({
+          nextStreamClient: nextClient,
+          nextStreamCallId: resolvedCallId,
+          nextCallKind: callKind,
+          nextRole: role,
+          nextCallRecordId: callRecordId,
+        });
+        // #region debug-point D:join-stream-call-success
+        reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:startMessagesCall:join-success', '[DEBUG] stage: join-stream-call success', {
+          resolvedCallId,
+          role: role ?? null,
+          callKind,
+        });
+        // #endregion
+        if (!cancelled) {
+          setCallStatus('connected');
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const userMessage =
+          typeof error === 'object' && error && 'userMessage' in error && typeof (error as any).userMessage === 'string'
+            ? (error as any).userMessage
+            : null;
+        // #region debug-point D:startMessagesCall-failed
+        reportMessagesCallDebug('D', 'MessagesCallOverlay.tsx:startMessagesCall:catch', '[DEBUG] startup failed', {
+          stage: startupStage,
+          message: errorMessage,
+          resolvedCallId: streamCallId ?? (coupleId ? getMessagesCallId(coupleId) : null),
+          role: role ?? null,
+          callKind: callKind ?? null,
+        });
+        // #endregion
+        console.error('[MessagesCall] failed', {
+          startupStage,
+          error,
+          errorMessage,
+        });
+        if (!cancelled) {
+          setErrorMessage(userMessage ?? `Paso: ${startupStage}\n\n${errorMessage}`);
+          setCallStatus('error');
+        }
+      } finally {
+        if (!cancelled) {
+          setIsPreparing(false);
+        }
+        if (cancelled) {
+          isJoiningExistingCallRef.current = false;
+        }
+      }
+    };
+
+    void startMessagesCall();
+
+    return () => {
+      cancelled = true;
+      initKeyRef.current = null;
+      if (callRef.current) {
+        void cleanupCall(callRef.current);
+      }
+    };
+  }, [callKind, callRecordId, cleanupCall, connectEnabled, coupleId, currentUserId, ensureCallPermissions, joinExistingMessagesCall, partnerId, role, streamCallId, streamClient]);
+
+  React.useEffect(() => {
+    callRef.current = call;
+  }, [call]);
+
+  React.useEffect(() => {
+    if (callStatus === 'connected') {
+      onConnected?.();
+    }
+  }, [callStatus, onConnected]);
+
+  const handleEndPress = React.useCallback(async () => {
+    await cleanupCall(callRef.current, { reject: Boolean((callRef.current as any)?.ringing) });
+    onEnd();
+  }, [cleanupCall, onEnd]);
+
+  const handleMinimizePress = React.useCallback(() => {
+    onMinimize?.();
+  }, [onMinimize]);
+
+  const title = callKind === 'audio' ? 'Llamada' : 'Videollamada';
+
+  return (
+    <Modal
+      visible={visible}
+      animationType="fade"
+      presentationStyle="fullScreen"
+      onRequestClose={onMinimize ? handleMinimizePress : handleEndPress}
+    >
+      <View style={[styles.overlayBase, callKind === 'video' ? styles.videoOverlay : styles.audioOverlay]}>
+        {!streamClient || !call || !callKind ? (
+          <CallFallbackCard
+            title={title}
+            partnerName={partnerName}
+            partnerAvatarUrl={partnerAvatarUrl}
+            statusText={errorMessage || (isPreparing ? 'Conectando...' : 'Llamando...')}
+            errorMessage={errorMessage}
+            onEnd={handleEndPress}
+            onMinimize={onMinimize ? handleMinimizePress : undefined}
+          />
+        ) : (
+          <StreamVideo client={streamClient}>
+            <StreamCall call={call}>
+              <MessagesCallOverlayContent
+                callKind={callKind}
+                partnerName={partnerName}
+                partnerAvatarUrl={partnerAvatarUrl}
+                currentUserId={currentUserId}
+                role={role}
+                callRecordStatus={callRecordStatus}
+                callStatus={callStatus}
+                isPreparing={isPreparing}
+                errorMessage={errorMessage}
+                onEnd={handleEndPress}
+                onMinimize={onMinimize ? handleMinimizePress : undefined}
+              />
+            </StreamCall>
+          </StreamVideo>
+        )}
+      </View>
+    </Modal>
+  );
+}
+
+function MessagesCallOverlayContent({
+  callKind,
+  partnerName,
+  partnerAvatarUrl,
+  currentUserId,
+  role,
+  callRecordStatus,
+  callStatus,
+  isPreparing,
+  errorMessage,
+  onEnd,
+  onMinimize,
+}: {
+  callKind: MessagesCallKind;
+  partnerName: string;
+  partnerAvatarUrl?: string | null;
+  currentUserId?: string | null;
+  role: MessagesCallRole | null;
+  callRecordStatus: 'ringing' | 'accepted' | 'rejected' | 'cancelled' | 'ended' | null;
+  callStatus: MessagesCallStatus;
+  isPreparing: boolean;
+  errorMessage: string | null;
+  onEnd: () => void;
+  onMinimize?: () => void;
+}) {
+  const { useCallCallingState, useMicrophoneState, useCameraState, useParticipants } = useCallStateHooks();
+  const callingState = useCallCallingState();
+  const { microphone, optimisticIsMute: microphoneMuted } = useMicrophoneState();
+  const { camera, optimisticIsMute: cameraMuted } = useCameraState();
+  const participants = useParticipants();
+
+  const [speakerOn, setSpeakerOn] = React.useState(callKind === 'video');
+  const [connectedAt, setConnectedAt] = React.useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
+
+  const remoteParticipants = participants.filter(
+    (participant) => String((participant as any)?.userId || (participant as any)?.user?.id || '') !== String(currentUserId ?? '')
+  );
+  const remoteParticipant = remoteParticipants[0];
+  const localParticipant =
+    participants.find((participant) => String(getParticipantUserId(participant)) === String(currentUserId ?? '')) ||
+    participants.find((participant) => participant?.isLocalParticipant);
+
+  React.useEffect(() => {
+    callManager.start({
+      audioRole: 'communicator',
+      deviceEndpointType: callKind === 'audio' ? 'earpiece' : 'speaker',
+    });
+    callManager.speaker.setForceSpeakerphoneOn(callKind === 'video');
+
+    return () => {
+      callManager.stop();
+    };
+  }, [callKind]);
+
+  React.useEffect(() => {
+    if (callingState === CallingState.JOINED) {
+      setConnectedAt((prev) => prev ?? Date.now());
+      return;
+    }
+
+    setConnectedAt(null);
+    setElapsedSeconds(0);
+  }, [callingState]);
+
+  React.useEffect(() => {
+    if (!connectedAt) return;
+
+    const interval = setInterval(() => {
+      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - connectedAt) / 1000)));
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [connectedAt]);
+
+  const statusText = React.useMemo(() => {
+    if (errorMessage) return errorMessage;
+    if (callStatus === 'error') return 'No se pudo iniciar la llamada. Inténtalo de nuevo.';
+    if (callRecordStatus === 'ringing' && role === 'caller') return 'Llamando...';
+    if (callStatus === 'ringing') return 'Llamando...';
+    if (isPreparing) return 'Conectando...';
+    if (
+      (callRecordStatus === 'accepted' && (callStatus === 'connected' || callingState === CallingState.JOINED)) ||
+      (callRecordStatus == null && (callStatus === 'connected' || callingState === CallingState.JOINED))
+    ) {
+      return elapsedSeconds > 0 ? formatElapsed(elapsedSeconds) : 'En llamada';
+    }
+    if (callingState === CallingState.RINGING) return 'Llamando...';
+    return 'Conectando...';
+  }, [callRecordStatus, role, callStatus, callingState, elapsedSeconds, errorMessage, isPreparing]);
+
+  const toggleSpeaker = React.useCallback(() => {
+    const next = !speakerOn;
+    setSpeakerOn(next);
+    callManager.speaker.setForceSpeakerphoneOn(next);
+  }, [speakerOn]);
+
+  const toggleMicrophone = React.useCallback(async () => {
+    try {
+      await microphone.toggle();
+    } catch (error) {
+      console.log('[MessagesCallOverlay] microphone toggle error:', error);
+    }
+  }, [microphone]);
+
+  const toggleCamera = React.useCallback(async () => {
+    try {
+      await camera.toggle();
+    } catch (error) {
+      console.log('[MessagesCallOverlay] camera toggle error:', error);
+    }
+  }, [camera]);
+
+  const flipCamera = React.useCallback(async () => {
+    try {
+      await camera.flip();
+    } catch (error) {
+      console.log('[MessagesCallOverlay] camera flip error:', error);
+    }
+  }, [camera]);
+
+  if (callKind === 'audio') {
+    return (
+      <View style={styles.audioCallShell}>
+        <View style={styles.audioCallTop}>
+          <View style={styles.audioCallTopRow}>
+            <View style={styles.audioCallTopSpacer} />
+            <Text style={styles.audioCallTitle}>Llamada</Text>
+            <Pressable style={styles.minimizeButton} onPress={onMinimize}>
+              <ChevronDown size={20} color="#7A5563" />
+            </Pressable>
+          </View>
+          <Text style={styles.audioCallStatus}>{statusText}</Text>
+        </View>
+
+        <View style={styles.audioCallCenter}>
+          <AvatarCircle uri={partnerAvatarUrl} label={partnerName} size={132} />
+          <Text style={styles.audioPartnerName}>{partnerName}</Text>
+          <Text style={styles.audioPartnerHint}>
+            {remoteParticipants.length > 0 ? 'En llamada' : 'Esperando a tu pareja'}
+          </Text>
+        </View>
+
+        <View style={styles.audioControlsRow}>
+          <ControlButton
+            icon={microphoneMuted ? <MicOff size={22} color="#7A5563" /> : <Mic size={22} color="#7A5563" />}
+            label="Micrófono"
+            active={!microphoneMuted}
+            onPress={() => {
+              void toggleMicrophone();
+            }}
+          />
+          <ControlButton
+            icon={speakerOn ? <Volume2 size={22} color="#7A5563" /> : <VolumeX size={22} color="#7A5563" />}
+            label="Altavoz"
+            active={speakerOn}
+            onPress={toggleSpeaker}
+          />
+          <ControlButton
+            icon={<PhoneOff size={22} color="#FFFFFF" />}
+            label="Finalizar"
+            danger
+            onPress={onEnd}
+          />
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.videoCallShell}>
+      <View style={styles.videoStage}>
+        {callingState === CallingState.JOINED && remoteParticipant ? (
+          <ParticipantView participant={remoteParticipant} style={styles.videoStageFill} />
+        ) : (
+          <View style={styles.videoFallbackStage}>
+            <UserRound size={54} color="#FFFFFF" />
+            <Text style={styles.videoFallbackTitle}>Esperando a tu pareja</Text>
+            <Text style={styles.videoFallbackSubtitle}>{statusText}</Text>
+          </View>
+        )}
+
+        {remoteParticipants.length === 0 ? (
+          <View style={styles.videoWaitingState}>
+            <AvatarCircle uri={partnerAvatarUrl} label={partnerName} size={84} />
+            <Text style={styles.videoWaitingTitle}>{partnerName}</Text>
+            <Text style={styles.videoWaitingText}>{statusText}</Text>
+          </View>
+        ) : null}
+
+        <View style={styles.videoTopInfo}>
+          <Pressable style={styles.videoMinimizeButton} onPress={onMinimize}>
+            <ChevronDown size={20} color="#FFFFFF" />
+          </Pressable>
+          <Text style={styles.videoTitle}>Videollamada</Text>
+          <Text style={styles.videoStatus}>{statusText}</Text>
+        </View>
+
+        <View style={styles.localPreviewCard}>
+          {callingState === CallingState.JOINED && localParticipant && !cameraMuted ? (
+            <ParticipantView participant={localParticipant} style={styles.videoStageFill} />
+          ) : (
+            <View style={styles.localPreviewFallback}>
+              <CameraOff size={24} color="#FFFFFF" />
+              <Text style={styles.localPreviewFallbackText}>Tú</Text>
+            </View>
+          )}
+        </View>
+      </View>
+
+      <View style={styles.videoBottomInfo}>
+        <Text style={styles.videoPartnerName}>{partnerName}</Text>
+      </View>
+
+      <View style={styles.videoControlsRow}>
+        <ControlButton
+          icon={microphoneMuted ? <MicOff size={22} color="#FFFFFF" /> : <Mic size={22} color="#FFFFFF" />}
+          label="Micrófono"
+          dark
+          active={!microphoneMuted}
+          onPress={() => {
+            void toggleMicrophone();
+          }}
+        />
+        <ControlButton
+          icon={cameraMuted ? <CameraOff size={22} color="#FFFFFF" /> : <Camera size={22} color="#FFFFFF" />}
+          label="Cámara"
+          dark
+          active={!cameraMuted}
+          onPress={() => {
+            void toggleCamera();
+          }}
+        />
+        <ControlButton
+          icon={<RefreshCw size={20} color="#FFFFFF" />}
+          label="Cambiar cámara"
+          dark
+          onPress={() => {
+            void flipCamera();
+          }}
+        />
+        <ControlButton
+          icon={<PhoneOff size={22} color="#FFFFFF" />}
+          label="Finalizar"
+          danger
+          onPress={onEnd}
+        />
+      </View>
+    </View>
+  );
+}
+
+function CallFallbackCard({
+  title,
+  partnerName,
+  partnerAvatarUrl,
+  statusText,
+  errorMessage,
+  onEnd,
+  onMinimize,
+}: {
+  title: string;
+  partnerName: string;
+  partnerAvatarUrl?: string | null;
+  statusText: string;
+  errorMessage?: string | null;
+  onEnd: () => void;
+  onMinimize?: () => void;
+}) {
+  return (
+    <View style={styles.fallbackCard}>
+      {onMinimize ? (
+        <Pressable style={styles.fallbackMinimizeButton} onPress={onMinimize}>
+          <ChevronDown size={20} color="#7A5563" />
+        </Pressable>
+      ) : null}
+      <AvatarCircle uri={partnerAvatarUrl} label={partnerName} size={96} />
+      <Text style={styles.fallbackTitle}>{title}</Text>
+      <Text style={styles.fallbackName}>{partnerName}</Text>
+      <View style={styles.fallbackStatusRow}>
+        {!errorMessage ? <ActivityIndicator color="#E797AF" /> : null}
+        <Text style={styles.fallbackStatus}>{statusText}</Text>
+      </View>
+      <Pressable style={styles.fallbackEndButton} onPress={onEnd}>
+        <PhoneOff size={20} color="#FFFFFF" />
+        <Text style={styles.fallbackEndButtonText}>Finalizar</Text>
+      </Pressable>
+    </View>
+  );
+}
+
+function ControlButton({
+  icon,
+  label,
+  onPress,
+  active = false,
+  danger = false,
+  dark = false,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onPress: () => void;
+  active?: boolean;
+  danger?: boolean;
+  dark?: boolean;
+}) {
+  const backgroundColor = danger
+    ? '#F06F8F'
+    : dark
+      ? active
+        ? 'rgba(255,255,255,0.2)'
+        : 'rgba(255,255,255,0.12)'
+      : active
+        ? '#FDE4EC'
+        : '#FFFFFF';
+
+  const borderColor = danger
+    ? '#F06F8F'
+    : dark
+      ? 'rgba(255,255,255,0.18)'
+      : '#F1D2DC';
+
+  const labelColor = danger ? '#FFFFFF' : dark ? '#FFFFFF' : '#7A5563';
+
+  return (
+    <Pressable style={[styles.controlButton, { backgroundColor, borderColor }]} onPress={onPress}>
+      <View style={styles.controlButtonIcon}>{icon}</View>
+      <Text style={[styles.controlButtonLabel, { color: labelColor }]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function AvatarCircle({ uri, label, size }: { uri?: string | null; label: string; size: number }) {
+  if (uri) {
+    return <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />;
+  }
+
+  const initial = (label || 'U').trim().charAt(0).toUpperCase();
+  return (
+    <View
+      style={[
+        styles.avatarFallback,
+        { width: size, height: size, borderRadius: size / 2 },
+      ]}
+    >
+      <Text style={[styles.avatarFallbackText, { fontSize: size * 0.38 }]}>{initial}</Text>
+    </View>
+  );
+}
+
+function formatElapsed(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+const styles = StyleSheet.create({
+  overlayBase: {
+    flex: 1,
+  },
+  audioOverlay: {
+    backgroundColor: '#FFF7FA',
+  },
+  videoOverlay: {
+    backgroundColor: '#0F0C12',
+  },
+  fallbackCard: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 28,
+    gap: 14,
+    backgroundColor: '#FFF7FA',
+  },
+  fallbackTitle: {
+    marginTop: 8,
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#2E1F28',
+  },
+  fallbackName: {
+    fontSize: 28,
+    fontWeight: '900',
+    color: '#241D22',
+  },
+  fallbackStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  fallbackMinimizeButton: {
+    position: 'absolute',
+    top: 22,
+    right: 22,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#F1D2DC',
+  },
+  fallbackStatus: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#8E7A83',
+    textAlign: 'center',
+  },
+  fallbackEndButton: {
+    marginTop: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 22,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#F06F8F',
+  },
+  fallbackEndButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  audioCallShell: {
+    flex: 1,
+    paddingHorizontal: 24,
+    paddingTop: 68,
+    paddingBottom: 42,
+    justifyContent: 'space-between',
+    backgroundColor: '#FFF7FA',
+  },
+  audioCallTop: {
+    alignItems: 'center',
+    gap: 8,
+  },
+  audioCallTopRow: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  audioCallTopSpacer: {
+    width: 38,
+    height: 38,
+  },
+  audioCallTitle: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#2C2027',
+  },
+  audioCallStatus: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#8F7A83',
+  },
+  audioCallCenter: {
+    alignItems: 'center',
+    gap: 14,
+    paddingBottom: 40,
+  },
+  audioPartnerName: {
+    fontSize: 34,
+    fontWeight: '900',
+    color: '#241D22',
+  },
+  audioPartnerHint: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#9C8A92',
+  },
+  audioControlsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 14,
+  },
+  controlButton: {
+    flex: 1,
+    minHeight: 86,
+    borderRadius: 26,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 12,
+  },
+  controlButtonIcon: {
+    marginBottom: 8,
+  },
+  controlButtonLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  minimizeButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#F1D2DC',
+  },
+  videoCallShell: {
+    flex: 1,
+    backgroundColor: '#0F0C12',
+  },
+  videoStage: {
+    flex: 1,
+    position: 'relative',
+    backgroundColor: '#111',
+  },
+  videoStageFill: {
+    width: '100%',
+    height: '100%',
+  },
+  videoWaitingState: {
+    position: 'absolute',
+    inset: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+    backgroundColor: 'rgba(15,12,18,0.42)',
+  },
+  videoWaitingTitle: {
+    fontSize: 26,
+    fontWeight: '900',
+    color: '#FFFFFF',
+  },
+  videoWaitingText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.78)',
+  },
+  videoFallbackStage: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: '#111',
+  },
+  videoFallbackTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  videoFallbackSubtitle: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  videoTopInfo: {
+    position: 'absolute',
+    top: 62,
+    left: 24,
+    right: 24,
+    alignItems: 'center',
+    gap: 6,
+  },
+  videoMinimizeButton: {
+    position: 'absolute',
+    right: 0,
+    top: -2,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+  videoTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#FFFFFF',
+  },
+  videoStatus: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.82)',
+  },
+  localPreviewCard: {
+    position: 'absolute',
+    right: 18,
+    top: 118,
+    width: 112,
+    height: 164,
+    borderRadius: 24,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.2)',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+  },
+  localPreviewFallback: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.12)',
+  },
+  localPreviewFallbackText: {
+    marginTop: 6,
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  videoBottomInfo: {
+    paddingHorizontal: 24,
+    paddingTop: 14,
+    alignItems: 'center',
+  },
+  videoPartnerName: {
+    color: '#FFFFFF',
+    fontSize: 22,
+    fontWeight: '900',
+  },
+  videoControlsRow: {
+    flexDirection: 'row',
+    paddingHorizontal: 16,
+    paddingTop: 18,
+    paddingBottom: 34,
+    gap: 10,
+  },
+  avatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FDE4EC',
+    borderWidth: 1,
+    borderColor: '#F2D5DE',
+  },
+  avatarFallbackText: {
+    color: '#E28FA6',
+    fontWeight: '900',
+  },
+});
+
+
+==============================
+FILE: components\calls\ActiveMessagesVideoCall.tsx
+==============================
+
+import React from 'react';
+import {
+  ActivityIndicator,
+  Animated,
+  Easing,
+  Image,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  useWindowDimensions,
+} from 'react-native';
+import {
+  CallingState,
+  ParticipantView,
+  callManager,
+  hasVideo,
+  useCall,
+  useCallStateHooks,
+} from '@stream-io/video-react-native-sdk';
+import { hasPausedTrack } from '@stream-io/video-client';
+import { RTCView, type MediaStream } from '@stream-io/react-native-webrtc';
+import { Camera, CameraOff, Mic, MicOff, PhoneOff, RefreshCw, UserRound } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+type ActiveMessagesVideoCallProps = {
+  partnerName: string;
+  partnerAvatarUrl?: string | null;
+  onEnd: (reason?: 'user' | 'reject') => Promise<void>;
+};
+
+type VideoSlotParticipant = React.ComponentProps<typeof ParticipantView>['participant'];
+type ParticipantCameraState = 'missing' | 'on' | 'off' | 'loading';
+type VideoStageSlot = {
+  participant: VideoSlotParticipant | null;
+  isLocal: boolean;
+  label: string;
+  slot: 'main' | 'pip';
+  cameraState: ParticipantCameraState;
+  rendererKey: string;
+};
+
+function Avatar({ uri, label, size }: { uri?: string | null; label: string; size: number }) {
+  if (uri) {
+    return <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />;
+  }
+
+  return (
+    <View style={[styles.avatarFallback, { width: size, height: size, borderRadius: size / 2 }]}>
+      <Text style={[styles.avatarFallbackText, { fontSize: size * 0.38 }]}>{(label || 'U').charAt(0).toUpperCase()}</Text>
+    </View>
+  );
+}
+
+function formatElapsed(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function getParticipantCameraState({
+  participant,
+  isLocal,
+  localCameraMuted,
+  localStreamUrl,
+  remoteIncomingVideoEnabled,
+}: {
+  participant: VideoSlotParticipant | null;
+  isLocal: boolean;
+  localCameraMuted: boolean;
+  localStreamUrl: string | null;
+  remoteIncomingVideoEnabled: boolean;
+}): ParticipantCameraState {
+  if (!participant) return 'missing';
+
+  if (isLocal) {
+    if (localCameraMuted) return 'off';
+    if (localStreamUrl) return 'on';
+    return 'loading';
+  }
+
+  const remoteHasPublishedVideo = hasVideo(participant);
+  const remoteHasVideoStream = Boolean(participant.videoStream);
+  const remoteHasPausedVideo = hasPausedTrack(participant, 'videoTrack');
+
+  if (!remoteHasPublishedVideo) return 'off';
+  if (remoteHasPublishedVideo && remoteHasVideoStream && remoteIncomingVideoEnabled && !remoteHasPausedVideo) return 'on';
+  return 'loading';
+}
+
+function buildRendererKey({
+  participant,
+  slot,
+  isLocal,
+  mainViewMode,
+  cameraState,
+}: {
+  participant: VideoSlotParticipant | null;
+  slot: 'main' | 'pip';
+  isLocal: boolean;
+  mainViewMode: 'remote' | 'local';
+  cameraState: ParticipantCameraState;
+}) {
+  return [participant?.userId ?? 'empty', slot, isLocal ? 'local' : 'remote', mainViewMode, cameraState].join('-');
+}
+
+function VideoSlot({
+  participant,
+  isLocal,
+  label,
+  slot,
+  cameraState,
+  streamURL,
+  partnerAvatarUrl,
+  onPress,
+  overlayStyle,
+}: {
+  participant: VideoSlotParticipant | null;
+  isLocal: boolean;
+  label: string;
+  slot: 'main' | 'pip';
+  cameraState: ParticipantCameraState;
+  streamURL?: string | null;
+  partnerAvatarUrl?: string | null;
+  onPress?: () => void;
+  overlayStyle?: object;
+}) {
+  const isPip = slot === 'pip';
+  const rendererKey = buildRendererKey({
+    participant,
+    slot,
+    isLocal,
+    mainViewMode: isPip ? 'pip' as 'remote' | 'local' : 'remote',
+    cameraState,
+  });
+
+  console.log('[VideoSlot] state', {
+    slot,
+    participantId: participant?.userId ?? null,
+    isLocal,
+    cameraState,
+  });
+
+  const remoteFallback = React.useMemo(() => {
+    if (isLocal) return null;
+
+    return function RemoteFallback() {
+      if (isPip) {
+        if (cameraState === 'missing') {
+          return <View style={styles.pipEmptyState} />;
+        }
+
+        return (
+          <View style={styles.pipPlaceholder}>
+            {cameraState === 'off' ? <Avatar uri={partnerAvatarUrl} label={label} size={40} /> : <ActivityIndicator color="#FFFFFF" />}
+          </View>
+        );
+      }
+
+      if (cameraState === 'missing') {
+        return (
+          <View style={styles.mainPlaceholder}>
+            <UserRound size={52} color="#FFFFFF" />
+            <Text style={styles.mainPlaceholderTitle}>Esperando a tu pareja</Text>
+          </View>
+        );
+      }
+
+      if (cameraState === 'off') {
+        return (
+          <View style={styles.mainPlaceholder}>
+            <Avatar uri={partnerAvatarUrl} label={label} size={94} />
+            <Text style={styles.mainPlaceholderSubtitle}>La cámara de tu pareja está apagada</Text>
+          </View>
+        );
+      }
+
+      return (
+        <View style={styles.mainPlaceholder}>
+          <ActivityIndicator color="#FFFFFF" />
+          <Text style={styles.mainPlaceholderSubtitle}>Conectando cámara...</Text>
+        </View>
+      );
+    };
+  }, [cameraState, isLocal, isPip, label, partnerAvatarUrl]);
+
+  let content: React.ReactNode;
+
+  if (participant && isLocal && cameraState === 'on' && streamURL) {
+    content = <RTCView streamURL={streamURL} mirror objectFit="cover" zOrder={0} style={isPip ? styles.pipRtcView : styles.mainRtcView} />;
+  } else if (participant && !isLocal) {
+    content = (
+      <ParticipantView
+        participant={participant}
+        style={isPip ? styles.pipParticipantView : styles.mainParticipantView}
+        objectFit="cover"
+        mirror={false}
+        videoZOrder={0}
+        ParticipantLabel={null}
+        ParticipantNetworkQualityIndicator={null}
+        ParticipantReaction={null}
+        ParticipantVideoFallback={remoteFallback}
+      />
+    );
+  } else if (isPip) {
+    content = <View style={styles.pipEmptyState} />;
+  } else {
+    content = (
+      <View style={styles.mainPlaceholder}>
+        {isLocal ? <CameraOff size={44} color="#FFFFFF" /> : <UserRound size={52} color="#FFFFFF" />}
+        <Text style={styles.mainPlaceholderTitle}>{isLocal ? 'Tu cámara está apagada' : 'Esperando a tu pareja'}</Text>
+      </View>
+    );
+  }
+
+  if (!participant && isLocal && cameraState === 'loading') {
+    content = (
+      <View style={isPip ? styles.pipPlaceholder : styles.mainPlaceholder}>
+        <ActivityIndicator color="#FFFFFF" />
+        {!isPip ? <Text style={styles.mainPlaceholderSubtitle}>Conectando cámara...</Text> : null}
+      </View>
+    );
+  }
+
+  if (participant && isLocal && cameraState === 'off') {
+    content = (
+      <View style={isPip ? styles.pipPlaceholder : styles.mainPlaceholder}>
+        <CameraOff size={isPip ? 24 : 44} color="#FFFFFF" />
+        {!isPip ? <Text style={styles.mainPlaceholderTitle}>Tu cámara está apagada</Text> : null}
+      </View>
+    );
+  }
+
+  if (participant && isLocal && cameraState === 'loading') {
+    content = (
+      <View style={isPip ? styles.pipPlaceholder : styles.mainPlaceholder}>
+        <ActivityIndicator color="#FFFFFF" />
+        {!isPip ? <Text style={styles.mainPlaceholderSubtitle}>Conectando cámara...</Text> : null}
+      </View>
+    );
+  }
+
+  if (isPip) {
+    return (
+      <Pressable style={styles.pipPosition} onPress={onPress}>
+        <View style={styles.pipCard}>
+          <View key={rendererKey} collapsable={false} style={styles.pipVideoHost}>
+            {content}
+          </View>
+          <Animated.View pointerEvents="none" style={[styles.pipLabelLayer, overlayStyle]}>
+            <View style={styles.pipLabelChip}>
+              <Text style={styles.pipLabelText} numberOfLines={1}>
+                {label}
+              </Text>
+            </View>
+          </Animated.View>
+        </View>
+      </Pressable>
+    );
+  }
+
+  return (
+    <View key={rendererKey} collapsable={false} style={styles.mainSlot}>
+      {content}
+    </View>
+  );
+}
+
+function VideoControlButton({
+  icon,
+  onPress,
+  accessibilityLabel,
+  active = false,
+  danger = false,
+}: {
+  icon: React.ReactNode;
+  onPress: () => void;
+  accessibilityLabel: string;
+  active?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      style={[
+        styles.videoControlButton,
+        danger ? styles.videoControlButtonDanger : active ? styles.videoControlButtonActive : styles.videoControlButtonNeutral,
+      ]}
+      onPress={onPress}
+    >
+      {icon}
+    </Pressable>
+  );
+}
+
+export function ActiveMessagesVideoCall({ partnerName, partnerAvatarUrl, onEnd }: ActiveMessagesVideoCallProps) {
+  const call = useCall();
+  const {
+    useCallCallingState,
+    useMicrophoneState,
+    useCameraState,
+    useIncomingVideoSettings,
+    useLocalParticipant,
+    useRemoteParticipants,
+  } = useCallStateHooks();
+  const callingState = useCallCallingState();
+  const { microphone, optimisticIsMute: microphoneMuted } = useMicrophoneState();
+  const { camera, optimisticIsMute: cameraMuted, isMute: cameraIsMute, mediaStream } = useCameraState();
+  const { isParticipantVideoEnabled } = useIncomingVideoSettings();
+  const localParticipant = useLocalParticipant();
+  const remoteParticipants = useRemoteParticipants();
+  const remoteParticipant =
+    remoteParticipants.find((participant) => participant.userId !== localParticipant?.userId) ?? remoteParticipants[0] ?? null;
+  const insets = useSafeAreaInsets();
+  const { width: screenWidth } = useWindowDimensions();
+
+  const [connectedAt, setConnectedAt] = React.useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
+  const [chromeVisible, setChromeVisible] = React.useState(true);
+  const [mainViewMode, setMainViewMode] = React.useState<'remote' | 'local'>('remote');
+  const chromeOpacity = React.useRef(new Animated.Value(1)).current;
+  const chromeTranslateY = React.useRef(new Animated.Value(0)).current;
+  const cameraEnabledForCallRef = React.useRef<Set<string>>(new Set());
+  const cameraEnableInFlightRef = React.useRef<Set<string>>(new Set());
+  const manualCameraDisabledForCallRef = React.useRef<Set<string>>(new Set());
+
+  const callId = call?.cid ?? null;
+  const localParticipantId = localParticipant?.userId ?? null;
+  const localStreamUrl = (mediaStream as unknown as MediaStream | undefined)?.toURL() ?? null;
+  const hasLocalPublishedVideo = localParticipant ? hasVideo(localParticipant) : false;
+  const pipWidth = Math.min(Math.max(screenWidth * 0.3, 112), 132);
+  const pipHeight = Math.round(pipWidth * 1.46);
+  const controlsBottom = Math.max(insets.bottom + 16, 24);
+
+  React.useEffect(() => {
+    callManager.start({
+      audioRole: 'communicator',
+      deviceEndpointType: 'speaker',
+    });
+    callManager.speaker.setForceSpeakerphoneOn(true);
+
+    return () => {
+      callManager.stop();
+    };
+  }, []);
+
+  React.useEffect(() => {
+    setMainViewMode('remote');
+  }, [callId]);
+
+  React.useEffect(() => {
+    if (callingState === CallingState.JOINED) {
+      setConnectedAt((prev) => prev ?? Date.now());
+      return;
+    }
+
+    setConnectedAt(null);
+    setElapsedSeconds(0);
+  }, [callingState]);
+
+  React.useEffect(() => {
+    if (!connectedAt) return;
+    const interval = setInterval(() => {
+      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - connectedAt) / 1000)));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [connectedAt]);
+
+  React.useEffect(() => {
+    if (!callId || callingState !== CallingState.JOINED || !localParticipantId) {
+      return;
+    }
+
+    if (cameraEnabledForCallRef.current.has(callId)) return;
+    if (manualCameraDisabledForCallRef.current.has(callId)) return;
+    if (cameraEnableInFlightRef.current.has(callId)) return;
+    if (hasLocalPublishedVideo) {
+      cameraEnabledForCallRef.current.add(callId);
+      return;
+    }
+
+    cameraEnableInFlightRef.current.add(callId);
+    void (async () => {
+      try {
+        await camera.enable();
+        cameraEnabledForCallRef.current.add(callId);
+      } catch (error) {
+        console.log('[ActiveVideoStage] camera enable error', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      } finally {
+        cameraEnableInFlightRef.current.delete(callId);
+      }
+    })();
+  }, [callId, callingState, camera, hasLocalPublishedVideo, localParticipantId]);
+
+  React.useEffect(() => {
+    Animated.parallel([
+      Animated.timing(chromeOpacity, {
+        toValue: chromeVisible ? 1 : 0,
+        duration: 220,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(chromeTranslateY, {
+        toValue: chromeVisible ? 0 : 12,
+        duration: 220,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [chromeOpacity, chromeTranslateY, chromeVisible]);
+
+  const localCameraState = getParticipantCameraState({
+    participant: localParticipant ?? null,
+    isLocal: true,
+    localCameraMuted: cameraIsMute,
+    localStreamUrl,
+    remoteIncomingVideoEnabled: false,
+  });
+
+  const remoteCameraState = getParticipantCameraState({
+    participant: remoteParticipant,
+    isLocal: false,
+    localCameraMuted: false,
+    localStreamUrl: null,
+    remoteIncomingVideoEnabled: remoteParticipant ? isParticipantVideoEnabled(remoteParticipant.sessionId) : false,
+  });
+
+  const mainSlot: VideoStageSlot =
+    mainViewMode === 'remote'
+      ? {
+          participant: remoteParticipant,
+          isLocal: false,
+          label: partnerName,
+          slot: 'main',
+          cameraState: remoteCameraState,
+          rendererKey: buildRendererKey({
+            participant: remoteParticipant,
+            slot: 'main',
+            isLocal: false,
+            mainViewMode,
+            cameraState: remoteCameraState,
+          }),
+        }
+      : {
+          participant: localParticipant ?? null,
+          isLocal: true,
+          label: 'Tú',
+          slot: 'main',
+          cameraState: localCameraState,
+          rendererKey: buildRendererKey({
+            participant: localParticipant ?? null,
+            slot: 'main',
+            isLocal: true,
+            mainViewMode,
+            cameraState: localCameraState,
+          }),
+        };
+
+  const pipSlot: VideoStageSlot =
+    mainViewMode === 'remote'
+      ? {
+          participant: localParticipant ?? null,
+          isLocal: true,
+          label: 'Tú',
+          slot: 'pip',
+          cameraState: localCameraState,
+          rendererKey: buildRendererKey({
+            participant: localParticipant ?? null,
+            slot: 'pip',
+            isLocal: true,
+            mainViewMode,
+            cameraState: localCameraState,
+          }),
+        }
+      : {
+          participant: remoteParticipant,
+          isLocal: false,
+          label: partnerName,
+          slot: 'pip',
+          cameraState: remoteCameraState,
+          rendererKey: buildRendererKey({
+            participant: remoteParticipant,
+            slot: 'pip',
+            isLocal: false,
+            mainViewMode,
+            cameraState: remoteCameraState,
+          }),
+        };
+
+  console.log('[ActiveVideoStage] slots', {
+    mainViewMode,
+    localParticipantId: localParticipant?.userId ?? null,
+    remoteParticipantId: remoteParticipant?.userId ?? null,
+    mainIsLocal: mainSlot.isLocal,
+    pipIsLocal: pipSlot.isLocal,
+  });
+
+  const statusText =
+    callingState === CallingState.JOINED ? (elapsedSeconds > 0 ? formatElapsed(elapsedSeconds) : 'En llamada') : 'Conectando...';
+
+  const toggleMicrophone = React.useCallback(async () => {
+    try {
+      await microphone.toggle();
+    } catch (error) {
+      console.log('[ActiveVideoStage] microphone toggle error', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [microphone]);
+
+  const toggleCamera = React.useCallback(async () => {
+    try {
+      if (callId) {
+        if (cameraIsMute) {
+          manualCameraDisabledForCallRef.current.delete(callId);
+        } else {
+          manualCameraDisabledForCallRef.current.add(callId);
+        }
+      }
+
+      await camera.toggle();
+      if (callId && cameraIsMute) {
+        cameraEnabledForCallRef.current.add(callId);
+      }
+    } catch (error) {
+      console.log('[ActiveVideoStage] camera toggle error', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [callId, camera, cameraIsMute]);
+
+  const flipCamera = React.useCallback(async () => {
+    try {
+      await camera.flip();
+    } catch (error) {
+      console.log('[ActiveVideoStage] camera flip error', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [camera]);
+
+  const swapVideoViews = React.useCallback(() => {
+    setMainViewMode((previous) => (previous === 'remote' ? 'local' : 'remote'));
+  }, []);
+
+  return (
+    <View style={styles.videoCallShell}>
+      <View style={styles.videoStage}>
+        <VideoSlot
+          participant={mainSlot.participant}
+          isLocal={mainSlot.isLocal}
+          label={mainSlot.label}
+          slot={mainSlot.slot}
+          cameraState={mainSlot.cameraState}
+          streamURL={mainSlot.isLocal ? localStreamUrl : null}
+          partnerAvatarUrl={partnerAvatarUrl}
+        />
+
+        <Pressable style={StyleSheet.absoluteFill} onPress={() => setChromeVisible((previous) => !previous)} />
+
+        <VideoSlot
+          participant={pipSlot.participant}
+          isLocal={pipSlot.isLocal}
+          label={pipSlot.label}
+          slot={pipSlot.slot}
+          cameraState={pipSlot.cameraState}
+          streamURL={pipSlot.isLocal ? localStreamUrl : null}
+          partnerAvatarUrl={partnerAvatarUrl}
+          onPress={swapVideoViews}
+          overlayStyle={{
+            opacity: chromeOpacity,
+            transform: [{ translateY: chromeTranslateY.interpolate({ inputRange: [0, 12], outputRange: [0, -6] }) }],
+          }}
+        />
+
+        <Animated.View
+          pointerEvents={chromeVisible ? 'auto' : 'none'}
+          style={[
+            styles.videoTopInfo,
+            {
+              top: insets.top + 16,
+              opacity: chromeOpacity,
+              transform: [{ translateY: chromeTranslateY.interpolate({ inputRange: [0, 12], outputRange: [0, -12] }) }],
+            },
+          ]}
+        >
+          <Text style={styles.videoTitle}>Videollamada</Text>
+          <Text style={styles.videoStatus}>{statusText}</Text>
+        </Animated.View>
+
+        <Animated.View
+          pointerEvents={chromeVisible ? 'auto' : 'none'}
+          style={[
+            styles.videoPartnerInfo,
+            {
+              bottom: controlsBottom + 92,
+              opacity: chromeOpacity,
+              transform: [{ translateY: chromeTranslateY.interpolate({ inputRange: [0, 12], outputRange: [0, 10] }) }],
+            },
+          ]}
+        >
+          <Text style={styles.videoPartnerName}>{mainSlot.label}</Text>
+        </Animated.View>
+
+        <Animated.View
+          pointerEvents={chromeVisible ? 'auto' : 'none'}
+          style={[
+            styles.videoControlsDock,
+            {
+              bottom: controlsBottom,
+              opacity: chromeOpacity,
+              transform: [{ translateY: chromeTranslateY }],
+            },
+          ]}
+        >
+          <VideoControlButton
+            icon={microphoneMuted ? <MicOff size={20} color="#FFFFFF" /> : <Mic size={20} color="#FFFFFF" />}
+            accessibilityLabel={microphoneMuted ? 'Activar micrófono' : 'Silenciar micrófono'}
+            active={!microphoneMuted}
+            onPress={() => {
+              void toggleMicrophone();
+            }}
+          />
+          <VideoControlButton
+            icon={cameraMuted ? <CameraOff size={20} color="#FFFFFF" /> : <Camera size={20} color="#FFFFFF" />}
+            accessibilityLabel={cameraMuted ? 'Activar cámara' : 'Desactivar cámara'}
+            active={!cameraMuted}
+            onPress={() => {
+              void toggleCamera();
+            }}
+          />
+          <VideoControlButton
+            icon={<RefreshCw size={18} color="#FFFFFF" />}
+            accessibilityLabel="Cambiar cámara"
+            onPress={() => {
+              void flipCamera();
+            }}
+          />
+          <VideoControlButton
+            icon={<PhoneOff size={20} color="#FFFFFF" />}
+            accessibilityLabel="Finalizar llamada"
+            danger
+            onPress={() => {
+              void onEnd('user');
+            }}
+          />
+        </Animated.View>
+      </View>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  videoCallShell: {
+    flex: 1,
+    backgroundColor: '#0F0C12',
+  },
+  videoStage: {
+    flex: 1,
+    position: 'relative',
+    backgroundColor: '#111111',
+  },
+  mainSlot: {
+    flex: 1,
+    backgroundColor: '#111111',
+  },
+  mainRtcView: {
+    width: '100%',
+    height: '100%',
+  },
+  mainParticipantView: {
+    width: '100%',
+    height: '100%',
+  },
+  mainPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 12,
+    backgroundColor: '#111111',
+  },
+  mainPlaceholderTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  mainPlaceholderSubtitle: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 14,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  pipPosition: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    width: 132,
+    height: 193,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.22,
+    shadowRadius: 16,
+    zIndex: 100,
+    elevation: 100,
+  },
+  pipCard: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(18,16,24,0.84)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  pipVideoHost: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 24,
+    overflow: 'hidden',
+  },
+  pipRtcView: {
+    ...StyleSheet.absoluteFillObject,
+    width: '100%',
+    height: '100%',
+    borderRadius: 24,
+  },
+  pipParticipantView: {
+    ...StyleSheet.absoluteFillObject,
+    width: '100%',
+    height: '100%',
+    borderRadius: 24,
+    overflow: 'hidden',
+  },
+  pipPlaceholder: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(18,16,24,0.84)',
+  },
+  pipEmptyState: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(18,16,24,0.84)',
+  },
+  pipLabelLayer: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'flex-end',
+    alignItems: 'flex-start',
+    paddingLeft: 10,
+    paddingBottom: 10,
+    zIndex: 5,
+    elevation: 5,
+  },
+  pipLabelChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: 'rgba(15,12,18,0.64)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  pipLabelText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  videoTopInfo: {
+    position: 'absolute',
+    left: 24,
+    right: 24,
+    alignItems: 'center',
+    gap: 6,
+  },
+  videoTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#FFFFFF',
+  },
+  videoStatus: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.82)',
+  },
+  videoPartnerInfo: {
+    position: 'absolute',
+    left: 24,
+    right: 24,
+    alignItems: 'center',
+  },
+  videoPartnerName: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0,0,0,0.28)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 8,
+  },
+  videoControlsDock: {
+    position: 'absolute',
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 30,
+    backgroundColor: 'rgba(16, 12, 20, 0.42)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.2,
+    shadowRadius: 24,
+    elevation: 14,
+  },
+  videoControlButton: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+  },
+  videoControlButtonNeutral: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  videoControlButtonActive: {
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  videoControlButtonDanger: {
+    backgroundColor: 'rgba(240,111,143,0.96)',
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  avatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FDE4EC',
+    borderWidth: 1,
+    borderColor: '#F2D5DE',
+  },
+  avatarFallbackText: {
+    color: '#E28FA6',
+    fontWeight: '900',
+  },
+});
+
+
+==============================
+FILE: components\calls\CallProvider.tsx
+==============================
+
+import React from 'react';
+import {
+  AppState,
+  Alert,
+  Animated,
+  Easing,
+  Image,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+} from 'react-native';
+import Constants from 'expo-constants';
+import {
+  CallingState,
+  StreamVideo,
+  type Call as StreamSdkCall,
+  type StreamVideoClient,
+} from '@stream-io/video-react-native-sdk';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Mic, Phone, PhoneOff, Video } from 'lucide-react-native';
+import { useAuth } from '../../lib/AuthProvider';
+import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
+import { supabase } from '../../lib/supabase';
+import { getStreamVideoClient, prepareMessagesStreamUsers, resetStreamVideoClient } from '../../lib/streamVideo';
+import {
+  GlobalRingingCallHost,
+  type CoupleCallRecord,
+  type MessagesCallKind,
+  type MessagesCallRole,
+} from './GlobalRingingCallHost';
+
+type CoupleCallStatus = CoupleCallRecord['status'];
+
+type EndCallReason = 'user' | 'reject';
+type CleanupReason = 'rejected' | 'cancelled' | 'ended' | 'timeout';
+type CallPhase = 'idle' | 'outgoing_ringing' | 'incoming_banner' | 'incoming_decision' | 'connecting' | 'active' | 'ending';
+
+type GlobalCallContextValue = {
+  startGlobalCall: (kind: MessagesCallKind) => Promise<void>;
+  openFullCallOverlay: () => void;
+  dismissFullCallOverlay: () => void;
+  endGlobalCall: (reason?: EndCallReason) => Promise<void>;
+  isStartingCall: boolean;
+  canStartCall: boolean;
+  hasActiveCall: boolean;
+  isFullCallOverlayVisible: boolean;
+};
+
+const CallContext = React.createContext<GlobalCallContextValue | null>(null);
+
+const RINGING_TIMEOUT_MS = 40_000;
+const INCOMING_CALL_MAX_AGE_MS = 45_000;
+const NOTICE_DURATION_MS = 4200;
+const ACTIVE = '#F4A6A6';
+const TEXT_DARK = '#241D22';
+const TEXT_MUTED = '#8D6675';
+const BORDER = '#F3D9E2';
+
+const buildMessagesStreamCallId = (coupleId: string) => `messages-call-${coupleId}-${Date.now()}`;
+
+const isCallRecent = (createdAt?: string | null) => {
+  if (!createdAt) return false;
+  const createdAtTime = new Date(createdAt).getTime();
+  if (Number.isNaN(createdAtTime)) return false;
+  return Date.now() - createdAtTime <= INCOMING_CALL_MAX_AGE_MS;
+};
+
+function formatElapsed(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function getNoticeForTerminalStatus(status: CoupleCallStatus) {
+  if (status === 'rejected') return 'La llamada fue rechazada.';
+  if (status === 'cancelled') return 'Llamada cancelada.';
+  if (status === 'ended') return 'La llamada terminó.';
+  return null;
+}
+
+function getNoticeForCleanupReason(reason: CleanupReason) {
+  if (reason === 'timeout') return 'No hubo respuesta.';
+  return getNoticeForTerminalStatus(reason);
+}
+
+function getOutgoingCallText(callType: MessagesCallKind, name: string) {
+  return callType === 'audio' ? `Llamando a ${name}...` : `Iniciando videollamada con ${name}...`;
+}
+
+export function CallProvider({ children }: { children: React.ReactNode }) {
+  const insets = useSafeAreaInsets();
+  const { session, loading: authLoading } = useAuth();
+  const { couple, loading: coupleLoading } = useProfileAndCouple();
+  const authUser = session?.user ?? null;
+  const authReady = !authLoading;
+  const currentUserId = authUser?.id ?? null;
+  const coupleId = couple?.couple_id ?? null;
+  const partnerId = couple?.partner_id ?? null;
+  const partnerName = couple?.partner_name || 'Pareja';
+  const partnerAvatarUrl = couple?.partner_avatar_url ?? null;
+  const canStartCall =
+    authReady &&
+    !coupleLoading &&
+    Boolean(authUser?.id) &&
+    Boolean(coupleId) &&
+    Boolean(partnerId) &&
+    partnerId !== authUser?.id;
+
+  const [activeCallRecord, setActiveCallRecord] = React.useState<CoupleCallRecord | null>(null);
+  const [incomingCallRecord, setIncomingCallRecord] = React.useState<CoupleCallRecord | null>(null);
+  const [callKind, setCallKind] = React.useState<MessagesCallKind | null>(null);
+  const [streamCallId, setStreamCallId] = React.useState<string | null>(null);
+  const [callRecordId, setCallRecordId] = React.useState<string | null>(null);
+  const [role, setRole] = React.useState<MessagesCallRole | null>(null);
+  const [callStatus, setCallStatus] = React.useState<'idle' | 'ringing' | 'connecting' | 'connected' | 'ending'>('idle');
+  const [phase, setPhase] = React.useState<CallPhase>('idle');
+  const [isIncomingVisible, setIsIncomingVisible] = React.useState(false);
+  const [isFullCallOverlayVisible, setIsFullCallOverlayVisible] = React.useState(false);
+  const [isCallConnected, setIsCallConnected] = React.useState(false);
+  const [isEndingCall, setIsEndingCall] = React.useState(false);
+  const [isStartingCall, setIsStartingCall] = React.useState(false);
+  const [isIncomingActionBusy, setIsIncomingActionBusy] = React.useState(false);
+  const [noticeText, setNoticeText] = React.useState<string | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
+  const [streamClient, setStreamClient] = React.useState<StreamVideoClient | null>(null);
+
+  const ringingTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeCallRecordRef = React.useRef<CoupleCallRecord | null>(null);
+  const incomingCallRecordRef = React.useRef<CoupleCallRecord | null>(null);
+  const callRecordIdRef = React.useRef<string | null>(null);
+  const roleRef = React.useRef<MessagesCallRole | null>(null);
+  const phaseRef = React.useRef<CallPhase>('idle');
+  const callStatusRef = React.useRef<'idle' | 'ringing' | 'connecting' | 'connected' | 'ending'>('idle');
+  const isCallConnectedRef = React.useRef(false);
+  const isEndingCallRef = React.useRef(false);
+  const isStartingCallRef = React.useRef(false);
+  const isJoiningCallRef = React.useRef(false);
+  const openedAcceptedOverlayRef = React.useRef<string | null>(null);
+  const handledTerminalKeysRef = React.useRef<Set<string>>(new Set());
+  const providerStartedAtRef = React.useRef(Date.now());
+  const subscriptionReadyRef = React.useRef(false);
+  const currentSessionCallIdRef = React.useRef<string | null>(null);
+  const currentStreamUserIdRef = React.useRef<string | null>(null);
+  const activeStreamCallRef = React.useRef<StreamSdkCall | null>(null);
+
+  React.useEffect(() => {
+    activeCallRecordRef.current = activeCallRecord;
+  }, [activeCallRecord]);
+
+  React.useEffect(() => {
+    incomingCallRecordRef.current = incomingCallRecord;
+  }, [incomingCallRecord]);
+
+  React.useEffect(() => {
+    callRecordIdRef.current = callRecordId;
+  }, [callRecordId]);
+
+  React.useEffect(() => {
+    roleRef.current = role;
+  }, [role]);
+
+  React.useEffect(() => {
+    phaseRef.current = phase;
+  }, [phase]);
+
+  React.useEffect(() => {
+    callStatusRef.current = callStatus;
+  }, [callStatus]);
+
+  React.useEffect(() => {
+    isCallConnectedRef.current = isCallConnected;
+  }, [isCallConnected]);
+
+  React.useEffect(() => {
+    isEndingCallRef.current = isEndingCall;
+  }, [isEndingCall]);
+
+  React.useEffect(() => {
+    isStartingCallRef.current = isStartingCall;
+  }, [isStartingCall]);
+
+  React.useEffect(() => {
+    if (!noticeText) return;
+    const timeout = setTimeout(() => setNoticeText(null), NOTICE_DURATION_MS);
+    return () => clearTimeout(timeout);
+  }, [noticeText]);
+
+  const clearRingingTimeout = React.useCallback(() => {
+    if (ringingTimeoutRef.current) {
+      clearTimeout(ringingTimeoutRef.current);
+      ringingTimeoutRef.current = null;
+    }
+  }, []);
+
+  const showNotice = React.useCallback((message: string) => {
+    setNoticeText(message);
+  }, []);
+
+  const assignActiveCallState = React.useCallback((record: CoupleCallRecord, nextRole: MessagesCallRole) => {
+    setActiveCallRecord(record);
+    setCallKind(record.call_type);
+    setStreamCallId(record.stream_call_id);
+    setCallRecordId(record.id);
+    setRole(nextRole);
+  }, []);
+
+  const beginCallSession = React.useCallback((recordId: string) => {
+    currentSessionCallIdRef.current = recordId;
+  }, []);
+
+  const clearGlobalCallState = React.useCallback(() => {
+    clearRingingTimeout();
+    setIncomingCallRecord(null);
+    setIsIncomingVisible(false);
+    setIsIncomingActionBusy(false);
+    setActiveCallRecord(null);
+    setCallKind(null);
+    setStreamCallId(null);
+    setCallRecordId(null);
+    setRole(null);
+    setCallStatus('idle');
+    setPhase('idle');
+    setIsCallConnected(false);
+    setIsFullCallOverlayVisible(false);
+    setIsEndingCall(false);
+    setElapsedSeconds(0);
+    isJoiningCallRef.current = false;
+    currentSessionCallIdRef.current = null;
+    openedAcceptedOverlayRef.current = null;
+    activeStreamCallRef.current = null;
+  }, [clearRingingTimeout]);
+
+  const cleanupCallSession = React.useCallback(
+    ({
+      reason,
+      shouldShowMessage,
+    }: {
+      reason: CleanupReason;
+      shouldShowMessage: boolean;
+    }) => {
+      clearGlobalCallState();
+      if (shouldShowMessage) {
+        const nextNotice = getNoticeForCleanupReason(reason);
+        if (nextNotice) {
+          showNotice(nextNotice);
+        }
+      }
+    },
+    [clearGlobalCallState, showNotice]
+  );
+
+  const presentIncomingCallRecord = React.useCallback((record: CoupleCallRecord, nextPhase: 'incoming_banner' | 'incoming_decision' = 'incoming_banner') => {
+    setActiveCallRecord(null);
+    setIncomingCallRecord(record);
+    setIsIncomingVisible(true);
+    setIsIncomingActionBusy(false);
+    setCallKind(record.call_type);
+    setStreamCallId(record.stream_call_id);
+    setCallRecordId(record.id);
+    setRole('recipient');
+    setCallStatus('ringing');
+    setPhase(nextPhase);
+    setIsCallConnected(false);
+    setIsFullCallOverlayVisible(false);
+    beginCallSession(record.id);
+  }, [beginCallSession]);
+
+  const ensureStreamClientReady = React.useCallback(async () => {
+    const nextClient = await getStreamVideoClient();
+    if (!nextClient) {
+      throw new Error('Missing Stream client');
+    }
+    setStreamClient(nextClient);
+    currentStreamUserIdRef.current = currentUserId;
+    return nextClient;
+  }, [currentUserId]);
+
+  const fetchCallRecordByStreamCallId = React.useCallback(
+    async (nextStreamCallId: string) => {
+      if (!nextStreamCallId || !currentUserId || !coupleId) {
+        return null;
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from('couple_calls')
+          .select('*')
+          .eq('stream_call_id', nextStreamCallId)
+          .eq('couple_id', coupleId)
+          .maybeSingle();
+
+        if (error || !data) {
+          return null;
+        }
+
+        const record = data as CoupleCallRecord;
+        const isCaller = String(record.caller_id) === String(currentUserId);
+        const isRecipient = String(record.recipient_id) === String(currentUserId);
+        if (!isCaller && !isRecipient) {
+          return null;
+        }
+
+        return record;
+      } catch (error) {
+        console.log('[GlobalCall] stream call record fetch failed', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    },
+    [coupleId, currentUserId]
+  );
+
+  const shouldHandleTerminalRealtime = React.useCallback((record: CoupleCallRecord) => {
+    if (!subscriptionReadyRef.current) return false;
+    if (!currentSessionCallIdRef.current) return false;
+    if (currentSessionCallIdRef.current !== record.id) return false;
+
+    const terminalTimestamp = new Date(record.updated_at || record.ended_at || record.created_at).getTime();
+    if (Number.isNaN(terminalTimestamp)) return false;
+
+    return terminalTimestamp >= providerStartedAtRef.current;
+  }, []);
+
+  const openFullCallOverlay = React.useCallback(() => {
+    if (!activeCallRecordRef.current) return;
+    setIsFullCallOverlayVisible(true);
+  }, []);
+
+  const dismissFullCallOverlay = React.useCallback(() => {
+    setIsFullCallOverlayVisible(false);
+  }, []);
+
+
+  const scheduleRingingTimeout = React.useCallback(
+    (record: CoupleCallRecord) => {
+      clearRingingTimeout();
+      ringingTimeoutRef.current = setTimeout(async () => {
+        const currentRole = roleRef.current;
+        const activeRecord = activeCallRecordRef.current;
+        if (
+          !activeRecord ||
+          activeRecord.id !== record.id ||
+          activeRecord.status !== 'ringing' ||
+          currentRole !== 'caller'
+        ) {
+          return;
+        }
+
+        try {
+          const endedAt = new Date().toISOString();
+          await supabase
+            .from('couple_calls')
+            .update({
+              status: 'cancelled',
+              ended_at: endedAt,
+              updated_at: endedAt,
+            })
+            .eq('id', record.id)
+            .eq('status', 'ringing');
+        } catch (error) {
+          console.log('[GlobalCall] timeout update error:', error);
+        } finally {
+          cleanupCallSession({ reason: 'timeout', shouldShowMessage: true });
+        }
+      }, RINGING_TIMEOUT_MS);
+    },
+    [clearRingingTimeout, cleanupCallSession]
+  );
+
+  const startGlobalCall = React.useCallback(
+    async (kind: MessagesCallKind) => {
+      const isExpoGo = Constants.appOwnership === 'expo';
+      let createdRecord: CoupleCallRecord | null = null;
+
+      if (isStartingCallRef.current) return;
+
+      if (isExpoGo) {
+        Alert.alert('Error de llamada', 'Las llamadas requieren la versión de desarrollo de Usfully.');
+        return;
+      }
+
+      if (!authReady || coupleLoading) {
+        return;
+      }
+
+      if (!authUser?.id) {
+        console.log('[GlobalCall] auth validation', {
+          hasAuthUser: Boolean(authUser),
+          authUserId: authUser?.id ?? null,
+          hasSupabaseSession: Boolean(session),
+          sessionUserId: session?.user?.id ?? null,
+          hasCurrentUserId: Boolean(currentUserId),
+          currentUserId: currentUserId ?? null,
+          authReady,
+          hasCoupleId: Boolean(coupleId),
+          hasPartnerId: Boolean(partnerId),
+        });
+        Alert.alert('Error de llamada', 'Tu sesión no está disponible. Inténtalo de nuevo.');
+        return;
+      }
+
+      if (!coupleId) {
+        Alert.alert('Error de llamada', 'No se pudo identificar la relación.');
+        return;
+      }
+
+      if (!partnerId) {
+        Alert.alert('Error de llamada', 'No se encontró a tu pareja para iniciar la llamada.');
+        return;
+      }
+
+      if (partnerId === authUser.id) {
+        Alert.alert('Error de llamada', 'No puedes iniciar una llamada contigo mismo.');
+        return;
+      }
+
+      if (kind !== 'audio' && kind !== 'video') {
+        Alert.alert('Error de llamada', 'No se pudo iniciar la llamada. Inténtalo de nuevo.');
+        return;
+      }
+
+      setIsStartingCall(true);
+      setNoticeText(null);
+      handledTerminalKeysRef.current.clear();
+
+      try {
+        console.log('[MessagesCall] stage: create-call-record');
+        const now = new Date().toISOString();
+        const nextStreamCallId = buildMessagesStreamCallId(coupleId);
+        const { data, error } = await supabase
+          .from('couple_calls')
+          .insert({
+            couple_id: coupleId,
+            caller_id: authUser.id,
+            recipient_id: partnerId,
+            stream_call_id: nextStreamCallId,
+            call_type: kind,
+            status: 'ringing',
+            updated_at: now,
+          })
+          .select('*')
+          .single();
+
+        if (error || !data) {
+          throw error || new Error('missing call record');
+        }
+
+        createdRecord = data as CoupleCallRecord;
+        beginCallSession(createdRecord.id);
+        assignActiveCallState(createdRecord, 'caller');
+        setIncomingCallRecord(null);
+        setIsIncomingVisible(false);
+        setCallStatus('ringing');
+        setPhase('outgoing_ringing');
+        setIsCallConnected(false);
+        setIsFullCallOverlayVisible(false);
+        scheduleRingingTimeout(createdRecord);
+
+        console.log('[MessagesCall] stage: get-stream-token');
+        const nextClient = await ensureStreamClientReady();
+
+        console.log('[MessagesCall] stage: prepare-stream-users-server-side');
+        await prepareMessagesStreamUsers({
+          callId: createdRecord.stream_call_id,
+          callType: createdRecord.call_type,
+          recipientId: partnerId,
+          recipientName: partnerName,
+          recipientImage: partnerAvatarUrl,
+        });
+
+        const nextCall = nextClient.call('default', createdRecord.stream_call_id, { reuseInstance: true });
+        await nextCall.getOrCreate({
+          ring: true,
+          video: createdRecord.call_type === 'video',
+          data: {
+            members: [{ user_id: authUser.id }, { user_id: partnerId }],
+            custom: {
+              app_context: 'messages',
+              call_kind: createdRecord.call_type,
+            },
+          },
+        });
+        activeStreamCallRef.current = nextCall;
+
+        console.log('[StreamRinging] created outgoing call', {
+          callId: createdRecord.stream_call_id,
+          isCreatedByMe: nextCall.isCreatedByMe,
+        });
+
+      } catch (error) {
+        console.log('[GlobalCall] start call error:', error);
+
+        if (createdRecord?.id) {
+          try {
+            const endedAt = new Date().toISOString();
+            await supabase
+              .from('couple_calls')
+              .update({
+                status: 'cancelled',
+                ended_at: endedAt,
+                updated_at: endedAt,
+              })
+              .eq('id', createdRecord.id)
+              .eq('status', 'ringing');
+          } catch (cancelError) {
+            console.log('[GlobalCall] cancel failed after start error:', cancelError);
+          }
+        }
+
+        clearGlobalCallState();
+        const userMessage =
+          typeof error === 'object' && error && 'userMessage' in error && typeof (error as any).userMessage === 'string'
+            ? (error as any).userMessage
+            : 'No se pudo preparar la llamada. Inténtalo de nuevo.';
+        Alert.alert('Error de llamada', userMessage);
+      } finally {
+        setIsStartingCall(false);
+      }
+    },
+    [
+      assignActiveCallState,
+      beginCallSession,
+      clearGlobalCallState,
+      coupleId,
+      currentUserId,
+      authReady,
+      authUser,
+      coupleLoading,
+      ensureStreamClientReady,
+      partnerAvatarUrl,
+      partnerId,
+      partnerName,
+      scheduleRingingTimeout,
+      session,
+    ]
+  );
+
+  const endGlobalCall = React.useCallback(
+    async (reason: EndCallReason = 'user') => {
+      const currentRecord = activeCallRecordRef.current ?? incomingCallRecordRef.current;
+      const currentRole = roleRef.current;
+      const currentCall = activeStreamCallRef.current;
+
+      if (!currentRecord || isEndingCallRef.current) {
+        clearGlobalCallState();
+        return;
+      }
+
+      setIsEndingCall(true);
+      clearRingingTimeout();
+
+      try {
+        const now = new Date().toISOString();
+        let nextStatus: CoupleCallStatus | null = null;
+
+        if (reason === 'reject') {
+          nextStatus = 'rejected';
+        } else if (currentRecord.status === 'ringing' && currentRole === 'caller') {
+          nextStatus = 'cancelled';
+        } else if (currentRecord.status === 'accepted') {
+          nextStatus = 'ended';
+        }
+
+        if (nextStatus) {
+          try {
+            if (currentCall) {
+              if (nextStatus === 'rejected') {
+                await currentCall.leave({ reject: true, reason: 'decline' });
+              } else if (nextStatus === 'cancelled') {
+                await currentCall.leave({ reject: true, reason: 'cancel' });
+              } else {
+                await currentCall.leave();
+              }
+            }
+          } catch (leaveError) {
+            console.log('[GlobalCall] stream leave error:', {
+              message: leaveError instanceof Error ? leaveError.message : String(leaveError),
+            });
+          }
+
+          handledTerminalKeysRef.current.add(`${currentRecord.id}:${nextStatus}`);
+          const query = supabase
+            .from('couple_calls')
+            .update({
+              status: nextStatus,
+              ended_at: now,
+              updated_at: now,
+            })
+            .eq('id', currentRecord.id);
+
+          if (nextStatus === 'rejected' || nextStatus === 'cancelled') {
+            await query.eq('status', 'ringing');
+          } else {
+            await query.in('status', ['accepted']);
+          }
+        }
+
+        if (reason === 'reject') {
+          cleanupCallSession({ reason: 'rejected', shouldShowMessage: false });
+        } else if (currentRecord.status === 'ringing' && currentRole === 'caller') {
+          cleanupCallSession({ reason: 'cancelled', shouldShowMessage: false });
+        } else if (currentRecord.status === 'accepted') {
+          cleanupCallSession({ reason: 'ended', shouldShowMessage: false });
+        } else {
+          clearGlobalCallState();
+        }
+      } catch (error) {
+        console.log('[GlobalCall] end call error:', error);
+        clearGlobalCallState();
+      }
+    },
+    [cleanupCallSession, clearGlobalCallState, clearRingingTimeout]
+  );
+
+  React.useEffect(() => {
+    if (!activeCallRecord?.answered_at || activeCallRecord.status !== 'accepted') {
+      setElapsedSeconds(0);
+      return;
+    }
+
+    const startedAt = new Date(activeCallRecord.answered_at).getTime();
+    if (Number.isNaN(startedAt)) {
+      setElapsedSeconds(0);
+      return;
+    }
+
+    const tick = () => {
+      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    };
+
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [activeCallRecord?.answered_at, activeCallRecord?.status]);
+
+  const handleCallRealtimeChange = React.useCallback(
+    (record: CoupleCallRecord | null, source: 'realtime' = 'realtime') => {
+      if (!record || !currentUserId || !coupleId) return;
+      if (record.couple_id !== coupleId) return;
+
+      const isCaller = String(record.caller_id) === String(currentUserId);
+      const isRecipient = String(record.recipient_id) === String(currentUserId);
+
+      if (!isCaller && !isRecipient) return;
+
+      const nextRole: MessagesCallRole = isCaller ? 'caller' : 'recipient';
+      const hasMatchingSession = currentSessionCallIdRef.current === record.id;
+
+      if (record.status === 'ringing') {
+        return;
+      }
+
+      if (record.status === 'accepted') {
+        if (!hasMatchingSession) {
+          return;
+        }
+        clearRingingTimeout();
+        assignActiveCallState(record, nextRole);
+        return;
+      }
+
+      if (record.status === 'rejected' || record.status === 'cancelled' || record.status === 'ended') {
+        if (source !== 'realtime' || !shouldHandleTerminalRealtime(record)) {
+          return;
+        }
+        const key = `${record.id}:${record.status}`;
+        if (handledTerminalKeysRef.current.has(key)) {
+          return;
+        }
+        handledTerminalKeysRef.current.add(key);
+        cleanupCallSession({
+          reason: record.status === 'rejected' ? 'rejected' : record.status === 'cancelled' ? 'cancelled' : 'ended',
+          shouldShowMessage: true,
+        });
+      }
+    },
+    [
+      assignActiveCallState,
+      cleanupCallSession,
+      clearRingingTimeout,
+      coupleId,
+      currentUserId,
+      shouldHandleTerminalRealtime,
+    ]
+  );
+
+  const bindActiveStreamCall = React.useCallback((call: StreamSdkCall | null) => {
+    activeStreamCallRef.current = call;
+  }, []);
+
+  const syncActiveCallRecord = React.useCallback(
+    (record: CoupleCallRecord, nextRole: MessagesCallRole) => {
+      const currentRecord = activeCallRecordRef.current;
+      const sameRecord =
+        currentRecord?.id === record.id &&
+        currentRecord?.status === record.status &&
+        currentRecord?.stream_call_id === record.stream_call_id &&
+        currentRecord?.call_type === record.call_type;
+
+      beginCallSession(record.id);
+
+      if (sameRecord && roleRef.current === nextRole) {
+        return;
+      }
+
+      assignActiveCallState(record, nextRole);
+    },
+    [assignActiveCallState, beginCallSession]
+  );
+
+  const persistAcceptedCall = React.useCallback(
+    async (record: CoupleCallRecord) => {
+      const answeredAt = new Date().toISOString();
+      const { data, error } = await supabase
+        .from('couple_calls')
+        .update({
+          status: 'accepted',
+          answered_at: answeredAt,
+          updated_at: answeredAt,
+        })
+        .eq('id', record.id)
+        .eq('status', 'ringing')
+        .select('*')
+        .single();
+
+      if (!error && data) {
+        const acceptedRecord = data as CoupleCallRecord;
+        const currentRecord = activeCallRecordRef.current;
+        const sameRecord =
+          currentRecord?.id === acceptedRecord.id &&
+          currentRecord?.status === acceptedRecord.status &&
+          roleRef.current === 'recipient';
+
+        if (!sameRecord) {
+          assignActiveCallState(acceptedRecord, 'recipient');
+        }
+      }
+    },
+    [assignActiveCallState]
+  );
+
+  const handleCallingStateChanged = React.useCallback(
+    (state: CallingState, nextRole: MessagesCallRole, record: CoupleCallRecord | null) => {
+      if (state === CallingState.RINGING) {
+        if (callStatusRef.current !== 'ringing') {
+          setCallStatus('ringing');
+        }
+        return;
+      }
+
+      if (state === CallingState.JOINING || state === CallingState.RECONNECTING) {
+        if (callStatusRef.current !== 'connecting') {
+          setCallStatus('connecting');
+        }
+        if (phaseRef.current !== 'connecting') {
+          setPhase('connecting');
+        }
+        if (isCallConnectedRef.current) {
+          setIsCallConnected(false);
+        }
+        return;
+      }
+
+      if (state === CallingState.JOINED) {
+        if (callStatusRef.current !== 'connected') {
+          setCallStatus('connected');
+        }
+        if (phaseRef.current !== 'active') {
+          setPhase('active');
+        }
+        if (!isCallConnectedRef.current) {
+          setIsCallConnected(true);
+        }
+
+        if (record) {
+          const nextRecord = record.status === 'accepted' ? record : { ...record, status: 'accepted' as const };
+          const currentRecord = activeCallRecordRef.current;
+          const sameRecord =
+            currentRecord?.id === nextRecord.id &&
+            currentRecord?.status === nextRecord.status &&
+            currentRecord?.stream_call_id === nextRecord.stream_call_id &&
+            currentRecord?.call_type === nextRecord.call_type &&
+            roleRef.current === nextRole;
+
+          if (!sameRecord) {
+            assignActiveCallState(nextRecord, nextRole);
+          }
+        }
+        return;
+      }
+
+      if (state === CallingState.LEFT) {
+        const hasLiveState =
+          Boolean(activeCallRecordRef.current) ||
+          Boolean(incomingCallRecordRef.current) ||
+          phaseRef.current !== 'idle' ||
+          callStatusRef.current !== 'idle' ||
+          isCallConnectedRef.current;
+
+        if (hasLiveState) {
+          setIsCallConnected(false);
+          clearGlobalCallState();
+        }
+      }
+    },
+    [assignActiveCallState, clearGlobalCallState]
+  );
+
+  React.useEffect(() => {
+    if (!coupleId || !currentUserId) return;
+
+    const channel = supabase
+      .channel(`global-couple-calls:${coupleId}:${currentUserId}`)
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'couple_calls', filter: `couple_id=eq.${coupleId}` },
+        (payload) => {
+          const nextRecord = (payload.new || null) as CoupleCallRecord | null;
+          handleCallRealtimeChange(nextRecord, 'realtime');
+        }
+      )
+      .subscribe((status) => {
+        subscriptionReadyRef.current = status === 'SUBSCRIBED';
+      });
+
+    return () => {
+      clearRingingTimeout();
+      subscriptionReadyRef.current = false;
+      supabase.removeChannel(channel);
+    };
+  }, [clearRingingTimeout, coupleId, currentUserId, handleCallRealtimeChange]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    if (!currentUserId) {
+      currentStreamUserIdRef.current = null;
+      setStreamClient(null);
+      void resetStreamVideoClient();
+      return;
+    }
+
+    if (currentStreamUserIdRef.current === currentUserId && streamClient) {
+      return;
+    }
+
+    if (currentStreamUserIdRef.current && currentStreamUserIdRef.current !== currentUserId) {
+      currentStreamUserIdRef.current = null;
+      setStreamClient(null);
+      void resetStreamVideoClient();
+    }
+
+    void ensureStreamClientReady().then((client) => {
+      if (!cancelled && client) {
+        setStreamClient(client);
+        currentStreamUserIdRef.current = currentUserId;
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUserId, ensureStreamClientReady, streamClient]);
+
+  React.useEffect(() => {
+    if (!currentUserId) return;
+
+    const subscription = AppState.addEventListener('change', (nextState) => {
+      if (nextState === 'active') {
+        void ensureStreamClientReady();
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, [currentUserId, ensureStreamClientReady]);
+
+  React.useEffect(() => {
+    return () => {
+      clearRingingTimeout();
+      void resetStreamVideoClient();
+    };
+  }, [clearRingingTimeout]);
+
+  const contextValue = React.useMemo<GlobalCallContextValue>(
+    () => ({
+      startGlobalCall,
+      openFullCallOverlay,
+      dismissFullCallOverlay,
+      endGlobalCall,
+      isStartingCall,
+      canStartCall,
+      hasActiveCall: Boolean(activeCallRecord),
+      isFullCallOverlayVisible,
+    }),
+    [
+      activeCallRecord,
+      dismissFullCallOverlay,
+      endGlobalCall,
+      isFullCallOverlayVisible,
+      isStartingCall,
+      canStartCall,
+      openFullCallOverlay,
+      startGlobalCall,
+    ]
+  );
+
+  return (
+    <CallContext.Provider value={contextValue}>
+      {streamClient ? (
+        <StreamVideo client={streamClient}>
+          {children}
+          <GlobalRingingCallHost
+            currentUserId={currentUserId}
+            partnerName={partnerName}
+            partnerAvatarUrl={partnerAvatarUrl}
+            preferredStreamCallId={streamCallId}
+            resolveCallRecord={fetchCallRecordByStreamCallId}
+            bindActiveCall={bindActiveStreamCall}
+            syncCallRecord={syncActiveCallRecord}
+            persistAccepted={persistAcceptedCall}
+            endCall={endGlobalCall}
+            onCallingStateChanged={handleCallingStateChanged}
+            clearState={clearGlobalCallState}
+          />
+          <View pointerEvents="box-none" style={styles.host}>
+            <AnimatedNotice visible={Boolean(noticeText)} topOffset={insets.top + 84} message={noticeText ?? ''} />
+          </View>
+        </StreamVideo>
+      ) : (
+        <>
+          {children}
+          <View pointerEvents="box-none" style={styles.host}>
+            <AnimatedNotice visible={Boolean(noticeText)} topOffset={insets.top + 84} message={noticeText ?? ''} />
+          </View>
+        </>
+      )}
+    </CallContext.Provider>
+  );
+}
+
+export function useGlobalCall() {
+  const context = React.useContext(CallContext);
+  if (!context) {
+    throw new Error('useGlobalCall must be used within CallProvider');
+  }
+  return context;
+}
+
+function AnimatedBanner({
+  visible,
+  topOffset,
+  children,
+}: {
+  visible: boolean;
+  topOffset: number;
+  children: React.ReactNode;
+}) {
+  const translateY = React.useRef(new Animated.Value(-140)).current;
+  const opacity = React.useRef(new Animated.Value(0)).current;
+
+  React.useEffect(() => {
+    Animated.parallel([
+      Animated.timing(translateY, {
+        toValue: visible ? 0 : -140,
+        duration: 220,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(opacity, {
+        toValue: visible ? 1 : 0,
+        duration: 180,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [opacity, translateY, visible]);
+
+  return (
+    <Animated.View
+      pointerEvents={visible ? 'auto' : 'none'}
+      style={[
+        styles.bannerHost,
+        {
+          top: topOffset,
+          opacity,
+          transform: [{ translateY }],
+        },
+      ]}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+function AnimatedNotice({
+  visible,
+  topOffset,
+  message,
+}: {
+  visible: boolean;
+  topOffset: number;
+  message: string;
+}) {
+  const translateY = React.useRef(new Animated.Value(-20)).current;
+  const opacity = React.useRef(new Animated.Value(0)).current;
+
+  React.useEffect(() => {
+    Animated.parallel([
+      Animated.timing(translateY, {
+        toValue: visible ? 0 : -20,
+        duration: 180,
+        easing: Easing.out(Easing.cubic),
+        useNativeDriver: true,
+      }),
+      Animated.timing(opacity, {
+        toValue: visible ? 1 : 0,
+        duration: 180,
+        useNativeDriver: true,
+      }),
+    ]).start();
+  }, [opacity, translateY, visible]);
+
+  return (
+    <Animated.View
+      pointerEvents="none"
+      style={[
+        styles.noticeHost,
+        {
+          top: topOffset,
+          opacity,
+          transform: [{ translateY }],
+        },
+      ]}
+    >
+      <View style={styles.noticePill}>
+        <Text style={styles.noticeText}>{message}</Text>
+      </View>
+    </Animated.View>
+  );
+}
+
+function FullScreenCallStage({
+  visible,
+  children,
+}: {
+  visible: boolean;
+  children: React.ReactNode;
+}) {
+  const opacity = React.useRef(new Animated.Value(0)).current;
+
+  React.useEffect(() => {
+    Animated.timing(opacity, {
+      toValue: visible ? 1 : 0,
+      duration: 180,
+      easing: Easing.out(Easing.cubic),
+      useNativeDriver: true,
+    }).start();
+  }, [opacity, visible]);
+
+  return (
+    <Animated.View
+      pointerEvents={visible ? 'auto' : 'none'}
+      style={[
+        styles.fullScreenStage,
+        {
+          opacity,
+        },
+      ]}
+    >
+      {children}
+    </Animated.View>
+  );
+}
+
+function IncomingCallBanner({
+  callType,
+  partnerName,
+  partnerAvatarUrl,
+  onPress,
+}: {
+  callType: MessagesCallKind;
+  partnerName: string;
+  partnerAvatarUrl?: string | null;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable style={styles.bannerCard} onPress={onPress}>
+      <Avatar size={46} uri={partnerAvatarUrl} label={partnerName} />
+      <View style={styles.bannerTextBox}>
+        <View style={styles.bannerTag}>
+          {callType === 'audio' ? <Phone size={13} color="#7A5563" /> : <Video size={13} color="#7A5563" />}
+          <Text style={styles.bannerTagText}>{callType === 'audio' ? 'Llamada entrante' : 'Videollamada entrante'}</Text>
+        </View>
+        <Text style={styles.bannerTitle}>{partnerName}</Text>
+        <Text style={styles.bannerSubtitle}>Toca para responder</Text>
+      </View>
+    </Pressable>
+  );
+}
+
+function IncomingCallScreen({
+  callType,
+  partnerName,
+  partnerAvatarUrl,
+  isBusy,
+  onAccept,
+  onReject,
+  topInset,
+  bottomInset,
+}: {
+  callType: MessagesCallKind;
+  partnerName: string;
+  partnerAvatarUrl?: string | null;
+  isBusy: boolean;
+  onAccept: () => void;
+  onReject: () => void;
+  topInset: number;
+  bottomInset: number;
+}) {
+  return (
+    <View style={[styles.fullScreenCallCard, { paddingTop: topInset + 24, paddingBottom: bottomInset + 28 }]}>
+      <View style={styles.fullScreenCallTop}>
+        <CallTypePill
+          icon={callType === 'audio' ? <Phone size={16} color="#7A5563" /> : <Video size={16} color="#7A5563" />}
+          label={callType === 'audio' ? 'Llamada entrante' : 'Videollamada entrante'}
+        />
+      </View>
+
+      <View style={styles.fullScreenCallCenter}>
+        <Avatar size={126} uri={partnerAvatarUrl} label={partnerName} />
+        <Text style={styles.fullScreenPartnerName}>{partnerName}</Text>
+        <Text style={styles.fullScreenSubtitle}>
+          {callType === 'audio' ? 'Quiere hablar contigo' : 'Quiere iniciar una videollamada'}
+        </Text>
+      </View>
+
+      <View style={styles.fullScreenActionsRow}>
+        <Pressable
+          style={[styles.fullScreenActionButton, styles.fullScreenRejectButton, isBusy && styles.disabledAction]}
+          onPress={onReject}
+          disabled={isBusy}
+        >
+          <PhoneOff size={20} color="#FFFFFF" />
+          <Text style={styles.fullScreenActionText}>Rechazar</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.fullScreenActionButton, styles.fullScreenAcceptButton, isBusy && styles.disabledAction]}
+          onPress={onAccept}
+          disabled={isBusy}
+        >
+          <Phone size={20} color="#FFFFFF" />
+          <Text style={styles.fullScreenActionText}>Aceptar</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function OutgoingCallScreen({
+  callType,
+  partnerName,
+  partnerAvatarUrl,
+  isBusy,
+  onEnd,
+  topInset,
+  bottomInset,
+}: {
+  callType: MessagesCallKind;
+  partnerName: string;
+  partnerAvatarUrl?: string | null;
+  isBusy: boolean;
+  onEnd: () => void;
+  topInset: number;
+  bottomInset: number;
+}) {
+  return (
+    <View style={[styles.fullScreenCallCard, { paddingTop: topInset + 24, paddingBottom: bottomInset + 28 }]}>
+      <View style={styles.fullScreenCallTop}>
+        <CallTypePill
+          icon={callType === 'audio' ? <Phone size={16} color="#7A5563" /> : <Video size={16} color="#7A5563" />}
+          label={callType === 'audio' ? 'Llamada' : 'Videollamada'}
+        />
+      </View>
+
+      <View style={styles.fullScreenCallCenter}>
+        <AnimatedCallingHalo />
+        <Avatar size={126} uri={partnerAvatarUrl} label={partnerName} />
+        <Text style={styles.fullScreenPartnerName}>{partnerName}</Text>
+        <Text style={styles.fullScreenSubtitle}>{getOutgoingCallText(callType, partnerName)}</Text>
+      </View>
+
+      <View style={styles.fullScreenActionsRow}>
+        <Pressable
+          style={[styles.fullScreenActionButton, styles.fullScreenRejectButton, isBusy && styles.disabledAction]}
+          onPress={onEnd}
+          disabled={isBusy}
+        >
+          <PhoneOff size={20} color="#FFFFFF" />
+          <Text style={styles.fullScreenActionText}>Cancelar</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function CallTypePill({ icon, label }: { icon: React.ReactNode; label: string }) {
+  return (
+    <View style={styles.callTypePill}>
+      {icon}
+      <Text style={styles.callTypePillText}>{label}</Text>
+    </View>
+  );
+}
+
+function AnimatedCallingHalo() {
+  const scale = React.useRef(new Animated.Value(0.94)).current;
+  const opacity = React.useRef(new Animated.Value(0.34)).current;
+
+  React.useEffect(() => {
+    const loop = Animated.loop(
+      Animated.parallel([
+        Animated.sequence([
+          Animated.timing(scale, {
+            toValue: 1.08,
+            duration: 900,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: true,
+          }),
+          Animated.timing(scale, {
+            toValue: 0.94,
+            duration: 900,
+            easing: Easing.inOut(Easing.cubic),
+            useNativeDriver: true,
+          }),
+        ]),
+        Animated.sequence([
+          Animated.timing(opacity, {
+            toValue: 0.12,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+          Animated.timing(opacity, {
+            toValue: 0.34,
+            duration: 900,
+            useNativeDriver: true,
+          }),
+        ]),
+      ])
+    );
+
+    loop.start();
+    return () => loop.stop();
+  }, [opacity, scale]);
+
+  return <Animated.View style={[styles.callingHalo, { opacity, transform: [{ scale }] }]} />;
+}
+
+function ActiveCallBar({
+  callType,
+  partnerName,
+  partnerAvatarUrl,
+  elapsedLabel,
+  onPress,
+  onEnd,
+}: {
+  callType: MessagesCallKind;
+  partnerName: string;
+  partnerAvatarUrl?: string | null;
+  elapsedLabel: string;
+  onPress: () => void;
+  onEnd: () => void;
+}) {
+  const pulse = React.useRef(new Animated.Value(0.7)).current;
+
+  React.useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1, duration: 600, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0.7, duration: 600, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [pulse]);
+
+  return (
+    <View style={styles.activeBar}>
+      <Pressable style={styles.activeBarLeft} onPress={onPress}>
+        <Animated.View style={[styles.activeDot, { opacity: pulse, transform: [{ scale: pulse }] }]} />
+        <Avatar size={36} uri={partnerAvatarUrl} label={partnerName} />
+        <View style={styles.activeTextBox}>
+          <Text style={styles.activeTitle}>
+            {callType === 'audio' ? `En llamada con ${partnerName}` : `Videollamada activa con ${partnerName}`}
+          </Text>
+          <View style={styles.activeMetaRow}>
+            <Mic size={12} color="#7A5563" />
+            <Text style={styles.activeSubtitle}>{elapsedLabel}</Text>
+          </View>
+        </View>
+      </Pressable>
+      <Pressable style={styles.activeEndButton} onPress={onEnd}>
+        <PhoneOff size={16} color="#FFFFFF" />
+      </Pressable>
+    </View>
+  );
+}
+
+function Avatar({ uri, label, size }: { uri?: string | null; label: string; size: number }) {
+  if (uri) {
+    return <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />;
+  }
+
+  return (
+    <View style={[styles.avatarFallback, { width: size, height: size, borderRadius: size / 2 }]}>
+      <Text style={[styles.avatarFallbackText, { fontSize: size * 0.38 }]}>{(label || 'U').charAt(0).toUpperCase()}</Text>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  host: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 1200,
+    elevation: 1200,
+    pointerEvents: 'box-none',
+  },
+  fullScreenStage: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'center',
+    alignItems: 'stretch',
+    backgroundColor: 'rgba(28, 18, 24, 0.32)',
+  },
+  fullScreenCallCard: {
+    flex: 1,
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 28,
+    backgroundColor: '#FFF8FB',
+  },
+  fullScreenCallTop: {
+    width: '100%',
+    alignItems: 'center',
+  },
+  fullScreenCallCenter: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+  },
+  callTypePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: '#FFF1F5',
+    borderWidth: 1,
+    borderColor: '#F3D9E2',
+  },
+  callTypePillText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#7A5563',
+  },
+  callingHalo: {
+    position: 'absolute',
+    width: 188,
+    height: 188,
+    borderRadius: 94,
+    backgroundColor: '#FDE4EC',
+  },
+  fullScreenPartnerName: {
+    fontSize: 30,
+    fontWeight: '900',
+    color: TEXT_DARK,
+    textAlign: 'center',
+  },
+  fullScreenSubtitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: TEXT_MUTED,
+    textAlign: 'center',
+    lineHeight: 23,
+  },
+  fullScreenActionsRow: {
+    width: '100%',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 14,
+  },
+  fullScreenActionButton: {
+    minWidth: 148,
+    height: 56,
+    borderRadius: 28,
+    paddingHorizontal: 22,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  fullScreenRejectButton: {
+    backgroundColor: '#F06F8F',
+  },
+  fullScreenAcceptButton: {
+    backgroundColor: '#64C79A',
+  },
+  fullScreenActionText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  bannerHost: {
+    position: 'absolute',
+    left: 14,
+    right: 14,
+  },
+  noticeHost: {
+    position: 'absolute',
+    left: 14,
+    right: 14,
+    alignItems: 'center',
+  },
+  bannerCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 24,
+    backgroundColor: '#FFF9FB',
+    borderWidth: 1,
+    borderColor: BORDER,
+    shadowColor: '#B86A84',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.12,
+    shadowRadius: 24,
+    elevation: 9,
+  },
+  bannerTextBox: {
+    flex: 1,
+    gap: 4,
+  },
+  bannerMainPressable: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  bannerTag: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: '#FFF1F5',
+  },
+  bannerTagText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#7A5563',
+  },
+  bannerTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: TEXT_DARK,
+  },
+  bannerSubtitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: TEXT_MUTED,
+  },
+  bannerActions: {
+    flexDirection: 'row',
+    gap: 8,
+  },
+  roundAction: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  rejectAction: {
+    backgroundColor: '#F06F8F',
+  },
+  acceptAction: {
+    backgroundColor: '#64C79A',
+  },
+  endButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F06F8F',
+  },
+  disabledAction: {
+    opacity: 0.55,
+  },
+  activeBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 22,
+    backgroundColor: '#FFF6FA',
+    borderWidth: 1,
+    borderColor: BORDER,
+    shadowColor: '#B86A84',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.12,
+    shadowRadius: 20,
+    elevation: 8,
+  },
+  activeBarLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  activeDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: ACTIVE,
+  },
+  activeTextBox: {
+    flex: 1,
+    gap: 2,
+  },
+  activeTitle: {
+    fontSize: 14,
+    fontWeight: '900',
+    color: TEXT_DARK,
+  },
+  activeMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+  },
+  activeSubtitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: TEXT_MUTED,
+  },
+  activeEndButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#F06F8F',
+    marginLeft: 10,
+  },
+  noticePill: {
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 16,
+    backgroundColor: '#FFF4F7',
+    borderWidth: 1,
+    borderColor: BORDER,
+  },
+  noticeText: {
+    color: TEXT_MUTED,
+    fontSize: 13,
+    fontWeight: '700',
+    textAlign: 'center',
+  },
+  avatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FDE4EC',
+    borderWidth: 1,
+    borderColor: '#F2D5DE',
+  },
+  avatarFallbackText: {
+    color: '#E28FA6',
+    fontWeight: '900',
+  },
+});
+
+
+==============================
+FILE: components\calls\GlobalRingingCallHost.tsx
+==============================
+
+import React from 'react';
+import {
+  ActivityIndicator,
+  Animated,
+  Modal,
+  Pressable,
+  StyleSheet,
+  Text,
+  View,
+  Image,
+  useWindowDimensions,
+  Easing,
+  type StyleProp,
+  type ViewStyle,
+} from 'react-native';
+import {
+  CallingState,
+  hasVideo,
+  ParticipantView,
+  RingingCallContent,
+  StreamCall,
+  callManager,
+  useCall,
+  useCalls,
+  useCallStateHooks,
+  type Call,
+} from '@stream-io/video-react-native-sdk';
+import { hasPausedTrack } from '@stream-io/video-client';
+import { RTCView, type MediaStream } from '@stream-io/react-native-webrtc';
+import { ChevronDown, Mic, MicOff, Phone, PhoneOff, Video, Camera, CameraOff, RefreshCw, Volume2, VolumeX, UserRound } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+
+export type MessagesCallKind = 'audio' | 'video';
+export type MessagesCallRole = 'caller' | 'recipient';
+export type CoupleCallStatus = 'ringing' | 'accepted' | 'rejected' | 'cancelled' | 'ended';
+
+export type CoupleCallRecord = {
+  id: string;
+  couple_id: string;
+  caller_id: string;
+  recipient_id: string;
+  stream_call_id: string;
+  call_type: MessagesCallKind;
+  status: CoupleCallStatus;
+  created_at: string;
+  answered_at: string | null;
+  ended_at: string | null;
+  updated_at: string;
+};
+
+type GlobalRingingCallHostProps = {
+  currentUserId: string | null;
+  partnerName: string;
+  partnerAvatarUrl?: string | null;
+  preferredStreamCallId?: string | null;
+  resolveCallRecord: (streamCallId: string) => Promise<CoupleCallRecord | null>;
+  bindActiveCall: (call: Call | null) => void;
+  syncCallRecord: (record: CoupleCallRecord, role: MessagesCallRole) => void;
+  persistAccepted: (record: CoupleCallRecord) => Promise<void>;
+  endCall: (reason?: 'user' | 'reject') => Promise<void>;
+  onCallingStateChanged: (state: CallingState, role: MessagesCallRole, record: CoupleCallRecord | null) => void;
+  clearState: () => void;
+};
+
+type HostContextValue = {
+  currentUserId: string | null;
+  partnerName: string;
+  partnerAvatarUrl?: string | null;
+  callKind: MessagesCallKind;
+  callRecord: CoupleCallRecord | null;
+  onAccept: () => Promise<void>;
+  onEnd: (reason?: 'user' | 'reject') => Promise<void>;
+};
+
+type VideoSlotParticipant = React.ComponentProps<typeof ParticipantView>['participant'];
+type VideoSlotPlaceholderMode = 'waiting' | 'loading' | 'camera-off';
+type VideoStageSlot = {
+  participant: VideoSlotParticipant | null;
+  isLocal: boolean;
+  label: string;
+  slot: 'main' | 'pip';
+  confirmedCameraOff: boolean;
+  hasRenderableVideo: boolean;
+  renderKey: string;
+};
+
+type VideoParticipantSlotProps = {
+  participant: VideoSlotParticipant | null;
+  slot: 'main' | 'pip';
+  isLocal: boolean;
+  confirmedCameraOff: boolean;
+  hasRenderableVideo: boolean;
+  label: string;
+  streamURL?: string | null;
+  partnerAvatarUrl?: string | null;
+  videoZOrder: number;
+  renderKey: string;
+  overlayStyle?: StyleProp<ViewStyle>;
+};
+
+const HostContext = React.createContext<HostContextValue | null>(null);
+
+function useHostContext() {
+  const context = React.useContext(HostContext);
+  if (!context) {
+    throw new Error('GlobalRingingCallHost context is missing');
+  }
+  return context;
+}
+
+const TEXT_DARK = '#241D22';
+const TEXT_MUTED = '#8D6675';
+const BORDER = '#F3D9E2';
+
+function getCallKind(call: Call): MessagesCallKind | null {
+  const custom = (call.state.custom ?? {}) as Record<string, unknown>;
+  return custom.call_kind === 'audio' || custom.call_kind === 'video' ? custom.call_kind : null;
+}
+
+function isMessagesCall(call: Call) {
+  const custom = (call.state.custom ?? {}) as Record<string, unknown>;
+  return custom.app_context === 'messages' && getCallKind(call) !== null;
+}
+
+function Avatar({ uri, label, size }: { uri?: string | null; label: string; size: number }) {
+  if (uri) {
+    return <Image source={{ uri }} style={{ width: size, height: size, borderRadius: size / 2 }} />;
+  }
+
+  return (
+    <View style={[styles.avatarFallback, { width: size, height: size, borderRadius: size / 2 }]}>
+      <Text style={[styles.avatarFallbackText, { fontSize: size * 0.38 }]}>{(label || 'U').charAt(0).toUpperCase()}</Text>
+    </View>
+  );
+}
+
+function formatElapsed(totalSeconds: number) {
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function getParticipantId(participant: VideoSlotParticipant | null) {
+  if (!participant) return null;
+  return participant.userId ?? null;
+}
+
+function getParticipantSessionId(participant: VideoSlotParticipant | null) {
+  if (!participant) return null;
+  return participant.sessionId ?? null;
+}
+
+function VideoParticipantSlot({
+  participant,
+  slot,
+  isLocal,
+  confirmedCameraOff,
+  hasRenderableVideo,
+  label,
+  streamURL = null,
+  partnerAvatarUrl,
+  videoZOrder,
+  renderKey,
+  overlayStyle,
+}: VideoParticipantSlotProps) {
+  const isPip = slot === 'pip';
+  const hasParticipant = Boolean(participant);
+  const showLocalVideo = isLocal && hasRenderableVideo && Boolean(streamURL);
+  const showRemoteSlot = !isLocal && hasParticipant;
+  const participantId = getParticipantId(participant);
+  const placeholderMode: VideoSlotPlaceholderMode = !hasParticipant
+    ? 'waiting'
+    : confirmedCameraOff
+      ? 'camera-off'
+      : 'loading';
+
+  console.log('[VideoSlot] render', {
+    slot,
+    participantId,
+    isLocal,
+    confirmedCameraOff,
+    rendererKey: renderKey,
+  });
+
+  const RemoteParticipantFallback = React.useMemo(() => {
+    if (isLocal) return null;
+
+    return function RemoteParticipantFallback() {
+      return (
+        <View style={isPip ? styles.videoSlotPipPlaceholder : styles.videoSlotMainPlaceholder}>
+          <Avatar uri={partnerAvatarUrl} label={label} size={isPip ? 42 : 96} />
+          <Text style={isPip ? styles.videoSlotPipPlaceholderText : styles.videoSlotMainPlaceholderTitle}>
+            {placeholderMode === 'loading' ? (isPip ? 'Conectando...' : label) : isPip ? 'Cámara apagada' : label}
+          </Text>
+          {!isPip ? (
+            <Text style={styles.videoSlotMainPlaceholderSubtitle}>
+              {placeholderMode === 'loading' ? 'Conectando cámara...' : 'La cámara de tu pareja está apagada'}
+            </Text>
+          ) : null}
+        </View>
+      );
+    };
+  }, [isLocal, isPip, label, partnerAvatarUrl, placeholderMode]);
+
+  const content = showLocalVideo ? (
+    <RTCView
+      streamURL={streamURL ?? undefined}
+      mirror={true}
+      objectFit="cover"
+      zOrder={videoZOrder}
+      style={isPip ? styles.videoSlotPipRtcView : styles.videoSlotMainRtcView}
+    />
+  ) : showRemoteSlot && participant ? (
+    <ParticipantView
+      participant={participant}
+      style={isPip ? styles.videoSlotPipParticipantView : styles.videoSlotMainParticipantView}
+      objectFit="cover"
+      mirror={false}
+      videoZOrder={videoZOrder}
+      ParticipantLabel={null}
+      ParticipantNetworkQualityIndicator={null}
+      ParticipantReaction={null}
+      ParticipantVideoFallback={RemoteParticipantFallback}
+    />
+  ) : (
+    <View style={isPip ? styles.videoSlotPipPlaceholder : styles.videoSlotMainPlaceholder}>
+      {isLocal ? (
+        <>
+          <CameraOff size={isPip ? 24 : 42} color="#FFFFFF" />
+          <Text style={isPip ? styles.videoSlotPipPlaceholderText : styles.videoSlotMainPlaceholderTitle}>
+            {placeholderMode === 'camera-off' ? 'Cámara apagada' : isPip ? 'Iniciando cámara...' : 'Tu cámara está apagada'}
+          </Text>
+          {!isPip && placeholderMode === 'loading' ? (
+            <Text style={styles.videoSlotMainPlaceholderSubtitle}>Conectando cámara...</Text>
+          ) : null}
+        </>
+      ) : hasParticipant ? (
+        <>
+          <Avatar uri={partnerAvatarUrl} label={label} size={isPip ? 42 : 96} />
+          <Text style={isPip ? styles.videoSlotPipPlaceholderText : styles.videoSlotMainPlaceholderTitle}>
+            {placeholderMode === 'loading' ? (isPip ? 'Conectando...' : label) : isPip ? 'Cámara apagada' : label}
+          </Text>
+          {!isPip ? (
+            <Text style={styles.videoSlotMainPlaceholderSubtitle}>
+              {placeholderMode === 'loading' ? 'Conectando cámara...' : 'La cámara de tu pareja está apagada'}
+            </Text>
+          ) : null}
+        </>
+      ) : (
+        <>
+          <UserRound size={isPip ? 24 : 54} color="#FFFFFF" />
+          <Text style={isPip ? styles.videoSlotPipPlaceholderText : styles.videoSlotMainPlaceholderTitle}>
+            {isPip ? 'Esperando...' : 'Esperando a tu pareja'}
+          </Text>
+        </>
+      )}
+    </View>
+  );
+
+  if (isPip) {
+    return (
+      <View collapsable={false} style={styles.pipCard}>
+        <View key={renderKey} collapsable={false} style={styles.pipVideoHost}>
+          {content}
+        </View>
+        <Animated.View pointerEvents="none" style={[styles.pipOverlay, overlayStyle]}>
+          <View style={styles.pipLabelChip}>
+            <Text style={styles.localPreviewBadgeText} numberOfLines={1}>
+              {label}
+            </Text>
+          </View>
+        </Animated.View>
+      </View>
+    );
+  }
+
+  return (
+    <View key={renderKey} collapsable={false} style={styles.videoSlotMainContainer}>
+      {content}
+    </View>
+  );
+}
+
+function CallStateObserver({
+  callRecord,
+  role,
+  onCallingStateChanged,
+  onRecordReady,
+}: {
+  callRecord: CoupleCallRecord | null;
+  role: MessagesCallRole;
+  onCallingStateChanged: (state: CallingState, role: MessagesCallRole, record: CoupleCallRecord | null) => void;
+  onRecordReady: (call: Call) => void;
+}) {
+  const call = useCall();
+  const { useCallCallingState } = useCallStateHooks();
+  const callingState = useCallCallingState();
+  const lastEmittedStateRef = React.useRef<string | null>(null);
+  const callId = call?.cid ?? null;
+  const isCreatedByMe = Boolean(call?.isCreatedByMe);
+  const callRecordId = callRecord?.id ?? null;
+  const callRecordStatus = callRecord?.status ?? null;
+
+  React.useEffect(() => {
+    if (!call) return;
+
+    const acceptedBy = call.state.session?.accepted_by;
+    console.log('[StreamRinging] call state', {
+      callId: call.cid,
+      isCreatedByMe: call.isCreatedByMe,
+      ringing: call.ringing,
+      callingState,
+      partnerAccepted: Boolean(acceptedBy),
+    });
+  }, [call, callingState]);
+
+  React.useEffect(() => {
+    if (call) {
+      onRecordReady(call);
+    }
+  }, [call, onRecordReady]);
+
+  React.useEffect(() => {
+    console.log('[GlobalRinging] effect evaluation', {
+      callId,
+      callingState,
+      isCreatedByMe,
+      lastEmission: lastEmittedStateRef.current,
+    });
+
+    if (!callId) {
+      return;
+    }
+
+    const emissionKey = `${callId}:${callingState}:${role}:${isCreatedByMe}:${callRecordId ?? 'none'}:${callRecordStatus ?? 'none'}`;
+
+    if (lastEmittedStateRef.current === emissionKey) {
+      console.log('[GlobalRinging] skipping duplicate state change', {
+        emissionKey,
+      });
+      return;
+    }
+
+    lastEmittedStateRef.current = emissionKey;
+    console.log('[GlobalRinging] emitting state change', {
+      emissionKey,
+    });
+    onCallingStateChanged(callingState, role, callRecord);
+  }, [callId, callRecord, callRecordId, callRecordStatus, callingState, isCreatedByMe, onCallingStateChanged, role]);
+
+  return null;
+}
+
+export function GlobalRingingCallHost({
+  currentUserId,
+  partnerName,
+  partnerAvatarUrl,
+  preferredStreamCallId = null,
+  resolveCallRecord,
+  bindActiveCall,
+  syncCallRecord,
+  persistAccepted,
+  endCall,
+  onCallingStateChanged,
+  clearState,
+}: GlobalRingingCallHostProps) {
+  const calls = useCalls().filter((call) => isMessagesCall(call as Call));
+  const ringingCalls = calls.filter((call) => call.ringing);
+  const [activeCallCid, setActiveCallCid] = React.useState<string | null>(null);
+  const [callRecord, setCallRecord] = React.useState<CoupleCallRecord | null>(null);
+
+  const selectedCall = React.useMemo(() => {
+    const preferredCall =
+      (preferredStreamCallId && calls.find((call) => call.id === preferredStreamCallId)) ||
+      (activeCallCid && calls.find((call) => call.cid === activeCallCid));
+
+    if (preferredCall) {
+      return preferredCall as Call;
+    }
+
+    const nonLeftCall = calls.find((call) => call.state.callingState !== CallingState.LEFT);
+    return (nonLeftCall as Call | undefined) ?? null;
+  }, [activeCallCid, calls, preferredStreamCallId]);
+
+  const selectedCallKind = selectedCall ? getCallKind(selectedCall) : null;
+  const selectedRole: MessagesCallRole | null = selectedCall
+    ? selectedCall.isCreatedByMe
+      ? 'caller'
+      : 'recipient'
+    : null;
+
+  React.useEffect(() => {
+    console.log('[StreamRinging] SDK calls', {
+      ringingCallCount: ringingCalls.length,
+      activeCallId: selectedCall?.cid ?? null,
+    });
+  }, [ringingCalls.length, selectedCall?.cid]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    if (!selectedCall) {
+      setCallRecord(null);
+      bindActiveCall(null);
+      setActiveCallCid(null);
+      return;
+    }
+
+    bindActiveCall(selectedCall);
+    setActiveCallCid(selectedCall.cid);
+
+    void resolveCallRecord(selectedCall.id).then((record) => {
+      if (cancelled) return;
+      setCallRecord(record);
+      if (record && selectedRole) {
+        syncCallRecord(record, selectedRole);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [bindActiveCall, resolveCallRecord, selectedCall, selectedRole, syncCallRecord]);
+
+  if (!selectedCall || !selectedCallKind || !selectedRole) {
+    return null;
+  }
+
+  const contextValue: HostContextValue = {
+    currentUserId,
+    partnerName,
+    partnerAvatarUrl,
+    callKind: selectedCallKind,
+    callRecord,
+    onAccept: async () => {
+      if (!callRecord) return;
+      await selectedCall.join();
+      await persistAccepted(callRecord);
+    },
+    onEnd: endCall,
+  };
+
+  return (
+    <HostContext.Provider value={contextValue}>
+      <Modal visible transparent animationType="fade">
+        <StreamCall call={selectedCall}>
+          <CallStateObserver
+            callRecord={callRecord}
+            role={selectedRole}
+            onCallingStateChanged={onCallingStateChanged}
+            onRecordReady={bindActiveCall}
+          />
+          <RingingCallContent
+            IncomingCall={UsfullyIncomingCall}
+            OutgoingCall={UsfullyOutgoingCall}
+            CallContent={UsfullyActiveCallContent}
+            onBackPress={clearState}
+          />
+        </StreamCall>
+      </Modal>
+    </HostContext.Provider>
+  );
+}
+
+function UsfullyOutgoingCall() {
+  const { partnerName, partnerAvatarUrl, callKind, onEnd } = useHostContext();
+
+  return (
+    <View style={styles.fullScreenCallCard}>
+      <View style={styles.fullScreenCallTop}>
+        <CallTypePill
+          icon={callKind === 'audio' ? <Phone size={16} color="#7A5563" /> : <Video size={16} color="#7A5563" />}
+          label={callKind === 'audio' ? 'Llamada' : 'Videollamada'}
+        />
+      </View>
+
+      <View style={styles.fullScreenCallCenter}>
+        <Avatar size={126} uri={partnerAvatarUrl} label={partnerName} />
+        <Text style={styles.fullScreenPartnerName}>{partnerName}</Text>
+        <Text style={styles.fullScreenSubtitle}>
+          {callKind === 'audio' ? `Llamando a ${partnerName}...` : `Iniciando videollamada con ${partnerName}...`}
+        </Text>
+      </View>
+
+      <View style={styles.fullScreenActionsRow}>
+        <Pressable style={[styles.fullScreenActionButton, styles.fullScreenRejectButton]} onPress={() => void onEnd('user')}>
+          <PhoneOff size={20} color="#FFFFFF" />
+          <Text style={styles.fullScreenActionText}>Cancelar</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function UsfullyIncomingCall() {
+  const { partnerName, partnerAvatarUrl, callKind, onAccept, onEnd } = useHostContext();
+  const [expanded, setExpanded] = React.useState(false);
+  const [isBusy, setIsBusy] = React.useState(false);
+
+  const handleAccept = React.useCallback(async () => {
+    setIsBusy(true);
+    try {
+      await onAccept();
+    } finally {
+      setIsBusy(false);
+    }
+  }, [onAccept]);
+
+  const handleReject = React.useCallback(async () => {
+    setIsBusy(true);
+    try {
+      await onEnd('reject');
+    } finally {
+      setIsBusy(false);
+    }
+  }, [onEnd]);
+
+  if (!expanded) {
+    return (
+      <View style={styles.bannerViewport}>
+        <Pressable style={styles.bannerCard} onPress={() => setExpanded(true)}>
+          <Avatar size={46} uri={partnerAvatarUrl} label={partnerName} />
+          <View style={styles.bannerTextBox}>
+            <View style={styles.bannerTag}>
+              {callKind === 'audio' ? <Phone size={13} color="#7A5563" /> : <Video size={13} color="#7A5563" />}
+              <Text style={styles.bannerTagText}>{callKind === 'audio' ? 'Llamada entrante' : 'Videollamada entrante'}</Text>
+            </View>
+            <Text style={styles.bannerTitle}>{partnerName}</Text>
+            <Text style={styles.bannerSubtitle}>Toca para responder</Text>
+          </View>
+        </Pressable>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.fullScreenCallCard}>
+      <View style={styles.fullScreenCallTop}>
+        <CallTypePill
+          icon={callKind === 'audio' ? <Phone size={16} color="#7A5563" /> : <Video size={16} color="#7A5563" />}
+          label={callKind === 'audio' ? 'Llamada entrante' : 'Videollamada entrante'}
+        />
+      </View>
+
+      <View style={styles.fullScreenCallCenter}>
+        <Avatar size={126} uri={partnerAvatarUrl} label={partnerName} />
+        <Text style={styles.fullScreenPartnerName}>{partnerName}</Text>
+        <Text style={styles.fullScreenSubtitle}>
+          {callKind === 'audio' ? 'Quiere hablar contigo' : 'Quiere iniciar una videollamada'}
+        </Text>
+      </View>
+
+      <View style={styles.fullScreenActionsRow}>
+        <Pressable
+          style={[styles.fullScreenActionButton, styles.fullScreenRejectButton, isBusy && styles.disabledAction]}
+          onPress={() => void handleReject()}
+          disabled={isBusy}
+        >
+          <PhoneOff size={20} color="#FFFFFF" />
+          <Text style={styles.fullScreenActionText}>Rechazar</Text>
+        </Pressable>
+        <Pressable
+          style={[styles.fullScreenActionButton, styles.fullScreenAcceptButton, isBusy && styles.disabledAction]}
+          onPress={() => void handleAccept()}
+          disabled={isBusy}
+        >
+          <Phone size={20} color="#FFFFFF" />
+          <Text style={styles.fullScreenActionText}>Aceptar</Text>
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
+function UsfullyActiveCallContent() {
+  const call = useCall();
+  const { partnerName, partnerAvatarUrl, callKind, onEnd } = useHostContext();
+  const { useCallCallingState, useMicrophoneState, useRemoteParticipants } = useCallStateHooks();
+  const callingState = useCallCallingState();
+  const { microphone, optimisticIsMute: microphoneMuted } = useMicrophoneState();
+  const remoteParticipants = useRemoteParticipants();
+
+  const [speakerOn, setSpeakerOn] = React.useState(callKind === 'video');
+  const [connectedAt, setConnectedAt] = React.useState<number | null>(null);
+  const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
+
+  React.useEffect(() => {
+    callManager.start({
+      audioRole: 'communicator',
+      deviceEndpointType: callKind === 'audio' ? 'earpiece' : 'speaker',
+    });
+    callManager.speaker.setForceSpeakerphoneOn(callKind === 'video');
+
+    return () => {
+      callManager.stop();
+    };
+  }, [callKind]);
+
+  React.useEffect(() => {
+    if (callingState === CallingState.JOINED) {
+      setConnectedAt((prev) => prev ?? Date.now());
+      return;
+    }
+
+    setConnectedAt(null);
+    setElapsedSeconds(0);
+  }, [callingState]);
+
+  React.useEffect(() => {
+    if (!connectedAt) return;
+    const interval = setInterval(() => {
+      setElapsedSeconds(Math.max(0, Math.floor((Date.now() - connectedAt) / 1000)));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [connectedAt]);
+
+  const statusText = React.useMemo(() => {
+    if (callingState === CallingState.JOINED) {
+      return elapsedSeconds > 0 ? formatElapsed(elapsedSeconds) : 'En llamada';
+    }
+    if (callingState === CallingState.JOINING || callingState === CallingState.RECONNECTING) {
+      return 'Conectando...';
+    }
+    if (callingState === CallingState.RINGING) {
+      return callKind === 'audio' ? `Llamando a ${partnerName}...` : `Iniciando videollamada con ${partnerName}...`;
+    }
+    return 'Conectando...';
+  }, [callKind, callingState, elapsedSeconds, partnerName]);
+
+  const toggleSpeaker = React.useCallback(() => {
+    const next = !speakerOn;
+    setSpeakerOn(next);
+    callManager.speaker.setForceSpeakerphoneOn(next);
+  }, [speakerOn]);
+
+  const toggleMicrophone = React.useCallback(async () => {
+    try {
+      await microphone.toggle();
+    } catch (error) {
+      console.log('[GlobalRinging] microphone toggle error', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }, [microphone]);
+
+  if (!call || callingState !== CallingState.JOINED) {
+    return (
+      <View style={styles.fallbackCard}>
+        <Avatar size={96} uri={partnerAvatarUrl} label={partnerName} />
+        <Text style={styles.fallbackTitle}>{callKind === 'audio' ? 'Llamada' : 'Videollamada'}</Text>
+        <Text style={styles.fallbackName}>{partnerName}</Text>
+        <View style={styles.fallbackStatusRow}>
+          <ActivityIndicator color="#E797AF" />
+          <Text style={styles.fallbackStatus}>Conectando...</Text>
+        </View>
+        <Pressable style={styles.fallbackEndButton} onPress={() => void onEnd('user')}>
+          <PhoneOff size={20} color="#FFFFFF" />
+          <Text style={styles.fallbackEndButtonText}>Finalizar</Text>
+        </Pressable>
+      </View>
+    );
+  }
+
+  if (callKind === 'audio') {
+    return (
+      <View style={styles.audioCallShell}>
+        <View style={styles.audioCallTop}>
+          <View style={styles.audioCallTopRow}>
+            <View style={styles.audioCallTopSpacer} />
+            <Text style={styles.audioCallTitle}>Llamada</Text>
+            <Pressable style={styles.minimizeButton}>
+              <ChevronDown size={20} color="#7A5563" />
+            </Pressable>
+          </View>
+          <Text style={styles.audioCallStatus}>{statusText}</Text>
+        </View>
+
+        <View style={styles.audioCallCenter}>
+          <Avatar size={132} uri={partnerAvatarUrl} label={partnerName} />
+          <Text style={styles.audioPartnerName}>{partnerName}</Text>
+          <Text style={styles.audioPartnerHint}>
+            {remoteParticipants.length > 0 ? 'En llamada' : 'Esperando a tu pareja'}
+          </Text>
+        </View>
+
+        <View style={styles.audioControlsRow}>
+          <ControlButton
+            icon={microphoneMuted ? <MicOff size={22} color="#7A5563" /> : <Mic size={22} color="#7A5563" />}
+            label="Micrófono"
+            active={!microphoneMuted}
+            onPress={() => {
+              void toggleMicrophone();
+            }}
+          />
+          <ControlButton
+            icon={speakerOn ? <Volume2 size={22} color="#7A5563" /> : <VolumeX size={22} color="#7A5563" />}
+            label="Altavoz"
+            active={speakerOn}
+            onPress={toggleSpeaker}
+          />
+          <ControlButton
+            icon={<PhoneOff size={22} color="#FFFFFF" />}
+            label="Finalizar"
+            danger
+            onPress={() => {
+              void onEnd('user');
+            }}
+          />
+        </View>
+      </View>
+    );
+  }
+
+  return <ActiveMessagesVideoCall partnerName={partnerName} partnerAvatarUrl={partnerAvatarUrl} onEnd={onEnd} />;
+}
+
+function CallTypePill({ icon, label }: { icon: React.ReactNode; label: string }) {
+  return (
+    <View style={styles.callTypePill}>
+      {icon}
+      <Text style={styles.callTypePillText}>{label}</Text>
+    </View>
+  );
+}
+
+function ControlButton({
+  icon,
+  label,
+  onPress,
+  active = false,
+  danger = false,
+  dark = false,
+}: {
+  icon: React.ReactNode;
+  label: string;
+  onPress: () => void;
+  active?: boolean;
+  danger?: boolean;
+  dark?: boolean;
+}) {
+  const backgroundColor = danger
+    ? '#F06F8F'
+    : dark
+      ? active
+        ? 'rgba(255,255,255,0.2)'
+        : 'rgba(255,255,255,0.12)'
+      : active
+        ? '#FDE4EC'
+        : '#FFFFFF';
+
+  const borderColor = danger
+    ? '#F06F8F'
+    : dark
+      ? 'rgba(255,255,255,0.18)'
+      : '#F1D2DC';
+
+  const labelColor = danger ? '#FFFFFF' : dark ? '#FFFFFF' : '#7A5563';
+
+  return (
+    <Pressable style={[styles.controlButton, { backgroundColor, borderColor }]} onPress={onPress}>
+      <View style={styles.controlButtonIcon}>{icon}</View>
+      <Text style={[styles.controlButtonLabel, { color: labelColor }]}>{label}</Text>
+    </Pressable>
+  );
+}
+
+function VideoControlButton({
+  icon,
+  onPress,
+  accessibilityLabel,
+  active = false,
+  danger = false,
+}: {
+  icon: React.ReactNode;
+  onPress: () => void;
+  accessibilityLabel: string;
+  active?: boolean;
+  danger?: boolean;
+}) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={accessibilityLabel}
+      style={[
+        styles.videoControlButton,
+        danger ? styles.videoControlButtonDanger : active ? styles.videoControlButtonActive : styles.videoControlButtonNeutral,
+      ]}
+      onPress={onPress}
+    >
+      {icon}
+    </Pressable>
+  );
+}
+
+const styles = StyleSheet.create({
+  bannerViewport: {
+    flex: 1,
+    justifyContent: 'flex-start',
+    paddingTop: 54,
+    paddingHorizontal: 14,
+    backgroundColor: 'rgba(28, 18, 24, 0.12)',
+  },
+  bannerCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 24,
+    backgroundColor: '#FFF9FB',
+    borderWidth: 1,
+    borderColor: BORDER,
+    shadowColor: '#B86A84',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.12,
+    shadowRadius: 24,
+    elevation: 9,
+  },
+  bannerTextBox: {
+    flex: 1,
+    gap: 4,
+  },
+  bannerTag: {
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: '#FFF1F5',
+  },
+  bannerTagText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#7A5563',
+  },
+  bannerTitle: {
+    fontSize: 16,
+    fontWeight: '900',
+    color: TEXT_DARK,
+  },
+  bannerSubtitle: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: TEXT_MUTED,
+  },
+  fullScreenCallCard: {
+    flex: 1,
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 28,
+    paddingTop: 54,
+    paddingBottom: 28,
+    backgroundColor: '#FFF8FB',
+  },
+  fullScreenCallTop: {
+    width: '100%',
+    alignItems: 'center',
+  },
+  fullScreenCallCenter: {
+    width: '100%',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+  },
+  callTypePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 999,
+    backgroundColor: '#FFF1F5',
+    borderWidth: 1,
+    borderColor: '#F3D9E2',
+  },
+  callTypePillText: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#7A5563',
+  },
+  fullScreenPartnerName: {
+    fontSize: 30,
+    fontWeight: '900',
+    color: TEXT_DARK,
+    textAlign: 'center',
+  },
+  fullScreenSubtitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: TEXT_MUTED,
+    textAlign: 'center',
+    lineHeight: 23,
+  },
+  fullScreenActionsRow: {
+    width: '100%',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    gap: 14,
+  },
+  fullScreenActionButton: {
+    minWidth: 148,
+    height: 56,
+    borderRadius: 28,
+    paddingHorizontal: 22,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+  },
+  fullScreenRejectButton: {
+    backgroundColor: '#F06F8F',
+  },
+  fullScreenAcceptButton: {
+    backgroundColor: '#64C79A',
+  },
+  fullScreenActionText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  disabledAction: {
+    opacity: 0.55,
+  },
+  fallbackCard: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 28,
+    gap: 14,
+    backgroundColor: '#FFF7FA',
+  },
+  fallbackTitle: {
+    marginTop: 8,
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#2E1F28',
+  },
+  fallbackName: {
+    fontSize: 28,
+    fontWeight: '900',
+    color: '#241D22',
+  },
+  fallbackStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  fallbackStatus: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#8E7A83',
+    textAlign: 'center',
+  },
+  fallbackEndButton: {
+    marginTop: 14,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 22,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: '#F06F8F',
+  },
+  fallbackEndButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '800',
+  },
+  audioCallShell: {
+    flex: 1,
+    paddingHorizontal: 24,
+    paddingTop: 68,
+    paddingBottom: 42,
+    justifyContent: 'space-between',
+    backgroundColor: '#FFF7FA',
+  },
+  audioCallTop: {
+    alignItems: 'center',
+    gap: 8,
+  },
+  audioCallTopRow: {
+    width: '100%',
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  audioCallTopSpacer: {
+    width: 38,
+    height: 38,
+  },
+  audioCallTitle: {
+    fontSize: 20,
+    fontWeight: '900',
+    color: '#2C2027',
+  },
+  audioCallStatus: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#8F7A83',
+  },
+  audioCallCenter: {
+    alignItems: 'center',
+    gap: 14,
+    paddingBottom: 40,
+  },
+  audioPartnerName: {
+    fontSize: 34,
+    fontWeight: '900',
+    color: '#241D22',
+  },
+  audioPartnerHint: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#9C8A92',
+  },
+  audioControlsRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    gap: 14,
+  },
+  controlButton: {
+    flex: 1,
+    minHeight: 86,
+    borderRadius: 26,
+    borderWidth: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 12,
+  },
+  controlButtonIcon: {
+    marginBottom: 8,
+  },
+  controlButtonLabel: {
+    fontSize: 12,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  minimizeButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FFFFFF',
+    borderWidth: 1,
+    borderColor: '#F1D2DC',
+  },
+  videoCallShell: {
+    flex: 1,
+    backgroundColor: '#0F0C12',
+  },
+  videoStage: {
+    flex: 1,
+    position: 'relative',
+    backgroundColor: '#111',
+  },
+  videoSlotMainContainer: {
+    flex: 1,
+    backgroundColor: '#111',
+  },
+  videoSlotMainRtcView: {
+    width: '100%',
+    height: '100%',
+  },
+  videoSlotMainParticipantView: {
+    width: '100%',
+    height: '100%',
+  },
+  videoSlotMainPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: '#111',
+  },
+  videoSlotMainPlaceholderTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  videoSlotMainPlaceholderSubtitle: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  videoStageFill: {
+    width: '100%',
+    height: '100%',
+  },
+  videoWaitingState: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 14,
+    backgroundColor: 'rgba(15,12,18,0.42)',
+  },
+  videoWaitingTitle: {
+    fontSize: 26,
+    fontWeight: '900',
+    color: '#FFFFFF',
+  },
+  videoWaitingText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.78)',
+  },
+  videoFallbackStage: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: '#111',
+  },
+  videoFallbackTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  videoFallbackSubtitle: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  videoTopInfo: {
+    position: 'absolute',
+    left: 24,
+    right: 24,
+    alignItems: 'center',
+    gap: 6,
+  },
+  videoMinimizeButton: {
+    position: 'absolute',
+    right: 0,
+    top: -2,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.16)',
+  },
+  videoTitle: {
+    fontSize: 18,
+    fontWeight: '900',
+    color: '#FFFFFF',
+  },
+  videoStatus: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: 'rgba(255,255,255,0.82)',
+  },
+  pipPosition: {
+    position: 'absolute',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.22,
+    shadowRadius: 16,
+    zIndex: 100,
+    elevation: 100,
+  },
+  pipCard: {
+    width: '100%',
+    height: '100%',
+    borderRadius: 24,
+    overflow: 'hidden',
+    backgroundColor: 'rgba(18,16,24,0.84)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  pipVideoHost: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 24,
+    overflow: 'hidden',
+  },
+  videoSlotPipRtcView: {
+    ...StyleSheet.absoluteFillObject,
+    width: '100%',
+    height: '100%',
+    borderRadius: 24,
+  },
+  videoSlotPipParticipantView: {
+    ...StyleSheet.absoluteFillObject,
+    width: '100%',
+    height: '100%',
+    borderRadius: 24,
+    overflow: 'hidden',
+  },
+  videoSlotPipPlaceholder: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(18,16,24,0.84)',
+  },
+  videoSlotPipPlaceholderText: {
+    marginTop: 6,
+    color: '#FFFFFF',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  pipOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'flex-end',
+    alignItems: 'flex-start',
+    paddingLeft: 10,
+    paddingBottom: 10,
+    zIndex: 5,
+    elevation: 5,
+  },
+  pipLabelChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: 'rgba(15,12,18,0.64)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  localPreviewBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  videoPartnerInfo: {
+    position: 'absolute',
+    left: 24,
+    right: 24,
+    alignItems: 'center',
+  },
+  videoPartnerName: {
+    color: '#FFFFFF',
+    fontSize: 20,
+    fontWeight: '900',
+    textShadowColor: 'rgba(0,0,0,0.28)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 8,
+  },
+  videoControlsDock: {
+    position: 'absolute',
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 30,
+    backgroundColor: 'rgba(16, 12, 20, 0.42)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.2,
+    shadowRadius: 24,
+    elevation: 14,
+  },
+  videoControlButton: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+  },
+  videoControlButtonNeutral: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  videoControlButtonActive: {
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  videoControlButtonDanger: {
+    backgroundColor: 'rgba(240,111,143,0.96)',
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  avatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#FDE4EC',
+    borderWidth: 1,
+    borderColor: '#F2D5DE',
+  },
+  avatarFallbackText: {
+    color: '#E28FA6',
+    fontWeight: '900',
+  },
+});
+
+
+==============================
+FILE: lib\streamVideo.ts
+==============================
+
+import { StreamVideoClient } from '@stream-io/video-react-native-sdk';
+import { getSafeUser, supabase, supabaseUrl } from './supabase';
+
+let cachedStreamClient: StreamVideoClient | null = null;
+let cachedUserId: string | null = null;
+const MESSAGES_CALL_DEBUG_URL = 'http://192.168.100.35:7777/event';
+const MESSAGES_CALL_DEBUG_SESSION = 'mensajes-call-startup';
+
+type StreamTokenResponse = {
+  apiKey?: string;
+  token?: string;
+  userId?: string;
+};
+
+type StreamPrepareUsersResponse = {
+  usersReady?: boolean;
+};
+
+type CallSetupError = Error & {
+  userMessage?: string;
+};
+
+export function getStreamApiKey(): string {
+  const streamApiKey = process.env.EXPO_PUBLIC_STREAM_API_KEY;
+
+  if (!streamApiKey?.trim()) {
+    throw new Error('Missing EXPO_PUBLIC_STREAM_API_KEY');
+  }
+
+  return streamApiKey.trim();
+}
+
+const reportMessagesCallDebug = (hypothesisId: string, location: string, msg: string, data?: Record<string, unknown>) => {
+  void fetch(MESSAGES_CALL_DEBUG_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId: MESSAGES_CALL_DEBUG_SESSION,
+      runId: 'pre-fix',
+      hypothesisId,
+      location,
+      msg,
+      data,
+      ts: Date.now(),
+    }),
+  }).catch(() => {});
+};
+
+const createCallSetupError = (technicalMessage: string, userMessage: string) => {
+  const error = new Error(technicalMessage) as CallSetupError;
+  error.userMessage = userMessage;
+  return error;
+};
+
+const readFunctionErrorBody = async (context: unknown) => {
+  if (!context || typeof context !== 'object') {
+    return '';
+  }
+
+  const maybeResponse = context as {
+    text?: () => Promise<string>;
+    clone?: () => { text?: () => Promise<string> };
+  };
+
+  try {
+    if (typeof maybeResponse.clone === 'function') {
+      const cloned = maybeResponse.clone();
+      if (cloned && typeof cloned.text === 'function') {
+        return (await cloned.text()).trim();
+      }
+    }
+
+    if (typeof maybeResponse.text === 'function') {
+      return (await maybeResponse.text()).trim();
+    }
+  } catch (error) {
+    console.warn('[StreamToken] Could not read function error response body:', error);
+  }
+
+  return '';
+};
+
+const mapStreamTokenErrorToUserMessage = (technicalMessage: string) => {
+  const normalized = technicalMessage.toLowerCase();
+
+  if (
+    normalized.includes('missing stream server configuration') ||
+    normalized.includes('missing stream_api_key') ||
+    normalized.includes('missing stream_api_secret')
+  ) {
+    return 'No se pudo configurar el servicio de llamadas.';
+  }
+
+  if (
+    normalized.includes('unauthorized') ||
+    normalized.includes('missing authorization header') ||
+    normalized.includes('jwt') ||
+    normalized.includes('session')
+  ) {
+    return 'Tu sesión no está disponible. Inténtalo de nuevo.';
+  }
+
+  if (
+    normalized.includes('token generation failed') ||
+    normalized.includes('stream token failed') ||
+    normalized.includes('function runtime error')
+  ) {
+    return 'No se pudo conectar al servicio de llamadas.';
+  }
+
+  return 'No se pudo iniciar la llamada. Inténtalo de nuevo.';
+};
+
+const mapStreamPrepareUsersErrorToUserMessage = (technicalMessage: string) => {
+  const normalized = technicalMessage.toLowerCase();
+
+  if (
+    normalized.includes('forbidden') ||
+    normalized.includes('unauthorized') ||
+    normalized.includes('session') ||
+    normalized.includes('jwt') ||
+    normalized.includes('invalid call request') ||
+    normalized.includes('missing stream server configuration') ||
+    normalized.includes('stream call creation failed') ||
+    normalized.includes('function runtime error')
+  ) {
+    return 'No se pudo preparar la llamada. Inténtalo de nuevo.';
+  }
+
+  return 'No se pudo preparar la llamada. Inténtalo de nuevo.';
+};
+
+export const prepareMessagesStreamUsers = async ({
+  callId,
+  callType,
+  recipientId,
+  recipientName,
+  recipientImage,
+}: {
+  callId: string;
+  callType: 'audio' | 'video';
+  recipientId: string;
+  recipientName?: string;
+  recipientImage?: string | null;
+}) => {
+  console.log('[MessagesCall] preparing server call', {
+    hasCallId: Boolean(callId),
+    callType,
+    hasRecipientId: Boolean(recipientId),
+    hasRecipientName: Boolean(recipientName),
+  });
+
+  const { data, error } = await supabase.functions.invoke('stream-create-call', {
+    body: {
+      callId,
+      callType,
+      recipientId,
+      recipientName,
+      recipientImage,
+    },
+  });
+
+  if (error) {
+    let safeFunctionBody = '';
+
+    try {
+      if ((error as any)?.context instanceof Response) {
+        safeFunctionBody = (await (error as any).context.text()).trim();
+      } else {
+        safeFunctionBody = await readFunctionErrorBody((error as any)?.context);
+      }
+    } catch {
+      safeFunctionBody = '';
+    }
+
+    const technicalMessage = `stream-create-call failed: ${(error as any)?.message ?? String(error)}${
+      safeFunctionBody ? ` | ${safeFunctionBody}` : ''
+    }`;
+
+    console.error('[MessagesCall] stream-create-call failed', {
+      message: (error as any)?.message ?? String(error),
+      response: safeFunctionBody || null,
+    });
+
+    throw createCallSetupError(technicalMessage, mapStreamPrepareUsersErrorToUserMessage(technicalMessage));
+  }
+
+  const payload = (data ?? {}) as StreamPrepareUsersResponse;
+
+  console.log('[MessagesCall] stream-create-call response', {
+    hasData: Boolean(data),
+    created: (data as any)?.created,
+    usersReady: payload.usersReady,
+    callIdMatches: (data as any)?.callId === callId,
+  });
+
+  if (payload.usersReady !== true) {
+    throw createCallSetupError(
+      'Stream prepare users response missing usersReady',
+      'No se pudo preparar la llamada.'
+    );
+  }
+
+  return payload;
+};
+
+export const getStreamVideoClient = async () => {
+  const user = await getSafeUser();
+  let streamApiKey: string;
+
+  try {
+    streamApiKey = getStreamApiKey();
+  } catch (error) {
+    throw createCallSetupError(
+      error instanceof Error ? error.message : 'Missing EXPO_PUBLIC_STREAM_API_KEY',
+      'No se pudo configurar el servicio de llamadas.'
+    );
+  }
+
+  // #region debug-point C:get-stream-user
+  reportMessagesCallDebug('C', 'streamVideo.ts:getStreamVideoClient:user', '[DEBUG] stage: fetch-stream-user', {
+    hasUser: Boolean(user),
+    cachedForSameUser: Boolean(cachedStreamClient && cachedUserId === user?.id),
+  });
+  // #endregion
+
+  if (!user) {
+    // #region debug-point C:get-stream-user-missing
+    reportMessagesCallDebug('C', 'streamVideo.ts:getStreamVideoClient:missing-user', '[DEBUG] startup failed', {
+      stage: 'fetch-stream-user',
+      message: 'missing user',
+    });
+    // #endregion
+    console.log('getStreamVideoClient user error: missing user');
+    return null;
+  }
+
+  if (cachedStreamClient && cachedUserId === user.id) {
+    // #region debug-point C:get-stream-client-cache-hit
+    reportMessagesCallDebug('C', 'streamVideo.ts:getStreamVideoClient:cache-hit', '[DEBUG] stage: connect-stream-client cache-hit', {
+      userId: user.id,
+    });
+    // #endregion
+    return cachedStreamClient;
+  }
+
+  const { data: profile, error: profileError } = await supabase
+    .from('profiles')
+    .select('id, name, avatar_url, photo_url')
+    .eq('id', user.id)
+    .maybeSingle();
+
+  if (profileError) {
+    console.log('getStreamVideoClient profile error:', profileError);
+  }
+
+  // #region debug-point C:fetch-stream-token
+  console.log('[MessagesCall] requesting stream token');
+  reportMessagesCallDebug('C', 'streamVideo.ts:getStreamVideoClient:invoke-stream-token', '[DEBUG] stage: fetch-stream-token', {
+    hasProfile: Boolean(profile),
+    userId: user.id,
+  });
+  // #endregion
+  console.log('[StreamToken] invoking function', {
+    functionName: 'stream-token',
+    supabaseProjectRef: new URL(String(supabaseUrl)).hostname.split('.')[0],
+  });
+  const { data, error } = await supabase.functions.invoke('stream-token', {
+    body: {},
+  });
+
+  if (error) {
+    const safeResponseText = await readFunctionErrorBody((error as any)?.context);
+    const technicalMessage = `Stream token failed: ${(error as any)?.message ?? String(error)}${
+      safeResponseText ? ` | ${safeResponseText}` : ''
+    }`;
+    const userMessage = mapStreamTokenErrorToUserMessage(technicalMessage);
+
+    // #region debug-point C:fetch-stream-token-failed
+    reportMessagesCallDebug('C', 'streamVideo.ts:getStreamVideoClient:invoke-stream-token-failed', '[DEBUG] startup failed', {
+      stage: 'fetch-stream-token',
+      message: technicalMessage,
+      name: (error as any)?.name ?? null,
+      hasResponseBody: Boolean(safeResponseText),
+    });
+    // #endregion
+    console.log('[StreamToken] Edge Function invoke failed', {
+      name: (error as any)?.name ?? null,
+      message: (error as any)?.message ?? String(error),
+      safeResponseText: safeResponseText || null,
+    });
+    throw createCallSetupError(technicalMessage, userMessage);
+  }
+
+  const payload = (data ?? {}) as StreamTokenResponse;
+
+  if (!payload.apiKey || !payload.token || !payload.userId) {
+    // #region debug-point C:fetch-stream-token-missing-fields
+    reportMessagesCallDebug('C', 'streamVideo.ts:getStreamVideoClient:missing-token-fields', '[DEBUG] startup failed', {
+      stage: 'fetch-stream-token',
+      hasApiKey: Boolean(payload.apiKey),
+      hasToken: Boolean(payload.token),
+      streamUserId: payload.userId ?? null,
+    });
+    // #endregion
+    throw createCallSetupError(
+      'Stream token response missing apiKey/token',
+      'No se pudo conectar al servicio de llamadas.'
+    );
+  }
+
+  // #region debug-point C:fetch-stream-token-success
+  console.log('[MessagesCall] stream token result', {
+    hasToken: Boolean(payload.token),
+    hasStreamUserId: Boolean(payload.userId),
+  });
+  reportMessagesCallDebug('C', 'streamVideo.ts:getStreamVideoClient:stream-token-success', '[DEBUG] stage: fetch-stream-token success', {
+    hasApiKey: Boolean(payload.apiKey),
+    hasToken: Boolean(payload.token),
+    streamUserId: payload.userId ?? null,
+  });
+  // #endregion
+
+  const streamUser = {
+    id: user.id,
+    name: profile?.name || 'Usfully',
+    image: profile?.avatar_url || profile?.photo_url || undefined,
+  };
+
+  console.log('[StreamConfig] API key availability', {
+    hasStreamApiKey: Boolean(process.env.EXPO_PUBLIC_STREAM_API_KEY?.trim()),
+  });
+
+  cachedStreamClient = StreamVideoClient.getOrCreateInstance({
+    apiKey: streamApiKey,
+    user: streamUser,
+    token: payload.token,
+  });
+
+  // #region debug-point C:connect-stream-client-success
+  reportMessagesCallDebug('C', 'streamVideo.ts:getStreamVideoClient:client-created', '[DEBUG] stage: connect-stream-client success', {
+    userId: user.id,
+    hasImage: Boolean(streamUser.image),
+    hasName: Boolean(streamUser.name),
+  });
+  // #endregion
+
+  cachedUserId = user.id;
+
+  return cachedStreamClient;
+};
+
+export const resetStreamVideoClient = async () => {
+  try {
+    if (cachedStreamClient) {
+      await cachedStreamClient.disconnectUser?.();
+    }
+  } catch (error) {
+    console.log('disconnect stream client ignored:', error);
+  } finally {
+    cachedStreamClient = null;
+    cachedUserId = null;
+  }
+};
+
+
+==============================
+FILE: lib\useStreamVideoClient.ts
+==============================
+
+import React from 'react';
+import { StreamVideoClient, type User } from '@stream-io/video-react-native-sdk';
+import { getSafeUser, isInvalidRefreshTokenError, supabase } from './supabase';
+import { getStreamApiKey } from './streamVideo';
+
+type StreamTokenResponse = {
+  token: string;
+  apiKey: string;
+  userId?: string;
+};
+
+type ProfileRow = {
+  id: string;
+  name?: string | null;
+  avatar_url?: string | null;
+  photo_url?: string | null;
+} | null;
+
+const readFunctionErrorBody = async (context: unknown) => {
+  if (!context || typeof context !== 'object') {
+    return '';
+  }
+
+  const maybeResponse = context as {
+    text?: () => Promise<string>;
+    clone?: () => { text?: () => Promise<string> };
+  };
+
+  try {
+    if (typeof maybeResponse.clone === 'function') {
+      const cloned = maybeResponse.clone();
+      if (cloned && typeof cloned.text === 'function') {
+        return (await cloned.text()).trim();
+      }
+    }
+
+    if (typeof maybeResponse.text === 'function') {
+      return (await maybeResponse.text()).trim();
+    }
+  } catch (error) {
+    console.warn('[StreamToken] Could not read function error response body:', error);
+  }
+
+  return '';
+};
+
+export function useStreamVideoClientForUsfully() {
+  const [client, setClient] = React.useState<StreamVideoClient | null>(null);
+  const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<unknown>(null);
+
+  React.useEffect(() => {
+    let mounted = true;
+
+    const setup = async () => {
+      try {
+        const streamApiKey = getStreamApiKey();
+
+        const user = await getSafeUser();
+        if (!user) {
+          if (mounted) setClient(null);
+          return;
+        }
+
+        const { data: profileData, error: profileError } = await supabase
+          .from('profiles')
+          .select('id, name, avatar_url, photo_url')
+          .eq('id', user.id)
+          .maybeSingle();
+
+        if (profileError) {
+          console.log('stream client profile fetch error:', profileError);
+        }
+
+        const profile = (profileData as ProfileRow) ?? null;
+
+        const { data: tokenData, error: tokenError } = await supabase.functions.invoke('stream-token', {
+          body: {},
+        });
+        if (tokenError) {
+          const safeResponseText = await readFunctionErrorBody((tokenError as any)?.context);
+
+          console.log('[StreamToken] Edge Function invoke failed', {
+            name: (tokenError as any)?.name ?? null,
+            message: (tokenError as any)?.message ?? String(tokenError),
+            safeResponseText: safeResponseText || null,
+          });
+
+          throw new Error(
+            `Stream token failed: ${(tokenError as any)?.message ?? String(tokenError)}${
+              safeResponseText ? ` | ${safeResponseText}` : ''
+            }`
+          );
+        }
+
+        const payload = tokenData as StreamTokenResponse;
+        const token = payload?.token;
+        const userId = payload?.userId;
+
+        if (!payload?.apiKey || !token || !userId) {
+          throw new Error('Missing Stream token payload.');
+        }
+
+        const streamUser: User = {
+          id: user.id,
+          name: profile?.name || 'Usfully',
+          image: profile?.avatar_url || profile?.photo_url || undefined,
+        };
+
+        console.log('[StreamConfig] API key availability', {
+          hasStreamApiKey: Boolean(process.env.EXPO_PUBLIC_STREAM_API_KEY?.trim()),
+        });
+
+        const streamClient = StreamVideoClient.getOrCreateInstance({
+          apiKey: streamApiKey,
+          user: streamUser,
+          token,
+        });
+
+        if (mounted) setClient(streamClient);
+      } catch (err) {
+        console.log('stream client setup error:', err);
+        if (isInvalidRefreshTokenError(err)) {
+          if (mounted) setClient(null);
+          return;
+        }
+        if (mounted) setError(err);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    };
+
+    setup();
+
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  return { client, loading, error };
+}
+
+
+==============================
+FILE: package.json
+==============================
+
+{
+  "name": "usfully",
+  "main": "expo-router/entry",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "ios": "expo run:ios",
+    "web": "expo start --web",
+    "generate:brushes": "node scripts/generate-callig-texture.js"
+  },
+  "dependencies": {
+    "@config-plugins/react-native-webrtc": "^15.0.1",
+    "@expo-google-fonts/dancing-script": "^0.4.2",
+    "@expo-google-fonts/great-vibes": "^0.4.1",
+    "@expo-google-fonts/montserrat": "^0.4.2",
+    "@expo-google-fonts/playfair-display": "^0.4.2",
+    "@expo-google-fonts/special-elite": "^0.4.1",
+    "@expo/vector-icons": "^15.0.3",
+    "@react-native-async-storage/async-storage": "2.2.0",
+    "@react-native-community/netinfo": "11.4.1",
+    "@react-native-community/slider": "5.0.1",
+    "@react-navigation/native": "^7.1.8",
+    "@shopify/react-native-skia": "2.2.12",
+    "@stream-io/react-native-webrtc": "^137.2.0",
+    "@stream-io/video-react-native-sdk": "^1.37.0",
+    "@supabase/supabase-js": "^2.105.4",
+    "base64-arraybuffer": "^1.0.2",
+    "expo": "~54.0.33",
+    "expo-battery": "~10.0.8",
+    "expo-build-properties": "~1.0.10",
+    "expo-camera": "~17.0.10",
+    "expo-constants": "~18.0.13",
+    "expo-dev-client": "~6.0.21",
+    "expo-file-system": "~19.0.23",
+    "expo-font": "~14.0.11",
+    "expo-image-picker": "~17.0.11",
+    "expo-linking": "~8.0.11",
+    "expo-location": "~19.0.8",
+    "expo-media-library": "~18.2.1",
+    "expo-notifications": "~0.32.17",
+    "expo-router": "~6.0.24",
+    "expo-splash-screen": "~31.0.13",
+    "expo-status-bar": "~3.0.9",
+    "expo-video": "~3.0.16",
+    "expo-video-thumbnails": "~10.0.8",
+    "expo-web-browser": "~15.0.10",
+    "lucide-react-native": "^1.14.0",
+    "perfect-freehand": "^1.2.3",
+    "react": "19.1.0",
+    "react-dom": "19.1.0",
+    "react-native": "0.81.5",
+    "react-native-gesture-handler": "~2.28.0",
+    "react-native-maps": "1.20.1",
+    "react-native-reanimated": "~4.1.1",
+    "react-native-safe-area-context": "~5.6.0",
+    "react-native-screens": "~4.16.0",
+    "react-native-svg": "15.12.1",
+    "react-native-url-polyfill": "^3.0.0",
+    "react-native-view-shot": "4.0.3",
+    "react-native-web": "~0.21.0",
+    "react-native-worklets": "0.5.1"
+  },
+  "devDependencies": {
+    "@types/react": "~19.1.0",
+    "pngjs": "^7.0.0",
+    "react-test-renderer": "19.1.0",
+    "typescript": "~5.9.2"
+  },
+  "private": true
+}
+
+
+==============================
+SEARCH RESULTS
+==============================
+
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:15:   ParticipantView,
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:17:   hasVideo,
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:22: import { RTCView, type MediaStream } from '@stream-io/react-native-webrtc';
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:23: import { Camera, CameraOff, Mic, MicOff, PhoneOff, RefreshCw, UserRound } from 'lucide-react-native';
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:26: type ActiveMessagesVideoCallProps = {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:32: type VideoSlotParticipant = React.ComponentProps<typeof ParticipantView>['participant'];
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:35:   participant: VideoSlotParticipant | null;
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:38:   slot: 'main' | 'pip';
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:68:   participant: VideoSlotParticipant | null;
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:82:   const remoteHasPublishedVideo = hasVideo(participant);
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:83:   const remoteHasVideoStream = Boolean(participant.videoStream);
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:87:   if (remoteHasPublishedVideo && remoteHasVideoStream && remoteIncomingVideoEnabled && !remoteHasPausedVideo) return 'on';
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:95:   mainViewMode,
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:98:   participant: VideoSlotParticipant | null;
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:99:   slot: 'main' | 'pip';
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:101:   mainViewMode: 'remote' | 'local';
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:104:   return [participant?.userId ?? 'empty', slot, isLocal ? 'local' : 'remote', mainViewMode, cameraState].join('-');
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:107: function VideoSlot({
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:118:   participant: VideoSlotParticipant | null;
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:121:   slot: 'main' | 'pip';
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:128:   const isPip = slot === 'pip';
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:133:     mainViewMode: isPip ? 'pip' as 'remote' | 'local' : 'remote',
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:137:   console.log('[VideoSlot] state', {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:148:       if (isPip) {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:150:           return <View style={styles.pipEmptyState} />;
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:154:           <View style={styles.pipPlaceholder}>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:164:             <Text style={styles.mainPlaceholderTitle}>Esperando a tu pareja</Text>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:185:   }, [cameraState, isLocal, isPip, label, partnerAvatarUrl]);
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:190:     content = <RTCView streamURL={streamURL} mirror objectFit="cover" zOrder={0} style={isPip ? styles.pipRtcView : styles.mainRtcView} />;
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:193:       <ParticipantView
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:195:         style={isPip ? styles.pipParticipantView : styles.mainParticipantView}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:205:   } else if (isPip) {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:206:     content = <View style={styles.pipEmptyState} />;
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:210:         {isLocal ? <CameraOff size={44} color="#FFFFFF" /> : <UserRound size={52} color="#FFFFFF" />}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:211:         <Text style={styles.mainPlaceholderTitle}>{isLocal ? 'Tu c�mara est� apagada' : 'Esperando a tu pareja'}</Text>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:218:       <View style={isPip ? styles.pipPlaceholder : styles.mainPlaceholder}>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:220:         {!isPip ? <Text style={styles.mainPlaceholderSubtitle}>Conectando c�mara...</Text> : null}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:227:       <View style={isPip ? styles.pipPlaceholder : styles.mainPlaceholder}>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:228:         <CameraOff size={isPip ? 24 : 44} color="#FFFFFF" />
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:229:         {!isPip ? <Text style={styles.mainPlaceholderTitle}>Tu c�mara est� apagada</Text> : null}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:236:       <View style={isPip ? styles.pipPlaceholder : styles.mainPlaceholder}>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:238:         {!isPip ? <Text style={styles.mainPlaceholderSubtitle}>Conectando c�mara...</Text> : null}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:243:   if (isPip) {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:245:       <Pressable style={styles.pipPosition} onPress={onPress}>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:246:         <View style={styles.pipCard}>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:247:           <View key={rendererKey} collapsable={false} style={styles.pipVideoHost}>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:250:           <Animated.View pointerEvents="none" style={[styles.pipLabelLayer, overlayStyle]}>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:251:             <View style={styles.pipLabelChip}>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:252:               <Text style={styles.pipLabelText} numberOfLines={1}>
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:297: export function ActiveMessagesVideoCall({ partnerName, partnerAvatarUrl, onEnd }: ActiveMessagesVideoCallProps) {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:304:     useLocalParticipant,
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:305:     useRemoteParticipants,
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:311:   const localParticipant = useLocalParticipant();
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:312:   const remoteParticipants = useRemoteParticipants();
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:321:   const [mainViewMode, setMainViewMode] = React.useState<'remote' | 'local'>('remote');
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:331:   const hasLocalPublishedVideo = localParticipant ? hasVideo(localParticipant) : false;
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:332:   const pipWidth = Math.min(Math.max(screenWidth * 0.3, 112), 132);
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:333:   const pipHeight = Math.round(pipWidth * 1.46);
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:349:     setMainViewMode('remote');
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:432:     mainViewMode === 'remote'
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:443:             mainViewMode,
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:457:             mainViewMode,
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:462:   const pipSlot: VideoStageSlot =
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:463:     mainViewMode === 'remote'
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:468:           slot: 'pip',
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:472:             slot: 'pip',
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:474:             mainViewMode,
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:482:           slot: 'pip',
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:486:             slot: 'pip',
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:488:             mainViewMode,
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:494:     mainViewMode,
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:498:     pipIsLocal: pipSlot.isLocal,
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:546:     setMainViewMode((previous) => (previous === 'remote' ? 'local' : 'remote'));
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:552:         <VideoSlot
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:564:         <VideoSlot
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:565:           participant={pipSlot.participant}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:566:           isLocal={pipSlot.isLocal}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:567:           label={pipSlot.label}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:568:           slot={pipSlot.slot}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:569:           cameraState={pipSlot.cameraState}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:570:           streamURL={pipSlot.isLocal ? localStreamUrl : null}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:628:             icon={cameraMuted ? <CameraOff size={20} color="#FFFFFF" /> : <Camera size={20} color="#FFFFFF" />}
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:670:   mainRtcView: {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:674:   mainParticipantView: {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:697:   pipPosition: {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:710:   pipCard: {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:719:   pipVideoHost: {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:724:   pipRtcView: {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:730:   pipParticipantView: {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:737:   pipPlaceholder: {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:743:   pipEmptyState: {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:747:   pipLabelLayer: {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:756:   pipLabelChip: {
+C:\dev\usfully\components\calls\ActiveMessagesVideoCall.tsx:764:   pipLabelText: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:22: import { ActiveMessagesVideoCall } from './ActiveMessagesVideoCall';
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:402:   const { useCallCallingState, useMicrophoneState, useRemoteParticipants } = useCallStateHooks();
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:405:   const remoteParticipants = useRemoteParticipants();
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:506:             {remoteParticipants.length > 0 ? 'En llamada' : 'Esperando a tu pareja'}
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:538:   return <ActiveMessagesVideoCall partnerName={partnerName} partnerAvatarUrl={partnerAvatarUrl} onEnd={onEnd} />;
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:884:   videoSlotMainContainer: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:888:   videoSlotMainRtcView: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:892:   videoSlotMainParticipantView: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:896:   videoSlotMainPlaceholder: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:903:   videoSlotMainPlaceholderTitle: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:908:   videoSlotMainPlaceholderSubtitle: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:985:   pipPosition: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:994:   pipCard: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:1003:   pipVideoHost: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:1008:   videoSlotPipRtcView: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:1014:   videoSlotPipParticipantView: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:1021:   videoSlotPipPlaceholder: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:1028:   videoSlotPipPlaceholderText: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:1034:   pipOverlay: {
+C:\dev\usfully\components\calls\GlobalRingingCallHost.tsx:1043:   pipLabelChip: {
+C:\dev\usfully\components\calls\MessagesCallOverlay.tsx:7:   ParticipantView,
+C:\dev\usfully\components\calls\MessagesCallOverlay.tsx:17:   CameraOff,
+C:\dev\usfully\components\calls\MessagesCallOverlay.tsx:623:             {remoteParticipants.length > 0 ? 'En llamada' : 'Esperando a tu pareja'}
+C:\dev\usfully\components\calls\MessagesCallOverlay.tsx:657:           <ParticipantView participant={remoteParticipant} style={styles.videoStageFill} />
+C:\dev\usfully\components\calls\MessagesCallOverlay.tsx:661:             <Text style={styles.videoFallbackTitle}>Esperando a tu pareja</Text>
+C:\dev\usfully\components\calls\MessagesCallOverlay.tsx:684:             <ParticipantView participant={localParticipant} style={styles.videoStageFill} />
+C:\dev\usfully\components\calls\MessagesCallOverlay.tsx:687:               <CameraOff size={24} color="#FFFFFF" />
+C:\dev\usfully\components\calls\MessagesCallOverlay.tsx:709:           icon={cameraMuted ? <CameraOff size={22} color="#FFFFFF" /> : <Camera size={22} color="#FFFFFF" />}

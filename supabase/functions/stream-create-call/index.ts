@@ -19,6 +19,8 @@ const jsonResponse = (body: Record<string, unknown>, status: number) =>
   });
 
 type StreamCreateCallRequest = {
+  callId?: string;
+  callType?: 'audio' | 'video';
   recipientId?: string;
   recipientName?: string;
   recipientImage?: string | null;
@@ -62,10 +64,14 @@ serve(async (req) => {
       body = null;
     }
 
+    const callId = normalizeOptionalText(body?.callId);
+    const callType = body?.callType;
     const recipientId = normalizeOptionalText(body?.recipientId);
 
     console.log('[stream-create-call] request', {
       hasAuthorization: Boolean(authHeader),
+      hasCallId: Boolean(callId),
+      callType: callType ?? null,
       hasRecipientId: Boolean(recipientId),
     });
 
@@ -75,14 +81,14 @@ serve(async (req) => {
     });
 
     if (!supabaseUrl || !supabaseAnonKey || !streamApiKey || !streamApiSecret) {
-      return jsonResponse({ error: 'Stream call creation failed' }, 500);
+      return jsonResponse({ error: 'Missing Stream server configuration' }, 500);
     }
 
     if (!authHeader) {
       return jsonResponse({ error: 'Unauthorized' }, 401);
     }
 
-    if (!recipientId) {
+    if (!callId || (callType !== 'audio' && callType !== 'video') || !recipientId) {
       return jsonResponse({ error: 'Invalid call request' }, 400);
     }
 
@@ -109,7 +115,7 @@ serve(async (req) => {
     ]);
 
     if (profileError || coupleError) {
-      return jsonResponse({ error: 'Stream call creation failed' }, 500);
+      return jsonResponse({ error: 'Couple validation failed' }, 500);
     }
 
     const callerProfile = (Array.isArray(profileData) ? profileData[0] : profileData) as CallerProfile | null;
@@ -161,12 +167,12 @@ serve(async (req) => {
       console.log('[stream-create-call] create failed', {
         message: error instanceof Error ? error.message : String(error),
       });
-      return jsonResponse({ error: 'Stream call creation failed' }, 500);
+      return jsonResponse({ error: 'Stream user preparation failed' }, 500);
     }
   } catch (error) {
     console.log('[stream-create-call] unexpected error', {
       message: error instanceof Error ? error.message : String(error),
     });
-    return jsonResponse({ error: 'Stream call creation failed' }, 500);
+    return jsonResponse({ error: 'Unexpected function error' }, 500);
   }
 });

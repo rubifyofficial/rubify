@@ -10,7 +10,6 @@ import {
 } from 'react-native';
 import {
   CallingState,
-  ParticipantView,
   RingingCallContent,
   StreamCall,
   callManager,
@@ -19,7 +18,8 @@ import {
   useCallStateHooks,
   type Call,
 } from '@stream-io/video-react-native-sdk';
-import { ChevronDown, Mic, MicOff, Phone, PhoneOff, Video, Camera, CameraOff, RefreshCw, Volume2, VolumeX, UserRound } from 'lucide-react-native';
+import { ChevronDown, Mic, MicOff, Phone, PhoneOff, Video, Volume2, VolumeX } from 'lucide-react-native';
+import { ActiveMessagesVideoCall } from './ActiveMessagesVideoCall';
 
 export type MessagesCallKind = 'audio' | 'video';
 export type MessagesCallRole = 'caller' | 'recipient';
@@ -119,6 +119,11 @@ function CallStateObserver({
   const call = useCall();
   const { useCallCallingState } = useCallStateHooks();
   const callingState = useCallCallingState();
+  const lastEmittedStateRef = React.useRef<string | null>(null);
+  const callId = call?.cid ?? null;
+  const isCreatedByMe = Boolean(call?.isCreatedByMe);
+  const callRecordId = callRecord?.id ?? null;
+  const callRecordStatus = callRecord?.status ?? null;
 
   React.useEffect(() => {
     if (!call) return;
@@ -140,8 +145,32 @@ function CallStateObserver({
   }, [call, onRecordReady]);
 
   React.useEffect(() => {
+    console.log('[GlobalRinging] effect evaluation', {
+      callId,
+      callingState,
+      isCreatedByMe,
+      lastEmission: lastEmittedStateRef.current,
+    });
+
+    if (!callId) {
+      return;
+    }
+
+    const emissionKey = `${callId}:${callingState}:${role}:${isCreatedByMe}:${callRecordId ?? 'none'}:${callRecordStatus ?? 'none'}`;
+
+    if (lastEmittedStateRef.current === emissionKey) {
+      console.log('[GlobalRinging] skipping duplicate state change', {
+        emissionKey,
+      });
+      return;
+    }
+
+    lastEmittedStateRef.current = emissionKey;
+    console.log('[GlobalRinging] emitting state change', {
+      emissionKey,
+    });
     onCallingStateChanged(callingState, role, callRecord);
-  }, [callRecord, callingState, onCallingStateChanged, role]);
+  }, [callId, callRecord, callRecordId, callRecordStatus, callingState, isCreatedByMe, onCallingStateChanged, role]);
 
   return null;
 }
@@ -189,7 +218,7 @@ export function GlobalRingingCallHost({
       ringingCallCount: ringingCalls.length,
       activeCallId: selectedCall?.cid ?? null,
     });
-  }, [ringingCalls.length, selectedCall]);
+  }, [ringingCalls.length, selectedCall?.cid]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -369,24 +398,15 @@ function UsfullyIncomingCall() {
 
 function UsfullyActiveCallContent() {
   const call = useCall();
-  const { currentUserId, partnerName, partnerAvatarUrl, callKind, onEnd } = useHostContext();
-  const { useCallCallingState, useMicrophoneState, useCameraState, useParticipants } = useCallStateHooks();
+  const { partnerName, partnerAvatarUrl, callKind, onEnd } = useHostContext();
+  const { useCallCallingState, useMicrophoneState, useRemoteParticipants } = useCallStateHooks();
   const callingState = useCallCallingState();
   const { microphone, optimisticIsMute: microphoneMuted } = useMicrophoneState();
-  const { camera, optimisticIsMute: cameraMuted } = useCameraState();
-  const participants = useParticipants();
+  const remoteParticipants = useRemoteParticipants();
 
   const [speakerOn, setSpeakerOn] = React.useState(callKind === 'video');
   const [connectedAt, setConnectedAt] = React.useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
-
-  const remoteParticipants = participants.filter(
-    (participant) => String((participant as any)?.userId || (participant as any)?.user?.id || '') !== String(currentUserId ?? '')
-  );
-  const remoteParticipant = remoteParticipants[0];
-  const localParticipant =
-    participants.find((participant) => String((participant as any)?.userId || (participant as any)?.user?.id || '') === String(currentUserId ?? '')) ||
-    participants.find((participant) => participant?.isLocalParticipant);
 
   React.useEffect(() => {
     callManager.start({
@@ -446,26 +466,6 @@ function UsfullyActiveCallContent() {
       });
     }
   }, [microphone]);
-
-  const toggleCamera = React.useCallback(async () => {
-    try {
-      await camera.toggle();
-    } catch (error) {
-      console.log('[GlobalRinging] camera toggle error', {
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }, [camera]);
-
-  const flipCamera = React.useCallback(async () => {
-    try {
-      await camera.flip();
-    } catch (error) {
-      console.log('[GlobalRinging] camera flip error', {
-        message: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }, [camera]);
 
   if (!call || callingState !== CallingState.JOINED) {
     return (
@@ -535,89 +535,7 @@ function UsfullyActiveCallContent() {
     );
   }
 
-  return (
-    <View style={styles.videoCallShell}>
-      <View style={styles.videoStage}>
-        {remoteParticipant ? (
-          <ParticipantView participant={remoteParticipant} style={styles.videoStageFill} />
-        ) : (
-          <View style={styles.videoFallbackStage}>
-            <UserRound size={54} color="#FFFFFF" />
-            <Text style={styles.videoFallbackTitle}>Esperando a tu pareja</Text>
-            <Text style={styles.videoFallbackSubtitle}>{statusText}</Text>
-          </View>
-        )}
-
-        {remoteParticipants.length === 0 ? (
-          <View style={styles.videoWaitingState}>
-            <Avatar uri={partnerAvatarUrl} label={partnerName} size={84} />
-            <Text style={styles.videoWaitingTitle}>{partnerName}</Text>
-            <Text style={styles.videoWaitingText}>{statusText}</Text>
-          </View>
-        ) : null}
-
-        <View style={styles.videoTopInfo}>
-          <Pressable style={styles.videoMinimizeButton}>
-            <ChevronDown size={20} color="#FFFFFF" />
-          </Pressable>
-          <Text style={styles.videoTitle}>Videollamada</Text>
-          <Text style={styles.videoStatus}>{statusText}</Text>
-        </View>
-
-        <View style={styles.localPreviewCard}>
-          {localParticipant && !cameraMuted ? (
-            <ParticipantView participant={localParticipant} style={styles.videoStageFill} />
-          ) : (
-            <View style={styles.localPreviewFallback}>
-              <CameraOff size={24} color="#FFFFFF" />
-              <Text style={styles.localPreviewFallbackText}>Tú</Text>
-            </View>
-          )}
-        </View>
-      </View>
-
-      <View style={styles.videoBottomInfo}>
-        <Text style={styles.videoPartnerName}>{partnerName}</Text>
-      </View>
-
-      <View style={styles.videoControlsRow}>
-        <ControlButton
-          icon={microphoneMuted ? <MicOff size={22} color="#FFFFFF" /> : <Mic size={22} color="#FFFFFF" />}
-          label="Micrófono"
-          dark
-          active={!microphoneMuted}
-          onPress={() => {
-            void toggleMicrophone();
-          }}
-        />
-        <ControlButton
-          icon={cameraMuted ? <CameraOff size={22} color="#FFFFFF" /> : <Camera size={22} color="#FFFFFF" />}
-          label="Cámara"
-          dark
-          active={!cameraMuted}
-          onPress={() => {
-            void toggleCamera();
-          }}
-        />
-        <ControlButton
-          icon={<RefreshCw size={20} color="#FFFFFF" />}
-          label="Cambiar cámara"
-          dark
-          onPress={() => {
-            void flipCamera();
-          }}
-        />
-        <ControlButton
-          icon={<PhoneOff size={22} color="#FFFFFF" />}
-          label="Finalizar"
-          danger
-          onPress={() => {
-            void onEnd('user');
-          }}
-        />
-      </View>
-    </View>
-  );
+  return <ActiveMessagesVideoCall partnerName={partnerName} partnerAvatarUrl={partnerAvatarUrl} onEnd={onEnd} />;
 }
 
 function CallTypePill({ icon, label }: { icon: React.ReactNode; label: string }) {
@@ -935,6 +853,35 @@ const styles = StyleSheet.create({
     position: 'relative',
     backgroundColor: '#111',
   },
+  videoSlotMainContainer: {
+    flex: 1,
+    backgroundColor: '#111',
+  },
+  videoSlotMainRtcView: {
+    width: '100%',
+    height: '100%',
+  },
+  videoSlotMainParticipantView: {
+    width: '100%',
+    height: '100%',
+  },
+  videoSlotMainPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    backgroundColor: '#111',
+  },
+  videoSlotMainPlaceholderTitle: {
+    color: '#FFFFFF',
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  videoSlotMainPlaceholderSubtitle: {
+    color: 'rgba(255,255,255,0.72)',
+    fontSize: 14,
+    fontWeight: '700',
+  },
   videoStageFill: {
     width: '100%',
     height: '100%',
@@ -979,7 +926,6 @@ const styles = StyleSheet.create({
   },
   videoTopInfo: {
     position: 'absolute',
-    top: 62,
     left: 24,
     right: 24,
     alignItems: 'center',
@@ -1008,46 +954,128 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: 'rgba(255,255,255,0.82)',
   },
-  localPreviewCard: {
+  pipPosition: {
     position: 'absolute',
-    right: 18,
-    top: 118,
-    width: 112,
-    height: 164,
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.22,
+    shadowRadius: 16,
+    zIndex: 100,
+    elevation: 100,
+  },
+  pipCard: {
+    width: '100%',
+    height: '100%',
     borderRadius: 24,
     overflow: 'hidden',
+    backgroundColor: 'rgba(18,16,24,0.84)',
     borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.2)',
-    backgroundColor: 'rgba(255,255,255,0.14)',
+    borderColor: 'rgba(255,255,255,0.12)',
   },
-  localPreviewFallback: {
-    flex: 1,
+  pipVideoHost: {
+    ...StyleSheet.absoluteFillObject,
+    borderRadius: 24,
+    overflow: 'hidden',
+  },
+  videoSlotPipRtcView: {
+    ...StyleSheet.absoluteFillObject,
+    width: '100%',
+    height: '100%',
+    borderRadius: 24,
+  },
+  videoSlotPipParticipantView: {
+    ...StyleSheet.absoluteFillObject,
+    width: '100%',
+    height: '100%',
+    borderRadius: 24,
+    overflow: 'hidden',
+  },
+  videoSlotPipPlaceholder: {
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    gap: 6,
+    backgroundColor: 'rgba(18,16,24,0.84)',
   },
-  localPreviewFallbackText: {
+  videoSlotPipPlaceholderText: {
     marginTop: 6,
     color: '#FFFFFF',
     fontSize: 13,
     fontWeight: '800',
   },
-  videoBottomInfo: {
-    paddingHorizontal: 24,
-    paddingTop: 14,
+  pipOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    justifyContent: 'flex-end',
+    alignItems: 'flex-start',
+    paddingLeft: 10,
+    paddingBottom: 10,
+    zIndex: 5,
+    elevation: 5,
+  },
+  pipLabelChip: {
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 999,
+    backgroundColor: 'rgba(15,12,18,0.64)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+  },
+  localPreviewBadgeText: {
+    color: '#FFFFFF',
+    fontSize: 11,
+    fontWeight: '800',
+  },
+  videoPartnerInfo: {
+    position: 'absolute',
+    left: 24,
+    right: 24,
     alignItems: 'center',
   },
   videoPartnerName: {
     color: '#FFFFFF',
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '900',
+    textShadowColor: 'rgba(0,0,0,0.28)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 8,
   },
-  videoControlsRow: {
+  videoControlsDock: {
+    position: 'absolute',
+    alignSelf: 'center',
     flexDirection: 'row',
-    paddingHorizontal: 16,
-    paddingTop: 18,
-    paddingBottom: 34,
-    gap: 10,
+    alignItems: 'center',
+    gap: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 30,
+    backgroundColor: 'rgba(16, 12, 20, 0.42)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.12)',
+    shadowColor: '#000000',
+    shadowOffset: { width: 0, height: 10 },
+    shadowOpacity: 0.2,
+    shadowRadius: 24,
+    elevation: 14,
+  },
+  videoControlButton: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1,
+  },
+  videoControlButtonNeutral: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderColor: 'rgba(255,255,255,0.14)',
+  },
+  videoControlButtonActive: {
+    backgroundColor: 'rgba(255,255,255,0.16)',
+    borderColor: 'rgba(255,255,255,0.22)',
+  },
+  videoControlButtonDanger: {
+    backgroundColor: 'rgba(240,111,143,0.96)',
+    borderColor: 'rgba(255,255,255,0.08)',
   },
   avatarFallback: {
     alignItems: 'center',

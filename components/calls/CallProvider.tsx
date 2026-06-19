@@ -19,6 +19,7 @@ import {
 } from '@stream-io/video-react-native-sdk';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Mic, Phone, PhoneOff, Video } from 'lucide-react-native';
+import { useAuth } from '../../lib/AuthProvider';
 import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
 import { supabase } from '../../lib/supabase';
 import { getStreamVideoClient, prepareMessagesStreamUsers, resetStreamVideoClient } from '../../lib/streamVideo';
@@ -41,6 +42,7 @@ type GlobalCallContextValue = {
   dismissFullCallOverlay: () => void;
   endGlobalCall: (reason?: EndCallReason) => Promise<void>;
   isStartingCall: boolean;
+  canStartCall: boolean;
   hasActiveCall: boolean;
   isFullCallOverlayVisible: boolean;
 };
@@ -88,12 +90,22 @@ function getOutgoingCallText(callType: MessagesCallKind, name: string) {
 
 export function CallProvider({ children }: { children: React.ReactNode }) {
   const insets = useSafeAreaInsets();
-  const { profile, couple } = useProfileAndCouple();
-  const currentUserId = profile?.id ?? null;
+  const { session, loading: authLoading } = useAuth();
+  const { couple, loading: coupleLoading } = useProfileAndCouple();
+  const authUser = session?.user ?? null;
+  const authReady = !authLoading;
+  const currentUserId = authUser?.id ?? null;
   const coupleId = couple?.couple_id ?? null;
   const partnerId = couple?.partner_id ?? null;
   const partnerName = couple?.partner_name || 'Pareja';
   const partnerAvatarUrl = couple?.partner_avatar_url ?? null;
+  const canStartCall =
+    authReady &&
+    !coupleLoading &&
+    Boolean(authUser?.id) &&
+    Boolean(coupleId) &&
+    Boolean(partnerId) &&
+    partnerId !== authUser?.id;
 
   const [activeCallRecord, setActiveCallRecord] = React.useState<CoupleCallRecord | null>(null);
   const [incomingCallRecord, setIncomingCallRecord] = React.useState<CoupleCallRecord | null>(null);
@@ -119,6 +131,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const callRecordIdRef = React.useRef<string | null>(null);
   const roleRef = React.useRef<MessagesCallRole | null>(null);
   const phaseRef = React.useRef<CallPhase>('idle');
+  const callStatusRef = React.useRef<'idle' | 'ringing' | 'connecting' | 'connected' | 'ending'>('idle');
   const isCallConnectedRef = React.useRef(false);
   const isEndingCallRef = React.useRef(false);
   const isStartingCallRef = React.useRef(false);
@@ -150,6 +163,10 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   React.useEffect(() => {
     phaseRef.current = phase;
   }, [phase]);
+
+  React.useEffect(() => {
+    callStatusRef.current = callStatus;
+  }, [callStatus]);
 
   React.useEffect(() => {
     isCallConnectedRef.current = isCallConnected;
@@ -364,7 +381,22 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      if (!currentUserId) {
+      if (!authReady || coupleLoading) {
+        return;
+      }
+
+      if (!authUser?.id) {
+        console.log('[GlobalCall] auth validation', {
+          hasAuthUser: Boolean(authUser),
+          authUserId: authUser?.id ?? null,
+          hasSupabaseSession: Boolean(session),
+          sessionUserId: session?.user?.id ?? null,
+          hasCurrentUserId: Boolean(currentUserId),
+          currentUserId: currentUserId ?? null,
+          authReady,
+          hasCoupleId: Boolean(coupleId),
+          hasPartnerId: Boolean(partnerId),
+        });
         Alert.alert('Error de llamada', 'Tu sesión no está disponible. Inténtalo de nuevo.');
         return;
       }
@@ -379,7 +411,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      if (currentUserId === partnerId) {
+      if (partnerId === authUser.id) {
         Alert.alert('Error de llamada', 'No puedes iniciar una llamada contigo mismo.');
         return;
       }
@@ -401,7 +433,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
           .from('couple_calls')
           .insert({
             couple_id: coupleId,
-            caller_id: currentUserId,
+            caller_id: authUser.id,
             recipient_id: partnerId,
             stream_call_id: nextStreamCallId,
             call_type: kind,
@@ -431,6 +463,8 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
 
         console.log('[MessagesCall] stage: prepare-stream-users-server-side');
         await prepareMessagesStreamUsers({
+          callId: createdRecord.stream_call_id,
+          callType: createdRecord.call_type,
           recipientId: partnerId,
           recipientName: partnerName,
           recipientImage: partnerAvatarUrl,
@@ -441,7 +475,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
           ring: true,
           video: createdRecord.call_type === 'video',
           data: {
-            members: [{ user_id: currentUserId }, { user_id: partnerId }],
+            members: [{ user_id: authUser.id }, { user_id: partnerId }],
             custom: {
               app_context: 'messages',
               call_kind: createdRecord.call_type,
@@ -491,11 +525,15 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       clearGlobalCallState,
       coupleId,
       currentUserId,
+      authReady,
+      authUser,
+      coupleLoading,
       ensureStreamClientReady,
       partnerAvatarUrl,
       partnerId,
       partnerName,
       scheduleRingingTimeout,
+      session,
     ]
   );
 
@@ -648,6 +686,128 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     ]
   );
 
+  const bindActiveStreamCall = React.useCallback((call: StreamSdkCall | null) => {
+    activeStreamCallRef.current = call;
+  }, []);
+
+  const syncActiveCallRecord = React.useCallback(
+    (record: CoupleCallRecord, nextRole: MessagesCallRole) => {
+      const currentRecord = activeCallRecordRef.current;
+      const sameRecord =
+        currentRecord?.id === record.id &&
+        currentRecord?.status === record.status &&
+        currentRecord?.stream_call_id === record.stream_call_id &&
+        currentRecord?.call_type === record.call_type;
+
+      beginCallSession(record.id);
+
+      if (sameRecord && roleRef.current === nextRole) {
+        return;
+      }
+
+      assignActiveCallState(record, nextRole);
+    },
+    [assignActiveCallState, beginCallSession]
+  );
+
+  const persistAcceptedCall = React.useCallback(
+    async (record: CoupleCallRecord) => {
+      const answeredAt = new Date().toISOString();
+      const { data, error } = await supabase
+        .from('couple_calls')
+        .update({
+          status: 'accepted',
+          answered_at: answeredAt,
+          updated_at: answeredAt,
+        })
+        .eq('id', record.id)
+        .eq('status', 'ringing')
+        .select('*')
+        .single();
+
+      if (!error && data) {
+        const acceptedRecord = data as CoupleCallRecord;
+        const currentRecord = activeCallRecordRef.current;
+        const sameRecord =
+          currentRecord?.id === acceptedRecord.id &&
+          currentRecord?.status === acceptedRecord.status &&
+          roleRef.current === 'recipient';
+
+        if (!sameRecord) {
+          assignActiveCallState(acceptedRecord, 'recipient');
+        }
+      }
+    },
+    [assignActiveCallState]
+  );
+
+  const handleCallingStateChanged = React.useCallback(
+    (state: CallingState, nextRole: MessagesCallRole, record: CoupleCallRecord | null) => {
+      if (state === CallingState.RINGING) {
+        if (callStatusRef.current !== 'ringing') {
+          setCallStatus('ringing');
+        }
+        return;
+      }
+
+      if (state === CallingState.JOINING || state === CallingState.RECONNECTING) {
+        if (callStatusRef.current !== 'connecting') {
+          setCallStatus('connecting');
+        }
+        if (phaseRef.current !== 'connecting') {
+          setPhase('connecting');
+        }
+        if (isCallConnectedRef.current) {
+          setIsCallConnected(false);
+        }
+        return;
+      }
+
+      if (state === CallingState.JOINED) {
+        if (callStatusRef.current !== 'connected') {
+          setCallStatus('connected');
+        }
+        if (phaseRef.current !== 'active') {
+          setPhase('active');
+        }
+        if (!isCallConnectedRef.current) {
+          setIsCallConnected(true);
+        }
+
+        if (record) {
+          const nextRecord = record.status === 'accepted' ? record : { ...record, status: 'accepted' as const };
+          const currentRecord = activeCallRecordRef.current;
+          const sameRecord =
+            currentRecord?.id === nextRecord.id &&
+            currentRecord?.status === nextRecord.status &&
+            currentRecord?.stream_call_id === nextRecord.stream_call_id &&
+            currentRecord?.call_type === nextRecord.call_type &&
+            roleRef.current === nextRole;
+
+          if (!sameRecord) {
+            assignActiveCallState(nextRecord, nextRole);
+          }
+        }
+        return;
+      }
+
+      if (state === CallingState.LEFT) {
+        const hasLiveState =
+          Boolean(activeCallRecordRef.current) ||
+          Boolean(incomingCallRecordRef.current) ||
+          phaseRef.current !== 'idle' ||
+          callStatusRef.current !== 'idle' ||
+          isCallConnectedRef.current;
+
+        if (hasLiveState) {
+          setIsCallConnected(false);
+          clearGlobalCallState();
+        }
+      }
+    },
+    [assignActiveCallState, clearGlobalCallState]
+  );
+
   React.useEffect(() => {
     if (!coupleId || !currentUserId) return;
 
@@ -732,6 +892,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       dismissFullCallOverlay,
       endGlobalCall,
       isStartingCall,
+      canStartCall,
       hasActiveCall: Boolean(activeCallRecord),
       isFullCallOverlayVisible,
     }),
@@ -741,6 +902,7 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       endGlobalCall,
       isFullCallOverlayVisible,
       isStartingCall,
+      canStartCall,
       openFullCallOverlay,
       startGlobalCall,
     ]
@@ -757,62 +919,11 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
             partnerAvatarUrl={partnerAvatarUrl}
             preferredStreamCallId={streamCallId}
             resolveCallRecord={fetchCallRecordByStreamCallId}
-            bindActiveCall={(call) => {
-              activeStreamCallRef.current = call;
-            }}
-            syncCallRecord={(record, nextRole) => {
-              beginCallSession(record.id);
-              assignActiveCallState(record, nextRole);
-            }}
-            persistAccepted={async (record) => {
-              const answeredAt = new Date().toISOString();
-              const { data, error } = await supabase
-                .from('couple_calls')
-                .update({
-                  status: 'accepted',
-                  answered_at: answeredAt,
-                  updated_at: answeredAt,
-                })
-                .eq('id', record.id)
-                .eq('status', 'ringing')
-                .select('*')
-                .single();
-
-              if (!error && data) {
-                const acceptedRecord = data as CoupleCallRecord;
-                assignActiveCallState(acceptedRecord, 'recipient');
-              }
-            }}
+            bindActiveCall={bindActiveStreamCall}
+            syncCallRecord={syncActiveCallRecord}
+            persistAccepted={persistAcceptedCall}
             endCall={endGlobalCall}
-            onCallingStateChanged={(state, nextRole, record) => {
-              if (state === CallingState.RINGING) {
-                setCallStatus('ringing');
-                return;
-              }
-
-              if (state === CallingState.JOINING || state === CallingState.RECONNECTING) {
-                setCallStatus('connecting');
-                setPhase('connecting');
-                setIsCallConnected(false);
-                return;
-              }
-
-              if (state === CallingState.JOINED) {
-                setCallStatus('connected');
-                setPhase('active');
-                setIsCallConnected(true);
-                if (record) {
-                  const nextRecord = record.status === 'accepted' ? record : { ...record, status: 'accepted' as const };
-                  assignActiveCallState(nextRecord, nextRole);
-                }
-                return;
-              }
-
-              if (state === CallingState.LEFT) {
-                setIsCallConnected(false);
-                clearGlobalCallState();
-              }
-            }}
+            onCallingStateChanged={handleCallingStateChanged}
             clearState={clearGlobalCallState}
           />
           <View pointerEvents="box-none" style={styles.host}>

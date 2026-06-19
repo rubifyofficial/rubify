@@ -72,7 +72,7 @@ export default function MensajesScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { profile, couple } = useProfileAndCouple();
-  const { startGlobalCall, isStartingCall } = useGlobalCall();
+  const { startGlobalCall, isStartingCall, canStartCall } = useGlobalCall();
   
   const [messages, setMessages] = useState<any[]>([]);
   const [inputText, setInputText] = useState('');
@@ -298,16 +298,16 @@ export default function MensajesScreen() {
 
         <View style={s.hdrActions}>
           <Pressable
-            style={[s.hdrBtn, isStartingCall && s.hdrBtnDisabled]}
+            style={[s.hdrBtn, (isStartingCall || !canStartCall) && s.hdrBtnDisabled]}
             onPress={handleStartAudioCall}
-            disabled={isStartingCall}
+            disabled={isStartingCall || !canStartCall}
           >
             <Phone size={20} color={TEXT_DARK} />
           </Pressable>
           <Pressable
-            style={[s.hdrBtn, isStartingCall && s.hdrBtnDisabled]}
+            style={[s.hdrBtn, (isStartingCall || !canStartCall) && s.hdrBtnDisabled]}
             onPress={handleStartVideoCall}
-            disabled={isStartingCall}
+            disabled={isStartingCall || !canStartCall}
           >
             <Video size={20} color={TEXT_DARK} />
           </Pressable>

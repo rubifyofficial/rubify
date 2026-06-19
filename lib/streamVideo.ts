@@ -131,16 +131,29 @@ const mapStreamPrepareUsersErrorToUserMessage = (technicalMessage: string) => {
 };
 
 export const prepareMessagesStreamUsers = async ({
+  callId,
+  callType,
   recipientId,
   recipientName,
   recipientImage,
 }: {
+  callId: string;
+  callType: 'audio' | 'video';
   recipientId: string;
   recipientName?: string;
   recipientImage?: string | null;
 }) => {
+  console.log('[MessagesCall] preparing server call', {
+    hasCallId: Boolean(callId),
+    callType,
+    hasRecipientId: Boolean(recipientId),
+    hasRecipientName: Boolean(recipientName),
+  });
+
   const { data, error } = await supabase.functions.invoke('stream-create-call', {
     body: {
+      callId,
+      callType,
       recipientId,
       recipientName,
       recipientImage,
@@ -148,21 +161,38 @@ export const prepareMessagesStreamUsers = async ({
   });
 
   if (error) {
-    const safeResponseText = await readFunctionErrorBody((error as any)?.context);
-    const technicalMessage = `Stream prepare users failed: ${(error as any)?.message ?? String(error)}${
-      safeResponseText ? ` | ${safeResponseText}` : ''
+    let safeFunctionBody = '';
+
+    try {
+      if ((error as any)?.context instanceof Response) {
+        safeFunctionBody = (await (error as any).context.text()).trim();
+      } else {
+        safeFunctionBody = await readFunctionErrorBody((error as any)?.context);
+      }
+    } catch {
+      safeFunctionBody = '';
+    }
+
+    const technicalMessage = `stream-create-call failed: ${(error as any)?.message ?? String(error)}${
+      safeFunctionBody ? ` | ${safeFunctionBody}` : ''
     }`;
 
-    console.log('[StreamCreateCall] Edge Function invoke failed', {
-      name: (error as any)?.name ?? null,
+    console.error('[MessagesCall] stream-create-call failed', {
       message: (error as any)?.message ?? String(error),
-      safeResponseText: safeResponseText || null,
+      response: safeFunctionBody || null,
     });
 
     throw createCallSetupError(technicalMessage, mapStreamPrepareUsersErrorToUserMessage(technicalMessage));
   }
 
   const payload = (data ?? {}) as StreamPrepareUsersResponse;
+
+  console.log('[MessagesCall] stream-create-call response', {
+    hasData: Boolean(data),
+    created: (data as any)?.created,
+    usersReady: payload.usersReady,
+    callIdMatches: (data as any)?.callId === callId,
+  });
 
   if (payload.usersReady !== true) {
     throw createCallSetupError(
@@ -216,7 +246,7 @@ export const getStreamVideoClient = async () => {
 
   const { data: profile, error: profileError } = await supabase
     .from('profiles')
-    .select('id, full_name, name, avatar_url, photo_url')
+    .select('id, name, avatar_url, photo_url')
     .eq('id', user.id)
     .maybeSingle();
 
@@ -293,7 +323,7 @@ export const getStreamVideoClient = async () => {
 
   const streamUser = {
     id: user.id,
-    name: profile?.full_name || profile?.name || 'Usfully',
+    name: profile?.name || 'Usfully',
     image: profile?.avatar_url || profile?.photo_url || undefined,
   };
 

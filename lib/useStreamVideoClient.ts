@@ -11,7 +11,6 @@ type StreamTokenResponse = {
 
 type ProfileRow = {
   id: string;
-  full_name?: string | null;
   name?: string | null;
   avatar_url?: string | null;
   photo_url?: string | null;
@@ -65,7 +64,7 @@ export function useStreamVideoClientForUsfully() {
 
         const { data: profileData, error: profileError } = await supabase
           .from('profiles')
-          .select('id, full_name, name, avatar_url, photo_url')
+          .select('id, name, avatar_url, photo_url')
           .eq('id', user.id)
           .maybeSingle();
 
@@ -104,7 +103,7 @@ export function useStreamVideoClientForUsfully() {
 
         const streamUser: User = {
           id: user.id,
-          name: profile?.full_name || profile?.name || 'Usfully',
+          name: profile?.name || 'Usfully',
           image: profile?.avatar_url || profile?.photo_url || undefined,
         };
 
