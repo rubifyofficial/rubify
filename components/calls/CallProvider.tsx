@@ -11,6 +11,7 @@ import {
   View,
 } from 'react-native';
 import Constants from 'expo-constants';
+import * as Notifications from 'expo-notifications';
 import {
   CallingState,
   StreamVideo,
@@ -20,6 +21,13 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Mic, Phone, PhoneOff, Video } from 'lucide-react-native';
 import { useAuth } from '../../lib/AuthProvider';
+import {
+  parseIncomingCallPushData,
+  sendCallNotification,
+  sendTestPushToSelf,
+  type IncomingCallPushData,
+} from '../../lib/pushNotifications';
+import { registerPushNotifications } from '../../lib/registerPushNotifications';
 import { useProfileAndCouple } from '../../lib/useProfileAndCouple';
 import { supabase } from '../../lib/supabase';
 import { getStreamVideoClient, prepareMessagesStreamUsers, resetStreamVideoClient } from '../../lib/streamVideo';
@@ -56,6 +64,15 @@ const ACTIVE = '#F4A6A6';
 const TEXT_DARK = '#241D22';
 const TEXT_MUTED = '#8D6675';
 const BORDER = '#F3D9E2';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowBanner: true,
+    shouldShowList: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 const buildMessagesStreamCallId = (coupleId: string) => `messages-call-${coupleId}-${Date.now()}`;
 
@@ -138,11 +155,13 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const isJoiningCallRef = React.useRef(false);
   const openedAcceptedOverlayRef = React.useRef<string | null>(null);
   const handledTerminalKeysRef = React.useRef<Set<string>>(new Set());
+  const handledNotificationIdsRef = React.useRef<Set<string>>(new Set());
   const providerStartedAtRef = React.useRef(Date.now());
   const subscriptionReadyRef = React.useRef(false);
   const currentSessionCallIdRef = React.useRef<string | null>(null);
   const currentStreamUserIdRef = React.useRef<string | null>(null);
   const activeStreamCallRef = React.useRef<StreamSdkCall | null>(null);
+  const registeredPushTokenUserIdRef = React.useRef<string | null>(null);
 
   React.useEffect(() => {
     activeCallRecordRef.current = activeCallRecord;
@@ -312,6 +331,42 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     [coupleId, currentUserId]
   );
 
+  const fetchCallRecordById = React.useCallback(
+    async (nextCallRecordId: string) => {
+      if (!nextCallRecordId || !currentUserId || !coupleId) {
+        return null;
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from('couple_calls')
+          .select('*')
+          .eq('id', nextCallRecordId)
+          .eq('couple_id', coupleId)
+          .maybeSingle();
+
+        if (error || !data) {
+          return null;
+        }
+
+        const record = data as CoupleCallRecord;
+        const isCaller = String(record.caller_id) === String(currentUserId);
+        const isRecipient = String(record.recipient_id) === String(currentUserId);
+        if (!isCaller && !isRecipient) {
+          return null;
+        }
+
+        return record;
+      } catch (error) {
+        console.log('[GlobalCall] call record fetch by id failed', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return null;
+      }
+    },
+    [coupleId, currentUserId]
+  );
+
   const shouldHandleTerminalRealtime = React.useCallback((record: CoupleCallRecord) => {
     if (!subscriptionReadyRef.current) return false;
     if (!currentSessionCallIdRef.current) return false;
@@ -331,6 +386,92 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   const dismissFullCallOverlay = React.useCallback(() => {
     setIsFullCallOverlayVisible(false);
   }, []);
+
+  const handleIncomingCallNotification = React.useCallback(
+    async (payload: IncomingCallPushData) => {
+      if (!currentUserId || !coupleId) {
+        return;
+      }
+
+      const nextCallRecordId = payload.callRecordId?.trim();
+      if (!nextCallRecordId || handledNotificationIdsRef.current.has(nextCallRecordId)) {
+        return;
+      }
+
+      handledNotificationIdsRef.current.add(nextCallRecordId);
+
+      try {
+        console.log('[PushTap] notification tapped', payload);
+        const record = await fetchCallRecordById(nextCallRecordId);
+        if (!record) {
+          showNotice('La llamada ya no está disponible.');
+          return;
+        }
+
+        const isCaller = String(record.caller_id) === String(currentUserId);
+        const isRecipient = String(record.recipient_id) === String(currentUserId);
+        if (!isCaller && !isRecipient) {
+          return;
+        }
+
+        if (record.status === 'rejected' || record.status === 'cancelled' || record.status === 'ended') {
+          showNotice('La llamada ya terminó.');
+          return;
+        }
+
+        const nextRole: MessagesCallRole = isCaller ? 'caller' : 'recipient';
+
+        beginCallSession(record.id);
+        setCallKind(record.call_type);
+        setStreamCallId(record.stream_call_id);
+        setCallRecordId(record.id);
+        setRole(nextRole);
+
+        try {
+          const nextClient = await ensureStreamClientReady();
+          const nextCall = nextClient.call('default', record.stream_call_id, { reuseInstance: true });
+          await nextCall.get({ video: record.call_type === 'video' });
+          activeStreamCallRef.current = nextCall;
+        } catch (error) {
+          console.log('[GlobalCall] notification stream warmup failed', {
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+
+        if (record.status === 'ringing' && nextRole === 'recipient') {
+          presentIncomingCallRecord(record, 'incoming_decision');
+          return;
+        }
+
+        if (record.status === 'accepted') {
+          clearRingingTimeout();
+          setIncomingCallRecord(null);
+          setIsIncomingVisible(false);
+          assignActiveCallState(record, nextRole);
+          setCallStatus('connecting');
+          setPhase('connecting');
+          setIsCallConnected(false);
+          setIsFullCallOverlayVisible(true);
+          return;
+        }
+      } catch (error) {
+        console.log('[GlobalCall] notification tap handling failed', {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    },
+    [
+      assignActiveCallState,
+      beginCallSession,
+      clearRingingTimeout,
+      coupleId,
+      currentUserId,
+      ensureStreamClientReady,
+      fetchCallRecordById,
+      presentIncomingCallRecord,
+      showNotice,
+    ]
+  );
 
 
   const scheduleRingingTimeout = React.useCallback(
@@ -457,6 +598,38 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
         setIsCallConnected(false);
         setIsFullCallOverlayVisible(false);
         scheduleRingingTimeout(createdRecord);
+        void (async () => {
+          try {
+            const { data: partnerTokenRow, error: partnerTokenError } = await supabase
+              .from('push_tokens')
+              .select('expo_push_token')
+              .eq('user_id', partnerId)
+              .limit(1)
+              .maybeSingle();
+
+            console.log('[CallPush] partner token status', {
+              partnerId,
+              hasPartnerToken: Boolean(partnerTokenRow?.expo_push_token),
+              error: partnerTokenError?.message ?? null,
+            });
+          } catch (partnerTokenLookupError) {
+            console.log('[CallPush] partner token lookup failed', {
+              partnerId,
+              message:
+                partnerTokenLookupError instanceof Error
+                  ? partnerTokenLookupError.message
+                  : String(partnerTokenLookupError),
+            });
+          }
+
+          try {
+            await sendCallNotification(createdRecord.id);
+          } catch (notificationError) {
+            console.log('[GlobalCall] send call notification failed', {
+              message: notificationError instanceof Error ? notificationError.message : String(notificationError),
+            });
+          }
+        })();
 
         console.log('[MessagesCall] stage: get-stream-token');
         const nextClient = await ensureStreamClientReady();
@@ -836,6 +1009,8 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
     let cancelled = false;
 
     if (!currentUserId) {
+      handledNotificationIdsRef.current.clear();
+      registeredPushTokenUserIdRef.current = null;
       currentStreamUserIdRef.current = null;
       setStreamClient(null);
       void resetStreamVideoClient();
@@ -865,11 +1040,98 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
   }, [currentUserId, ensureStreamClientReady, streamClient]);
 
   React.useEffect(() => {
+    if (!currentUserId) {
+      registeredPushTokenUserIdRef.current = null;
+      return;
+    }
+
+    if (registeredPushTokenUserIdRef.current === currentUserId) {
+      return;
+    }
+
+    registeredPushTokenUserIdRef.current = currentUserId;
+    void registerPushNotifications().catch((error) => {
+      console.log('[Push] registration failed', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    });
+  }, [currentUserId]);
+
+  React.useEffect(() => {
+    if (!currentUserId) {
+      return;
+    }
+
+    let cancelled = false;
+    void supabase
+      .from('profiles')
+      .select('expo_push_token, push_token_updated_at')
+      .eq('id', currentUserId)
+      .maybeSingle()
+      .then(({ data, error }) => {
+        if (cancelled) {
+          return;
+        }
+
+        console.log('[Push] current user token saved?', {
+          currentUserId,
+          hasToken: Boolean(data?.expo_push_token),
+          updatedAt: data?.push_token_updated_at ?? null,
+          error: error?.message ?? null,
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUserId, coupleId]);
+
+  React.useEffect(() => {
+    if (!currentUserId || !coupleId) {
+      return;
+    }
+
+    let cancelled = false;
+    void Notifications.getLastNotificationResponseAsync().then((response) => {
+      console.log('[PushTap] last response', Boolean(response));
+      if (cancelled || !response) {
+        return;
+      }
+
+      const pushData = parseIncomingCallPushData((response.notification.request.content.data ?? null) as Record<string, unknown> | null);
+      if (!pushData) {
+        return;
+      }
+
+      void handleIncomingCallNotification(pushData);
+    });
+
+    const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const pushData = parseIncomingCallPushData((response.notification.request.content.data ?? null) as Record<string, unknown> | null);
+      if (!pushData) {
+        return;
+      }
+
+      void handleIncomingCallNotification(pushData);
+    });
+
+    return () => {
+      cancelled = true;
+      subscription.remove();
+    };
+  }, [coupleId, currentUserId, handleIncomingCallNotification]);
+
+  React.useEffect(() => {
     if (!currentUserId) return;
 
     const subscription = AppState.addEventListener('change', (nextState) => {
       if (nextState === 'active') {
         void ensureStreamClientReady();
+        void registerPushNotifications().catch((error) => {
+          console.log('[Push] registration failed', {
+            message: error instanceof Error ? error.message : String(error),
+          });
+        });
       }
     });
 
@@ -877,6 +1139,20 @@ export function CallProvider({ children }: { children: React.ReactNode }) {
       subscription.remove();
     };
   }, [currentUserId, ensureStreamClientReady]);
+
+  React.useEffect(() => {
+    if (!__DEV__) {
+      return;
+    }
+
+    (globalThis as typeof globalThis & { sendTestPushToSelf?: () => Promise<void> }).sendTestPushToSelf = async () => {
+      await sendTestPushToSelf();
+    };
+
+    return () => {
+      delete (globalThis as typeof globalThis & { sendTestPushToSelf?: () => Promise<void> }).sendTestPushToSelf;
+    };
+  }, []);
 
   React.useEffect(() => {
     return () => {

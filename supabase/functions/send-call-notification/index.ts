@@ -20,17 +20,13 @@ type SendCallNotificationRequest = {
 
 type CoupleCallRecord = {
   id: string;
+  couple_id: string;
   caller_id: string;
   recipient_id: string;
   stream_call_id: string;
   call_type: 'audio' | 'video';
   status: 'ringing' | 'accepted' | 'rejected' | 'cancelled' | 'ended';
   created_at: string;
-};
-
-type CallerProfile = {
-  id: string;
-  name?: string | null;
 };
 
 type PushTokenRow = {
@@ -57,6 +53,7 @@ const isCallRecent = (createdAt?: string | null) => {
 };
 
 const isExpoPushToken = (value: string) => /^ExponentPushToken\[[^\]]+\]$/.test(value);
+const maskToken = (value: string) => (value.length <= 10 ? value : `${value.slice(0, 8)}...${value.slice(-6)}`);
 
 serve(async (req) => {
   if (req.method === 'OPTIONS') {
@@ -89,6 +86,10 @@ serve(async (req) => {
       return jsonResponse({ error: 'Invalid call notification request.' }, 400);
     }
 
+    console.log('[send-call-notification] start', {
+      callRecordId,
+    });
+
     const authClient = createClient(supabaseUrl, supabaseAnonKey, {
       global: {
         headers: {
@@ -108,24 +109,25 @@ serve(async (req) => {
       return jsonResponse({ error: 'Unauthorized' }, 401);
     }
 
-    const [
-      { data: profileData, error: profileError },
-      { data: callData, error: callError },
-    ] = await Promise.all([
-      authClient.rpc('get_my_profile'),
-      adminClient
-        .from('couple_calls')
-        .select('id, caller_id, recipient_id, stream_call_id, call_type, status, created_at')
-        .eq('id', callRecordId)
-        .maybeSingle(),
-    ]);
+    const { data: callData, error: callError } = await adminClient
+      .from('couple_calls')
+      .select('id, couple_id, caller_id, recipient_id, stream_call_id, call_type, status, created_at')
+      .eq('id', callRecordId)
+      .maybeSingle();
 
-    if (profileError || callError || !callData) {
+    if (callError || !callData) {
       return jsonResponse({ error: 'Call notification lookup failed.' }, 500);
     }
 
-    const callerProfile = (Array.isArray(profileData) ? profileData[0] : profileData) as CallerProfile | null;
     const callRecord = callData as CoupleCallRecord;
+
+    console.log('[send-call-notification] call record', {
+      callRecordId: callRecord.id,
+      recipientId: callRecord.recipient_id,
+      callKind: callRecord.call_type,
+      hasStreamCallId: Boolean(callRecord.stream_call_id),
+      status: callRecord.status,
+    });
 
     if (callRecord.caller_id !== user.id) {
       return jsonResponse({ error: 'Forbidden' }, 403);
@@ -137,7 +139,17 @@ serve(async (req) => {
       !callRecord.stream_call_id ||
       !isCallRecent(callRecord.created_at)
     ) {
-      return jsonResponse({ sent: true, recipientTokenCount: 0 }, 200);
+      return jsonResponse(
+        {
+          ok: true,
+          sent: false,
+          hasToken: false,
+          reason: 'call_not_ringing_or_expired',
+          expoStatus: null,
+          recipientTokenCount: 0,
+        },
+        200
+      );
     }
 
     const { data: tokenRows, error: tokenError } = await adminClient
@@ -157,16 +169,30 @@ serve(async (req) => {
       )
     );
 
+    console.log('[send-call-notification] recipient token', {
+      recipientId: callRecord.recipient_id,
+      hasToken: expoPushTokens.length > 0,
+      tokenPreview: expoPushTokens[0] ? maskToken(expoPushTokens[0]) : null,
+      tokenCount: expoPushTokens.length,
+    });
+
     if (expoPushTokens.length === 0) {
-      return jsonResponse({ sent: true, recipientTokenCount: 0 }, 200);
+      return jsonResponse(
+        {
+          ok: true,
+          sent: false,
+          hasToken: false,
+          reason: 'missing_recipient_push_token',
+          expoStatus: null,
+          recipientTokenCount: 0,
+        },
+        200
+      );
     }
 
-    const callerName = normalizeOptionalText(callerProfile?.name) ?? 'Tu pareja';
     const isVideoCall = callRecord.call_type === 'video';
     const title = isVideoCall ? 'Videollamada entrante' : 'Llamada entrante';
-    const bodyText = isVideoCall
-      ? `${callerName} quiere hacer una videollamada contigo`
-      : `${callerName} te está llamando`;
+    const bodyText = 'Tu pareja te está llamando';
 
     const pushMessages = expoPushTokens.map((token) => ({
       to: token,
@@ -174,12 +200,15 @@ serve(async (req) => {
       title,
       body: bodyText,
       priority: 'high',
-      channelId: 'incoming-calls',
+      channelId: 'calls',
       data: {
         type: 'incoming_call',
         callRecordId: callRecord.id,
+        coupleId: callRecord.couple_id,
+        callerId: callRecord.caller_id,
+        recipientId: callRecord.recipient_id,
+        callKind: callRecord.call_type,
         streamCallId: callRecord.stream_call_id,
-        callType: callRecord.call_type,
       },
     }));
 
@@ -192,10 +221,22 @@ serve(async (req) => {
     });
 
     if (!expoResponse.ok) {
+      const responseBody = await expoResponse.text();
       console.log('[send-call-notification] expo push send failed', {
         status: expoResponse.status,
+        body: responseBody,
       });
-      return jsonResponse({ error: 'Push delivery failed.' }, 502);
+      return jsonResponse(
+        {
+          ok: false,
+          sent: false,
+          hasToken: true,
+          reason: 'expo_push_failed',
+          expoStatus: String(expoResponse.status),
+          details: responseBody,
+        },
+        502
+      );
     }
 
     const expoPayload = (await expoResponse.json()) as {
@@ -204,6 +245,11 @@ serve(async (req) => {
         details?: { error?: string };
       }>;
     };
+
+    console.log('[send-call-notification] expo response', {
+      status: expoResponse.status,
+      body: expoPayload,
+    });
 
     const invalidTokens = expoPushTokens.filter((token, index) => {
       const entry = expoPayload.data?.[index];
@@ -221,8 +267,13 @@ serve(async (req) => {
 
     return jsonResponse(
       {
+        ok: true,
         sent: true,
+        hasToken: true,
+        reason: null,
+        expoStatus: 'ok',
         recipientTokenCount: expoPushTokens.length,
+        details: expoPayload,
       },
       200
     );

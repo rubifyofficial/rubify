@@ -4,7 +4,6 @@ import { Camera as ExpoCamera } from 'expo-camera';
 import Constants from 'expo-constants';
 import {
   CallingState,
-  ParticipantView,
   StreamCall,
   StreamVideo,
   callManager,
@@ -13,17 +12,14 @@ import {
   type StreamVideoClient,
 } from '@stream-io/video-react-native-sdk';
 import {
-  Camera,
-  CameraOff,
   ChevronDown,
   Mic,
   MicOff,
   PhoneOff,
-  RefreshCw,
   Volume2,
   VolumeX,
-  UserRound,
 } from 'lucide-react-native';
+import { ActiveMessagesVideoCall } from './ActiveMessagesVideoCall';
 
 export type MessagesCallKind = 'audio' | 'video';
 export type MessagesCallStatus = 'idle' | 'connecting' | 'ringing' | 'connected' | 'error';
@@ -51,8 +47,6 @@ type MessagesCallOverlayProps = {
 };
 
 const getMessagesCallId = (coupleId: string) => `messages-call-${coupleId}`;
-const getParticipantUserId = (participant: any) =>
-  participant?.userId || participant?.user_id || participant?.user?.id || null;
 
 const reportMessagesCallDebug = (hypothesisId: string, location: string, msg: string, data?: Record<string, unknown>) => {
   void fetch(MESSAGES_CALL_DEBUG_URL, {
@@ -464,7 +458,6 @@ export function MessagesCallOverlay({
                 callKind={callKind}
                 partnerName={partnerName}
                 partnerAvatarUrl={partnerAvatarUrl}
-                currentUserId={currentUserId}
                 role={role}
                 callRecordStatus={callRecordStatus}
                 callStatus={callStatus}
@@ -485,7 +478,6 @@ function MessagesCallOverlayContent({
   callKind,
   partnerName,
   partnerAvatarUrl,
-  currentUserId,
   role,
   callRecordStatus,
   callStatus,
@@ -497,7 +489,6 @@ function MessagesCallOverlayContent({
   callKind: MessagesCallKind;
   partnerName: string;
   partnerAvatarUrl?: string | null;
-  currentUserId?: string | null;
   role: MessagesCallRole | null;
   callRecordStatus: 'ringing' | 'accepted' | 'rejected' | 'cancelled' | 'ended' | null;
   callStatus: MessagesCallStatus;
@@ -506,30 +497,23 @@ function MessagesCallOverlayContent({
   onEnd: () => void;
   onMinimize?: () => void;
 }) {
-  const { useCallCallingState, useMicrophoneState, useCameraState, useParticipants } = useCallStateHooks();
+  const { useCallCallingState, useMicrophoneState, useRemoteParticipants } = useCallStateHooks();
   const callingState = useCallCallingState();
   const { microphone, optimisticIsMute: microphoneMuted } = useMicrophoneState();
-  const { camera, optimisticIsMute: cameraMuted } = useCameraState();
-  const participants = useParticipants();
+  const remoteParticipants = useRemoteParticipants();
 
-  const [speakerOn, setSpeakerOn] = React.useState(callKind === 'video');
+  const [speakerOn, setSpeakerOn] = React.useState(false);
   const [connectedAt, setConnectedAt] = React.useState<number | null>(null);
   const [elapsedSeconds, setElapsedSeconds] = React.useState(0);
 
-  const remoteParticipants = participants.filter(
-    (participant) => String((participant as any)?.userId || (participant as any)?.user?.id || '') !== String(currentUserId ?? '')
-  );
-  const remoteParticipant = remoteParticipants[0];
-  const localParticipant =
-    participants.find((participant) => String(getParticipantUserId(participant)) === String(currentUserId ?? '')) ||
-    participants.find((participant) => participant?.isLocalParticipant);
-
   React.useEffect(() => {
+    if (callKind !== 'audio') return;
+
     callManager.start({
       audioRole: 'communicator',
-      deviceEndpointType: callKind === 'audio' ? 'earpiece' : 'speaker',
+      deviceEndpointType: 'earpiece',
     });
-    callManager.speaker.setForceSpeakerphoneOn(callKind === 'video');
+    callManager.speaker.setForceSpeakerphoneOn(false);
 
     return () => {
       callManager.stop();
@@ -586,22 +570,6 @@ function MessagesCallOverlayContent({
     }
   }, [microphone]);
 
-  const toggleCamera = React.useCallback(async () => {
-    try {
-      await camera.toggle();
-    } catch (error) {
-      console.log('[MessagesCallOverlay] camera toggle error:', error);
-    }
-  }, [camera]);
-
-  const flipCamera = React.useCallback(async () => {
-    try {
-      await camera.flip();
-    } catch (error) {
-      console.log('[MessagesCallOverlay] camera flip error:', error);
-    }
-  }, [camera]);
-
   if (callKind === 'audio') {
     return (
       <View style={styles.audioCallShell}>
@@ -651,85 +619,13 @@ function MessagesCallOverlayContent({
   }
 
   return (
-    <View style={styles.videoCallShell}>
-      <View style={styles.videoStage}>
-        {callingState === CallingState.JOINED && remoteParticipant ? (
-          <ParticipantView participant={remoteParticipant} style={styles.videoStageFill} />
-        ) : (
-          <View style={styles.videoFallbackStage}>
-            <UserRound size={54} color="#FFFFFF" />
-            <Text style={styles.videoFallbackTitle}>Esperando a tu pareja</Text>
-            <Text style={styles.videoFallbackSubtitle}>{statusText}</Text>
-          </View>
-        )}
-
-        {remoteParticipants.length === 0 ? (
-          <View style={styles.videoWaitingState}>
-            <AvatarCircle uri={partnerAvatarUrl} label={partnerName} size={84} />
-            <Text style={styles.videoWaitingTitle}>{partnerName}</Text>
-            <Text style={styles.videoWaitingText}>{statusText}</Text>
-          </View>
-        ) : null}
-
-        <View style={styles.videoTopInfo}>
-          <Pressable style={styles.videoMinimizeButton} onPress={onMinimize}>
-            <ChevronDown size={20} color="#FFFFFF" />
-          </Pressable>
-          <Text style={styles.videoTitle}>Videollamada</Text>
-          <Text style={styles.videoStatus}>{statusText}</Text>
-        </View>
-
-        <View style={styles.localPreviewCard}>
-          {callingState === CallingState.JOINED && localParticipant && !cameraMuted ? (
-            <ParticipantView participant={localParticipant} style={styles.videoStageFill} />
-          ) : (
-            <View style={styles.localPreviewFallback}>
-              <CameraOff size={24} color="#FFFFFF" />
-              <Text style={styles.localPreviewFallbackText}>Tú</Text>
-            </View>
-          )}
-        </View>
-      </View>
-
-      <View style={styles.videoBottomInfo}>
-        <Text style={styles.videoPartnerName}>{partnerName}</Text>
-      </View>
-
-      <View style={styles.videoControlsRow}>
-        <ControlButton
-          icon={microphoneMuted ? <MicOff size={22} color="#FFFFFF" /> : <Mic size={22} color="#FFFFFF" />}
-          label="Micrófono"
-          dark
-          active={!microphoneMuted}
-          onPress={() => {
-            void toggleMicrophone();
-          }}
-        />
-        <ControlButton
-          icon={cameraMuted ? <CameraOff size={22} color="#FFFFFF" /> : <Camera size={22} color="#FFFFFF" />}
-          label="Cámara"
-          dark
-          active={!cameraMuted}
-          onPress={() => {
-            void toggleCamera();
-          }}
-        />
-        <ControlButton
-          icon={<RefreshCw size={20} color="#FFFFFF" />}
-          label="Cambiar cámara"
-          dark
-          onPress={() => {
-            void flipCamera();
-          }}
-        />
-        <ControlButton
-          icon={<PhoneOff size={22} color="#FFFFFF" />}
-          label="Finalizar"
-          danger
-          onPress={onEnd}
-        />
-      </View>
-    </View>
+    <ActiveMessagesVideoCall
+      partnerName={partnerName}
+      partnerAvatarUrl={partnerAvatarUrl}
+      onEnd={async () => {
+        onEnd();
+      }}
+    />
   );
 }
 

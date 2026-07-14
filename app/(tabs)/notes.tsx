@@ -18,7 +18,6 @@ import {
   PaintBucket,
   Palette,
   Plus,
-  Sparkles,
   Trash2,
   Type,
   X
@@ -50,6 +49,7 @@ import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-g
 import Animated, { runOnJS, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import FastDrawingSurface from '../../components/FastDrawingSurface';
+import { CustomStickerIcon } from '../../components/icons/CustomStickerIcon';
 import {
   DrawingBrushPreview as SharedDrawingBrushPreview,
   DrawingBrushType as SharedDrawingBrushType,
@@ -3185,7 +3185,7 @@ export default function NotesScreen() {
                         accessibilityLabel="Stickers"
                         accessibilityState={{ selected: editorCategory === 'sticker' }}
                       >
-                        <Sparkles size={18} color={editorCategory === 'sticker' ? '#B2547C' : TEXT_SOFT} />
+                        <CustomStickerIcon size={24} opacity={0.65} />
                       </Pressable>
                       <Pressable
                         style={[s.toolChip, editorCategory === 'bucket' && s.toolChipActive]}

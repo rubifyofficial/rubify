@@ -55,6 +55,7 @@ module.exports = () => ({
           recordAudioAndroid: true,
         },
       ],
+      'expo-audio',
       [
         'expo-media-library',
         {
